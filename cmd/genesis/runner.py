@@ -13,6 +13,15 @@ from pathlib import Path
 from typing import Any
 
 
+# This row and id are coupled to the pinned 0.1.5rc1 sdk-minimal profile.
+SESSION_LOG_OFF_PATCH = """\
+- id: session-log-deepseek
+  name: '@deepseek-ai/dsh-session-log-deepseek'
+  config:
+    enabled: false
+"""
+
+
 @contextmanager
 def complete_environment(environment: Mapping[str, str]) -> Iterator[None]:
     previous = os.environ.copy()
@@ -61,6 +70,8 @@ def execute(
         sort_keys=True,
     )
     with tempfile.TemporaryDirectory(prefix=f"{invocation['run_id']}-") as dsh_home:
+        patch_path = Path(dsh_home) / "session-log-off.patch.yml"
+        patch_path.write_text(SESSION_LOG_OFF_PATCH, encoding="utf-8")
         with complete_environment(invocation["env"]):
             with harness_factory(
                 provider="deepseek-official",
@@ -69,6 +80,7 @@ def execute(
                 runtime_cwd=dsh_home,
                 dsh_home=dsh_home,
                 profile="sdk-minimal",
+                patches=(str(patch_path),),
             ) as harness:
                 result = harness.run(message)
 

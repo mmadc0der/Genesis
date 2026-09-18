@@ -84,6 +84,9 @@ No match returns `204`. Each one-shot runner uses a fresh temporary Harness
 home, invokes `provider="deepseek-official"`, model `deepseek-v4-flash`, and
 profile `sdk-minimal`, and deletes the home afterward. The compact JSON
 serialization of the complete CloudEvent is the sole session user message.
+For the pinned `0.1.5rc1` profile, the runner also supplies a per-run Cordis
+patch setting `session-log-deepseek.enabled: false`; canonical DeepSeek API
+requests therefore do not upload or append session-trace suffixes.
 
 Genesis emits JSON logs. The completion record contains `genesis_run_id`,
 `rule`, `deepseek_session_id`, `finish_reason`, `final_response`, `error_type`,

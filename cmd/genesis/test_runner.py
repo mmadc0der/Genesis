@@ -24,10 +24,15 @@ class FakeHarness:
         self.environment = dict(os.environ)
         self.message = None
         self.home_existed = False
+        self.patch_existed = False
+        self.patch_contents = None
         self.__class__.instances.append(self)
 
     def __enter__(self):
         self.home_existed = Path(self.kwargs["dsh_home"]).is_dir()
+        patch_path = Path(self.kwargs["patches"][0])
+        self.patch_existed = patch_path.is_file()
+        self.patch_contents = patch_path.read_text(encoding="utf-8")
         return self
 
     def __exit__(self, _kind, _error, _traceback):
@@ -85,7 +90,7 @@ class RunnerTests(unittest.TestCase):
             {
                 key: value
                 for key, value in harness.kwargs.items()
-                if key not in {"dsh_home", "runtime_cwd"}
+                if key not in {"dsh_home", "runtime_cwd", "patches"}
             },
             {
                 "provider": "deepseek-official",
@@ -101,6 +106,40 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(harness.home_existed)
         self.assertFalse(Path(harness.kwargs["dsh_home"]).exists())
         self.assertEqual(dict(os.environ), environment_before)
+
+    def test_execute_supplies_version_coupled_session_log_privacy_patch(self):
+        runner.execute(
+            {
+                "event": {
+                    "specversion": "1.0",
+                    "id": "event-privacy",
+                    "source": "urn:test",
+                    "type": "dev.genesis.test",
+                },
+                "rule": "privacy.yaml",
+                "run_id": "gen_privacy",
+                "cwd": str(Path.cwd().resolve()),
+                "env": {"DEEPSEEK_API_KEY": "test-key"},
+            },
+            harness_factory=FakeHarness,
+        )
+
+        harness = FakeHarness.instances[0]
+        patch_path = (
+            Path(harness.kwargs["dsh_home"]) / "session-log-off.patch.yml"
+        )
+        self.assertEqual(harness.kwargs["patches"], (str(patch_path),))
+        self.assertTrue(harness.patch_existed)
+        self.assertEqual(
+            harness.patch_contents,
+            """\
+- id: session-log-deepseek
+  name: '@deepseek-ai/dsh-session-log-deepseek'
+  config:
+    enabled: false
+""",
+        )
+        self.assertFalse(patch_path.exists())
 
     def test_validation_rejects_non_string_environment_values(self):
         with self.assertRaisesRegex(ValueError, "env"):
