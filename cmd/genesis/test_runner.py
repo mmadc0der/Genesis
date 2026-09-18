@@ -7,8 +7,8 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
-
 
 RUNNER_PATH = Path(__file__).with_name("runner.py")
 SPEC = importlib.util.spec_from_file_location("genesis_runner", RUNNER_PATH)
@@ -18,7 +18,7 @@ SPEC.loader.exec_module(runner)
 
 
 class FakeHarness:
-    instances = []
+    instances: ClassVar[list] = []
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -234,7 +234,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout.getvalue()), result)
 
     def test_validation_rejects_non_string_environment_values(self):
-        with self.assertRaisesRegex(ValueError, "env"):
+        with self.assertRaisesRegex(TypeError, "env"):
             runner.validate_invocation(
                 {
                     "event": {},

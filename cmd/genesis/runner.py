@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run one Genesis invocation through the official DeepSeek Harness SDK."""
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-
 
 # This row and id are coupled to the pinned 0.1.5rc1 sdk-minimal profile.
 SESSION_LOG_OFF_PATCH = """\
@@ -36,9 +34,9 @@ def complete_environment(environment: Mapping[str, str]) -> Iterator[None]:
 
 def validate_invocation(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ValueError("invocation must be a JSON object")
+        raise TypeError("invocation must be a JSON object")
     if not isinstance(value.get("event"), dict):
-        raise ValueError("event must be a JSON object")
+        raise TypeError("event must be a JSON object")
     for field in ("rule", "run_id", "cwd"):
         if not isinstance(value.get(field), str) or not value[field]:
             raise ValueError(f"{field} must be a non-empty string")
@@ -49,7 +47,7 @@ def validate_invocation(value: Any) -> dict[str, Any]:
         isinstance(key, str) and isinstance(item, str)
         for key, item in environment.items()
     ):
-        raise ValueError("env must be an object of string values")
+        raise TypeError("env must be an object of string values")
     return value
 
 
@@ -72,8 +70,9 @@ def execute(
     with tempfile.TemporaryDirectory(prefix=f"{invocation['run_id']}-") as dsh_home:
         patch_path = Path(dsh_home) / "session-log-off.patch.yml"
         patch_path.write_text(SESSION_LOG_OFF_PATCH, encoding="utf-8")
-        with complete_environment(invocation["env"]):
-            with harness_factory(
+        with (
+            complete_environment(invocation["env"]),
+            harness_factory(
                 provider="deepseek-official",
                 model="deepseek-v4-flash",
                 cwd=invocation["cwd"],
@@ -81,8 +80,9 @@ def execute(
                 dsh_home=dsh_home,
                 profile="sdk-minimal",
                 patches=(str(patch_path),),
-            ) as harness:
-                result = harness.run(message)
+            ) as harness,
+        ):
+            result = harness.run(message)
 
     finish_reason = result.finish_reason
     final_response = result.final_response
@@ -152,7 +152,7 @@ def main() -> int:
         invocation = json.load(sys.stdin)
         output = execute(invocation)
         status = 0 if output["error"] is None else 1
-    except Exception as error:  # The Go parent records this structured failure.
+    except Exception as error:  # noqa: BLE001 - return process errors to Go.
         output = {
             "deepseek_session_id": None,
             "finish_reason": None,
