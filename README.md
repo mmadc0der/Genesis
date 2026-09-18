@@ -101,7 +101,8 @@ go vet ./...
 go test ./...
 go test -race ./...
 python3 -m unittest discover -s cmd/genesis -p 'test_*.py'
-python3 -m py_compile cmd/genesis/runner.py cmd/genesis/test_runner.py
+PYTHONPYCACHEPREFIX=/tmp/genesis-pycache \
+  python3 -m py_compile cmd/genesis/runner.py cmd/genesis/test_runner.py
 go build -o /tmp/genesis ./cmd/genesis
 ```
 
