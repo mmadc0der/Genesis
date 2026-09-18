@@ -104,11 +104,17 @@ run:
     MARKER: from-rule
 YAML
 
-PATH="$tmp/bin:$PATH" go run ./cmd/genesis \
+go build -o "$tmp/genesis" ./cmd/genesis
+PATH="$tmp/bin:$PATH" "$tmp/genesis" \
   -listen 127.0.0.1:18787 -rules "$tmp/rules" \
   >"$tmp/server.log" 2>&1 &
 server_pid=$!
-trap 'kill "$server_pid" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+cleanup() {
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
 
 ready=
 for _ in $(seq 1 100); do
@@ -136,9 +142,7 @@ done
 test -f "$tmp/result" || { cat "$tmp/server.log"; exit 1; }
 cat "$tmp/result"
 
-kill "$server_pid"
-wait "$server_pid" 2>/dev/null || true
-rm -rf "$tmp"
+cleanup
 trap - EXIT
 ```
 
