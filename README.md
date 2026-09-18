@@ -148,7 +148,8 @@ run:
 YAML
 
 go build -o "$tmp/genesis" ./cmd/genesis
-GENESIS_CAPTURE="$tmp/invocation.json" PATH="$tmp/bin:$PATH" \
+env -u DEEPSEEK_API_KEY \
+  GENESIS_CAPTURE="$tmp/invocation.json" PATH="$tmp/bin:$PATH" \
   "$tmp/genesis" -listen 127.0.0.1:18787 -rules "$tmp/rules" \
   >"$tmp/server.log" 2>&1 &
 server_pid=$!
@@ -190,6 +191,8 @@ done
 test -f "$tmp/invocation.json" || { cat "$tmp/server.log"; exit 1; }
 grep -q '"msg":"Genesis run finished"' "$tmp/server.log" ||
   { cat "$tmp/server.log"; exit 1; }
+! grep -q 'DEEPSEEK_API_KEY' "$tmp/invocation.json" ||
+  { cat "$tmp/invocation.json"; exit 1; }
 cat "$tmp/invocation.json"
 cat "$tmp/server.log"
 
