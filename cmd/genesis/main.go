@@ -45,6 +45,7 @@ func main() {
 			rulesDir: absoluteRulesDir,
 			runner:   runner,
 			newRunID: newGenesisRunID,
+			apiKey:   inheritedAPIKey(),
 			logger:   logger,
 		},
 		ReadHeaderTimeout: 5 * time.Second,
@@ -62,4 +63,8 @@ func main() {
 func fail(logger *slog.Logger, message string, err error) {
 	logger.Error(message, "error", err)
 	os.Exit(1)
+}
+
+func inheritedAPIKey() string {
+	return os.Getenv(deepSeekAPIKey)
 }

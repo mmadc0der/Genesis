@@ -100,13 +100,20 @@ class RunnerTests(unittest.TestCase):
             "run_id": "gen_test",
             "cwd": workspace,
             "env": {
-                "DEEPSEEK_API_KEY": "test-key",
+                "DEEPSEEK_API_KEY": "genesis-key",
                 "ONLY_DECLARED": "yes",
             },
         }
-        environment_before = dict(os.environ)
-
-        result = runner.execute(invocation, harness_factory=FakeHarness)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_API_KEY": "ambient-key-must-not-win",
+                "AMBIENT_ONLY": "must-not-leak",
+            },
+        ):
+            environment_before = dict(os.environ)
+            result = runner.execute(invocation, harness_factory=FakeHarness)
+            self.assertEqual(dict(os.environ), environment_before)
 
         self.assertEqual(
             result,
@@ -140,7 +147,31 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertTrue(harness.home_existed)
         self.assertFalse(Path(harness.kwargs["dsh_home"]).exists())
-        self.assertEqual(dict(os.environ), environment_before)
+        self.assertEqual(harness.environment["DEEPSEEK_API_KEY"], "genesis-key")
+        self.assertNotIn("AMBIENT_ONLY", harness.environment)
+
+    def test_execute_allows_missing_api_key_for_credential_free_tests(self):
+        result = runner.execute(
+            {
+                "event": {
+                    "specversion": "1.0",
+                    "id": "event-no-key",
+                    "source": "urn:test",
+                    "type": "dev.genesis.test",
+                },
+                "rule": "no-key.yaml",
+                "run_id": "gen_no_key",
+                "cwd": str(Path.cwd().resolve()),
+                "env": {"ONLY_DECLARED": "yes"},
+            },
+            harness_factory=FakeHarness,
+        )
+
+        self.assertEqual(result["finish_reason"], "completed")
+        self.assertEqual(
+            FakeHarness.instances[0].environment,
+            {"ONLY_DECLARED": "yes"},
+        )
 
     def test_execute_supplies_version_coupled_session_log_privacy_patch(self):
         runner.execute(
@@ -251,7 +282,11 @@ class RunnerTests(unittest.TestCase):
         with (
             mock.patch.object(sys, "stdin", stdin),
             mock.patch.object(sys, "stdout", stdout),
-            mock.patch.object(runner, "execute", side_effect=RuntimeError("boom")),
+            mock.patch.object(
+                runner,
+                "execute",
+                side_effect=RuntimeError("DEEPSEEK_API_KEY is not set"),
+            ),
         ):
             status = runner.main()
 
@@ -263,7 +298,10 @@ class RunnerTests(unittest.TestCase):
                 "finish_reason": None,
                 "final_response": None,
                 "diagnostics": None,
-                "error": {"type": "RuntimeError", "message": "boom"},
+                "error": {
+                    "type": "RuntimeError",
+                    "message": "DEEPSEEK_API_KEY is not set",
+                },
             },
         )
 

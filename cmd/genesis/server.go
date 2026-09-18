@@ -20,6 +20,7 @@ import (
 
 const (
 	cloudEventsJSON = "application/cloudevents+json"
+	deepSeekAPIKey  = "DEEPSEEK_API_KEY"
 	maxEventBytes   = 1 << 20
 )
 
@@ -57,6 +58,7 @@ type eventServer struct {
 	rulesDir string
 	runner   invocationRunner
 	newRunID func() (string, error)
+	apiKey   string
 	logger   *slog.Logger
 }
 
@@ -124,7 +126,7 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Rule:  matched.name,
 			RunID: runID,
 			Cwd:   matched.Run.Cwd,
-			Env:   matched.Run.Env,
+			Env:   runtimeEnvironment(matched.Run.Env, s.apiKey),
 		})
 		accepted = append(accepted, acceptedRun{Rule: matched.name, RunID: runID})
 	}
@@ -153,6 +155,17 @@ func newGenesisRunID() (string, error) {
 		return "", err
 	}
 	return "gen_" + hex.EncodeToString(random[:]), nil
+}
+
+func runtimeEnvironment(declared map[string]string, apiKey string) map[string]string {
+	environment := make(map[string]string, len(declared)+1)
+	for key, value := range declared {
+		environment[key] = value
+	}
+	if apiKey != "" {
+		environment[deepSeekAPIKey] = apiKey
+	}
+	return environment
 }
 
 func decodeCloudEvent(w http.ResponseWriter, r *http.Request) (cloudEvent, error) {
@@ -273,6 +286,9 @@ func (r rule) validate() error {
 		return errors.New("run.cwd must contain no NUL")
 	}
 	for key, value := range r.Run.Env {
+		if key == deepSeekAPIKey {
+			return fmt.Errorf("run.env must not declare %s; Genesis inherits it", deepSeekAPIKey)
+		}
 		if key == "" || strings.Contains(key, "=") || strings.ContainsRune(key, '\x00') {
 			return fmt.Errorf("invalid run.env key %q", key)
 		}

@@ -31,6 +31,7 @@ func (f *fakeRunner) Run(document invocation) {
 }
 
 func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
+	t.Setenv(deepSeekAPIKey, "process-secret")
 	rulesDir := t.TempDir()
 	firstCwd := t.TempDir()
 	secondCwd := t.TempDir()
@@ -66,6 +67,7 @@ func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
 			runIDs = runIDs[1:]
 			return runID, nil
 		},
+		apiKey: inheritedAPIKey(),
 	}
 	event := map[string]any{
 		"specversion": "1.0",
@@ -123,11 +125,17 @@ func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
 		}
 	}
 	if got := invocations["01-first.yaml"]; got.Cwd != firstCwd ||
-		!reflect.DeepEqual(got.Env, map[string]string{"TOKEN": "first"}) {
+		!reflect.DeepEqual(got.Env, map[string]string{
+			"TOKEN":        "first",
+			deepSeekAPIKey: "process-secret",
+		}) {
 		t.Fatalf("first invocation = %#v", got)
 	}
 	if got := invocations["02-second.yaml"]; got.Cwd != secondCwd ||
-		!reflect.DeepEqual(got.Env, map[string]string{"TOKEN": "second"}) {
+		!reflect.DeepEqual(got.Env, map[string]string{
+			"TOKEN":        "second",
+			deepSeekAPIKey: "process-secret",
+		}) {
 		t.Fatalf("second invocation = %#v", got)
 	}
 }
@@ -171,6 +179,9 @@ func TestEventServerReloadsRulesEveryRequest(t *testing.T) {
 		if document.Rule != "reload.yaml" {
 			t.Fatalf("rule = %q", document.Rule)
 		}
+		if _, present := document.Env[deepSeekAPIKey]; present {
+			t.Fatalf("credential-free invocation inherited a key: %#v", document.Env)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("reloaded rule was not invoked")
 	}
@@ -211,6 +222,44 @@ run:
 	}
 	if _, err := loadRules(rulesDir); err == nil || !strings.Contains(err.Error(), "args") {
 		t.Fatalf("loadRules error = %v, want unknown args field", err)
+	}
+}
+
+func TestLoadRulesRejectsDeepSeekAPIKey(t *testing.T) {
+	rulesDir := t.TempDir()
+	contents := `
+match:
+  type: com.example.run
+run:
+  cwd: /tmp
+  env:
+    DEEPSEEK_API_KEY: must-not-live-in-rules
+`
+	if err := os.WriteFile(rulesDir+"/invalid.yaml", []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadRules(rulesDir); err == nil ||
+		!strings.Contains(err.Error(), "must not declare DEEPSEEK_API_KEY") {
+		t.Fatalf("loadRules error = %v, want inherited-key rejection", err)
+	}
+}
+
+func TestRuntimeEnvironmentUsesGenesisAPIKeyAndStaysIsolated(t *testing.T) {
+	declared := map[string]string{
+		"PATH":         "/rule/bin",
+		deepSeekAPIKey: "rule-secret",
+	}
+	environment := runtimeEnvironment(declared, "process-secret")
+
+	if environment[deepSeekAPIKey] != "process-secret" {
+		t.Fatalf("API key = %q", environment[deepSeekAPIKey])
+	}
+	if environment["PATH"] != "/rule/bin" || len(environment) != 2 {
+		t.Fatalf("runtime environment = %#v", environment)
+	}
+	environment["PATH"] = "/changed"
+	if declared["PATH"] != "/rule/bin" {
+		t.Fatal("runtime environment mutated the rule")
 	}
 }
 

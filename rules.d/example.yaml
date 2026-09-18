@@ -5,5 +5,4 @@ match:
 run:
   cwd: /tmp
   env:
-    DEEPSEEK_API_KEY: replace-with-a-real-key
     PATH: /usr/local/bin:/usr/bin:/bin

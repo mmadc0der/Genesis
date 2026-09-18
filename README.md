@@ -17,6 +17,7 @@ Go 1.22+, Python 3.10+, and
 
 ```sh
 uv sync --locked
+export DEEPSEEK_API_KEY='replace-with-a-real-key'
 
 mkdir -p bin
 go build -o bin/genesis ./cmd/genesis
@@ -40,7 +41,6 @@ match:
 run:
   cwd: /tmp
   env:
-    DEEPSEEK_API_KEY: replace-with-a-real-key
     PATH: /usr/local/bin:/usr/bin:/bin
 ```
 
@@ -49,9 +49,15 @@ CloudEvent attributes. Every matching rule runs, in lexical filename order,
 and the rules directory is reloaded for every request.
 
 The rule name is its filename. `run.cwd` must be absolute. `run.env` is the
-complete environment given to that rule's Harness runtime; server variables
-are not added. Rules have no arguments, prompt, model, executable, or agent
-configuration.
+complete non-secret environment given to that rule's Harness runtime. Genesis
+adds only `DEEPSEEK_API_KEY` from its own startup environment, and that value
+wins over all other sources. Declaring the key in `run.env` is rejected.
+Rules have no arguments, prompt, model, executable, or agent configuration.
+
+Genesis itself can start without a key, which keeps configuration checks and
+credential-free tests usable. A matching real SDK run without a key fails
+asynchronously and reports the SDK error through the normal structured
+completion diagnostics.
 
 ## HTTP and run results
 
@@ -197,7 +203,9 @@ Run `uv sync --locked`, export `DEEPSEEK_API_KEY`, and create a throwaway rule
 without committing the credential:
 
 ```sh
-: "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY first}"
+read -rsp 'DEEPSEEK_API_KEY: ' DEEPSEEK_API_KEY
+printf '\n'
+export DEEPSEEK_API_KEY
 mkdir -p /tmp/genesis-live-rules /tmp/genesis-live-work
 cat >/tmp/genesis-live-rules/live.yaml <<YAML
 match:
@@ -205,7 +213,6 @@ match:
 run:
   cwd: /tmp/genesis-live-work
   env:
-    DEEPSEEK_API_KEY: "$DEEPSEEK_API_KEY"
     HOME: "$HOME"
     LANG: "${LANG:-C.UTF-8}"
     PATH: "$PATH"
