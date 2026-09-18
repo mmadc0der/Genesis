@@ -40,6 +40,6 @@ func main() {
 		Handler:           &eventServer{rulesDir: absoluteRulesDir, dshPath: dshPath},
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("genesisd listening on %s with %d rule(s); dsh=%s", *listen, len(rules), dshPath)
+	log.Printf("genesis listening on %s with %d rule(s); dsh=%s", *listen, len(rules), dshPath)
 	log.Fatal(server.ListenAndServe())
 }
