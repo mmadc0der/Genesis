@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -159,9 +160,7 @@ class RunnerTests(unittest.TestCase):
         )
 
         harness = FakeHarness.instances[0]
-        patch_path = (
-            Path(harness.kwargs["dsh_home"]) / "session-log-off.patch.yml"
-        )
+        patch_path = Path(harness.kwargs["dsh_home"]) / "session-log-off.patch.yml"
         self.assertEqual(harness.kwargs["patches"], (str(patch_path),))
         self.assertTrue(harness.patch_existed)
         self.assertEqual(
@@ -269,18 +268,25 @@ class RunnerTests(unittest.TestCase):
         )
 
     def test_official_sdk_and_runtime_versions_are_paired(self):
-        requirements = (
-            Path(__file__).resolve().parents[2] / "requirements.txt"
-        ).read_text(encoding="utf-8")
-        pins = dict(
-            line.split("==", 1)
-            for line in requirements.splitlines()
-            if line.strip()
+        root = Path(__file__).resolve().parents[2]
+        pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+        dependencies = re.search(
+            r"(?ms)^dependencies\s*=\s*\[(.*?)^\]",
+            pyproject,
         )
-        self.assertEqual(pins["deepseek-harness-sdk"], "0.1.5rc1")
+        self.assertIsNotNone(dependencies)
+        pins = dict(
+            re.findall(
+                r'"([^"]+)==([^"]+)"',
+                dependencies.group(1),
+            )
+        )
         self.assertEqual(
-            pins["deepseek-harness-runtime-bin"],
-            pins["deepseek-harness-sdk"],
+            pins,
+            {
+                "deepseek-harness-runtime-bin": "0.1.5rc1",
+                "deepseek-harness-sdk": "0.1.5rc1",
+            },
         )
 
 

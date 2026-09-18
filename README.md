@@ -5,26 +5,26 @@ Harness session for every matching YAML rule. It builds one executable:
 `genesis`.
 
 Each session runs through the official Python SDK with the standalone
-`sdk-minimal` profile. `requirements.txt` pins the official
-`deepseek-harness-sdk` and `deepseek-harness-runtime-bin` packages to the same
-`0.1.5rc1` release. The runtime wheel supplies `dsh`; no `dsh` executable is
-looked up in `PATH`.
+`sdk-minimal` profile. `pyproject.toml` and the committed `uv.lock` pin the
+official `deepseek-harness-sdk` and `deepseek-harness-runtime-bin` packages to
+the same `0.1.5rc1` release. The runtime wheel supplies `dsh`; no `dsh`
+executable is looked up in `PATH`.
 
 ## Install and run
 
-Go 1.22+ and Python 3.10+ with `venv` support are required.
+Go 1.22+, Python 3.10+, and
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/) are required.
 
 ```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
+uv sync --locked
 
 mkdir -p bin
 go build -o bin/genesis ./cmd/genesis
-./bin/genesis -listen 127.0.0.1:8787 -rules rules.d
+uv run --locked ./bin/genesis -listen 127.0.0.1:8787 -rules rules.d
 ```
 
-Activate the virtual environment before starting Genesis. It resolves
+`uv run` places the managed `.venv` first in `PATH`. Equivalently, activate it
+with `. .venv/bin/activate` before running `./bin/genesis`. Genesis resolves
 `python3` once at startup and embeds its one-shot Python runner in the Go
 binary.
 
@@ -102,13 +102,18 @@ The ordinary checks use fake runners and a mocked SDK; they need no API key or
 network call:
 
 ```sh
+uv lock --check
+uv sync --locked
 test -z "$(gofmt -l cmd/genesis/*.go)"
+uv run --locked ruff format --check cmd/genesis/runner.py cmd/genesis/test_runner.py
+uv run --locked ruff check cmd/genesis/runner.py cmd/genesis/test_runner.py
 go vet ./...
 go test ./...
 go test -race ./...
-python3 -m unittest discover -s cmd/genesis -p 'test_*.py'
+uv run --locked python -m unittest discover -s cmd/genesis -p 'test_*.py'
 PYTHONPYCACHEPREFIX=/tmp/genesis-pycache \
-  python3 -m py_compile cmd/genesis/runner.py cmd/genesis/test_runner.py
+  uv run --locked python -m py_compile \
+    cmd/genesis/runner.py cmd/genesis/test_runner.py
 go build -o /tmp/genesis ./cmd/genesis
 ```
 
@@ -188,8 +193,8 @@ trap - EXIT
 
 ## Optional live verification
 
-Install the pinned requirements, export `DEEPSEEK_API_KEY`, and create a
-throwaway rule without committing the credential:
+Run `uv sync --locked`, export `DEEPSEEK_API_KEY`, and create a throwaway rule
+without committing the credential:
 
 ```sh
 : "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY first}"
@@ -206,7 +211,8 @@ run:
     PATH: "$PATH"
 YAML
 chmod 600 /tmp/genesis-live-rules/live.yaml
-./bin/genesis -listen 127.0.0.1:18787 -rules /tmp/genesis-live-rules
+uv run --locked ./bin/genesis \
+  -listen 127.0.0.1:18787 -rules /tmp/genesis-live-rules
 ```
 
 From another terminal, send:

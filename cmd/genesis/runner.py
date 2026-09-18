@@ -91,9 +91,7 @@ def execute(
         diagnostics = None
     else:
         error_type = (
-            "DeepSeekRunError"
-            if finish_reason == "error"
-            else "DeepSeekRunIncomplete"
+            "DeepSeekRunError" if finish_reason == "error" else "DeepSeekRunIncomplete"
         )
         reason = repr(finish_reason)
         empty_response = " with an empty final response" if not final_response else ""
@@ -128,10 +126,7 @@ def extract_diagnostics(result: Any) -> dict[str, Any]:
         event
         for event in events
         if isinstance(event.get("type"), str)
-        and (
-            "error" in event["type"].lower()
-            or event["type"] == "turn/end"
-        )
+        and ("error" in event["type"].lower() or event["type"] == "turn/end")
     ]
     selected_events = interesting if interesting else events[-8:]
 
