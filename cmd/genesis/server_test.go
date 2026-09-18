@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -14,141 +18,136 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-type fakeDshReport struct {
-	Cwd  string   `json:"cwd"`
-	Args []string `json:"args"`
-	Env  []string `json:"env"`
+type fakeRunner struct {
+	invocations chan invocation
+	release     <-chan struct{}
 }
 
-func TestFakeDshProcess(t *testing.T) {
-	if os.Getenv("GENESIS_FAKE_DSH") != "1" {
-		return
+func (f *fakeRunner) Run(document invocation) {
+	f.invocations <- document
+	if f.release != nil {
+		<-f.release
 	}
-
-	if gate := os.Getenv("GENESIS_FAKE_DSH_GATE"); gate != "" {
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			if _, err := os.Stat(gate); err == nil {
-				break
-			}
-			if time.Now().After(deadline) {
-				os.Exit(2)
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		os.Exit(3)
-	}
-	arguments := []string{}
-	for index, argument := range os.Args {
-		if argument == "--" {
-			arguments = append(arguments, os.Args[index+1:]...)
-			break
-		}
-	}
-	environment := os.Environ()
-	sort.Strings(environment)
-	report, err := json.Marshal(fakeDshReport{Cwd: cwd, Args: arguments, Env: environment})
-	if err != nil {
-		os.Exit(4)
-	}
-
-	output := os.Getenv("GENESIS_FAKE_DSH_OUTPUT")
-	if err := os.WriteFile(output+".tmp", report, 0o600); err != nil {
-		os.Exit(5)
-	}
-	if err := os.Rename(output+".tmp", output); err != nil {
-		os.Exit(6)
-	}
-	os.Exit(0)
 }
 
-func TestEventServerLaunchesFakeDshAsynchronously(t *testing.T) {
+func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
 	rulesDir := t.TempDir()
-	cwd := t.TempDir()
-	output := rulesDir + "/result.json"
-	gate := rulesDir + "/release"
-	writeRule(t, rulesDir+"/01-test.yaml", rule{
-		Match: map[string]string{
-			"type":    "com.example.run",
-			"source":  "urn:test",
-			"subject": "ready",
+	firstCwd := t.TempDir()
+	secondCwd := t.TempDir()
+	writeRule(t, rulesDir+"/01-first.yaml", rule{
+		Match: map[string]string{"type": "com.example.run"},
+		Run: runSpec{
+			Cwd: firstCwd,
+			Env: map[string]string{"TOKEN": "first"},
 		},
-		Run: fakeRun(cwd, output, gate, "alpha", "two words"),
+	})
+	writeRule(t, rulesDir+"/02-second.yaml", rule{
+		Match: map[string]string{"type": "com.example.run", "source": "urn:test"},
+		Run: runSpec{
+			Cwd: secondCwd,
+			Env: map[string]string{"TOKEN": "second"},
+		},
+	})
+	writeRule(t, rulesDir+"/03-other.yaml", rule{
+		Match: map[string]string{"type": "com.example.other"},
+		Run:   runSpec{Cwd: t.TempDir()},
 	})
 
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+	release := make(chan struct{})
+	defer close(release)
+	fake := &fakeRunner{invocations: make(chan invocation, 2), release: release}
+	runIDs := []string{"gen_first", "gen_second"}
+	server := &eventServer{
+		rulesDir: rulesDir,
+		runner:   fake,
+		logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		newRunID: func() (string, error) {
+			runID := runIDs[0]
+			runIDs = runIDs[1:]
+			return runID, nil
+		},
 	}
-	server := &eventServer{rulesDir: rulesDir, dshPath: executable}
-
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		done <- sendEvent(server, map[string]any{
-			"specversion": "1.0",
-			"id":          "evt-1",
-			"source":      "urn:test",
-			"type":        "com.example.run",
-			"subject":     "ready",
-			"data":        map[string]any{"ignored": true},
-		})
-	}()
-
-	var response *httptest.ResponseRecorder
-	select {
-	case response = <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler waited for dsh to exit")
+	event := map[string]any{
+		"specversion": "1.0",
+		"id":          "evt-1",
+		"source":      "urn:test",
+		"type":        "com.example.run",
+		"data": map[string]any{
+			"complete": true,
+			"items":    []any{"one", "two"},
+		},
 	}
+
+	response := sendEvent(server, event)
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if _, err := os.Stat(output); !os.IsNotExist(err) {
-		t.Fatalf("fake dsh exited before its gate was released: %v", err)
+	var accepted struct {
+		Runs []acceptedRun `json:"runs"`
 	}
-	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil {
 		t.Fatal(err)
 	}
+	wantAccepted := []acceptedRun{
+		{Rule: "01-first.yaml", RunID: "gen_first"},
+		{Rule: "02-second.yaml", RunID: "gen_second"},
+	}
+	if !reflect.DeepEqual(accepted.Runs, wantAccepted) {
+		t.Fatalf("accepted runs = %#v, want %#v", accepted.Runs, wantAccepted)
+	}
 
-	report := waitForReport(t, output)
-	if report.Cwd != cwd {
-		t.Fatalf("cwd = %q, want %q", report.Cwd, cwd)
+	invocations := map[string]invocation{}
+	for range 2 {
+		select {
+		case document := <-fake.invocations:
+			invocations[document.Rule] = document
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for asynchronous runner")
+		}
 	}
-	if want := []string{"alpha", "two words"}; !reflect.DeepEqual(report.Args, want) {
-		t.Fatalf("args = %#v, want %#v", report.Args, want)
+	for _, acceptedRun := range wantAccepted {
+		document := invocations[acceptedRun.Rule]
+		if document.RunID != acceptedRun.RunID {
+			t.Fatalf("%s run ID = %q, want %q", acceptedRun.Rule, document.RunID, acceptedRun.RunID)
+		}
+		var completeEvent map[string]any
+		contents, err := json.Marshal(document.Event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(contents, &completeEvent); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(completeEvent, event) {
+			t.Fatalf("%s event = %#v, want %#v", acceptedRun.Rule, completeEvent, event)
+		}
 	}
-	wantEnvironment := []string{
-		"GENESIS_FAKE_DSH=1",
-		"GENESIS_FAKE_DSH_GATE=" + gate,
-		"GENESIS_FAKE_DSH_OUTPUT=" + output,
-		"ONLY_DECLARED=yes",
+	if got := invocations["01-first.yaml"]; got.Cwd != firstCwd ||
+		!reflect.DeepEqual(got.Env, map[string]string{"TOKEN": "first"}) {
+		t.Fatalf("first invocation = %#v", got)
 	}
-	sort.Strings(wantEnvironment)
-	if !reflect.DeepEqual(report.Env, wantEnvironment) {
-		t.Fatalf("environment = %#v, want only %#v", report.Env, wantEnvironment)
+	if got := invocations["02-second.yaml"]; got.Cwd != secondCwd ||
+		!reflect.DeepEqual(got.Env, map[string]string{"TOKEN": "second"}) {
+		t.Fatalf("second invocation = %#v", got)
 	}
 }
 
-func TestEventServerExactMatchesAndReloadsEveryRequest(t *testing.T) {
+func TestEventServerReloadsRulesEveryRequest(t *testing.T) {
 	rulesDir := t.TempDir()
-	cwd := t.TempDir()
-	output := rulesDir + "/result.json"
 	rulePath := rulesDir + "/reload.yaml"
 	loadedRule := rule{
 		Match: map[string]string{"type": "com.example.run", "source": "urn:one"},
-		Run:   fakeRun(cwd, output, ""),
+		Run:   runSpec{Cwd: t.TempDir()},
 	}
 	writeRule(t, rulePath, loadedRule)
 
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+	fake := &fakeRunner{invocations: make(chan invocation, 1)}
+	server := &eventServer{
+		rulesDir: rulesDir,
+		runner:   fake,
+		newRunID: func() (string, error) { return "gen_reload", nil },
+		logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
-	server := &eventServer{rulesDir: rulesDir, dshPath: executable}
 	event := map[string]any{
 		"specversion": "1.0",
 		"id":          "evt-2",
@@ -160,9 +159,6 @@ func TestEventServerExactMatchesAndReloadsEveryRequest(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("non-match status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if _, err := os.Stat(output); !os.IsNotExist(err) {
-		t.Fatalf("non-matching event launched dsh: %v", err)
-	}
 
 	loadedRule.Match["source"] = "urn:two"
 	writeRule(t, rulePath, loadedRule)
@@ -170,11 +166,18 @@ func TestEventServerExactMatchesAndReloadsEveryRequest(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("reloaded match status = %d, body = %s", response.Code, response.Body.String())
 	}
-	_ = waitForReport(t, output)
+	select {
+	case document := <-fake.invocations:
+		if document.Rule != "reload.yaml" {
+			t.Fatalf("rule = %q", document.Rule)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reloaded rule was not invoked")
+	}
 }
 
 func TestEventServerRequiresStructuredCloudEvent(t *testing.T) {
-	server := &eventServer{rulesDir: t.TempDir(), dshPath: "/unused"}
+	server := &eventServer{rulesDir: t.TempDir()}
 
 	request := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(`{"specversion":"1.0"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -193,35 +196,119 @@ func TestEventServerRequiresStructuredCloudEvent(t *testing.T) {
 	}
 }
 
-func TestLoadRulesRejectsAnExecutableOverride(t *testing.T) {
+func TestLoadRulesRejectsRawArguments(t *testing.T) {
 	rulesDir := t.TempDir()
 	contents := `
 match:
   type: com.example.run
 run:
   cwd: /tmp
-  args: []
+  args: [unsafe]
   env: {}
-  executable: /bin/sh
 `
 	if err := os.WriteFile(rulesDir+"/invalid.yaml", []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadRules(rulesDir); err == nil || !strings.Contains(err.Error(), "executable") {
-		t.Fatalf("loadRules error = %v, want unknown executable field", err)
+	if _, err := loadRules(rulesDir); err == nil || !strings.Contains(err.Error(), "args") {
+		t.Fatalf("loadRules error = %v, want unknown args field", err)
 	}
 }
 
-func fakeRun(cwd, output, gate string, arguments ...string) runSpec {
-	return runSpec{
-		Cwd:  cwd,
-		Args: append([]string{"-test.run=^TestFakeDshProcess$", "--"}, arguments...),
-		Env: map[string]string{
-			"GENESIS_FAKE_DSH":        "1",
-			"GENESIS_FAKE_DSH_GATE":   gate,
-			"GENESIS_FAKE_DSH_OUTPUT": output,
-			"ONLY_DECLARED":           "yes",
+func TestNewGenesisRunID(t *testing.T) {
+	runID, err := newGenesisRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(runID, "gen_") {
+		t.Fatalf("run ID = %q", runID)
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(runID, "gen_"))
+	if err != nil || len(decoded) != 16 {
+		t.Fatalf("run ID random part = %q, error = %v", runID, err)
+	}
+}
+
+func TestProcessRunnerCapturesInvocationAndStructuredResult(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "invocation.json")
+	t.Setenv("GENESIS_CAPTURE", capture)
+	fakePython := writeExecutable(t, `
+#!/bin/sh
+/bin/cat >"$GENESIS_CAPTURE"
+printf '%s\n' '{"deepseek_session_id":"dsh-session-1","finish_reason":"completed","final_response":"done","error":null}'
+`)
+
+	var logs bytes.Buffer
+	runner := processRunner{
+		pythonPath: fakePython,
+		source:     "embedded runner source",
+		logger:     slog.New(slog.NewJSONHandler(&logs, nil)),
+	}
+	document := invocation{
+		Event: cloudEvent{
+			"specversion": json.RawMessage(`"1.0"`),
+			"id":          json.RawMessage(`"evt-3"`),
+			"source":      json.RawMessage(`"urn:test"`),
+			"type":        json.RawMessage(`"com.example.run"`),
 		},
+		Rule:  "test.yaml",
+		RunID: "gen_test",
+		Cwd:   "/workspace",
+		Env:   map[string]string{"ONLY": "declared"},
+	}
+	runner.Run(document)
+
+	var captured invocation
+	contents, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(contents, &captured); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(captured, document) {
+		t.Fatalf("captured invocation = %#v, want %#v", captured, document)
+	}
+
+	records := decodeLogRecords(t, logs.Bytes())
+	finished := records[len(records)-1]
+	for key, want := range map[string]any{
+		"level":               "INFO",
+		"genesis_run_id":      "gen_test",
+		"rule":                "test.yaml",
+		"deepseek_session_id": "dsh-session-1",
+		"finish_reason":       "completed",
+		"final_response":      "done",
+	} {
+		if got := finished[key]; got != want {
+			t.Fatalf("log %s = %#v, want %#v", key, got, want)
+		}
+	}
+	if finished["error"] != nil {
+		t.Fatalf("success error = %#v", finished["error"])
+	}
+}
+
+func TestProcessRunnerStructuredLogsErrors(t *testing.T) {
+	fakePython := writeExecutable(t, `
+#!/bin/sh
+/bin/cat >/dev/null
+printf '%s\n' '{"deepseek_session_id":null,"finish_reason":null,"final_response":null,"error":{"type":"RuntimeError","message":"boom"}}'
+exit 1
+`)
+	var logs bytes.Buffer
+	runner := processRunner{
+		pythonPath: fakePython,
+		source:     "embedded runner source",
+		logger:     slog.New(slog.NewJSONHandler(&logs, nil)),
+	}
+	runner.Run(invocation{Rule: "bad.yaml", RunID: "gen_bad"})
+
+	records := decodeLogRecords(t, logs.Bytes())
+	finished := records[len(records)-1]
+	if finished["level"] != "ERROR" ||
+		finished["error_type"] != "RuntimeError" ||
+		finished["error"] != "boom" {
+		t.Fatalf("error log = %#v", finished)
 	}
 }
 
@@ -245,24 +332,27 @@ func sendEvent(server *eventServer, event map[string]any) *httptest.ResponseReco
 	return response
 }
 
-func waitForReport(t *testing.T, path string) fakeDshReport {
+func writeExecutable(t *testing.T, contents string) string {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	path := filepath.Join(t.TempDir(), "fake-python")
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(contents)+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func decodeLogRecords(t *testing.T, contents []byte) []map[string]any {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	var records []map[string]any
 	for {
-		contents, err := os.ReadFile(path)
-		if err == nil {
-			var report fakeDshReport
-			if err := json.Unmarshal(contents, &report); err != nil {
-				t.Fatal(err)
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			if err == io.EOF {
+				return records
 			}
-			return report
-		}
-		if !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for fake dsh report at %s", path)
-		}
-		time.Sleep(5 * time.Millisecond)
+		records = append(records, record)
 	}
 }

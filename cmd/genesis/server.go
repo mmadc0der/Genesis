@@ -2,17 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"mime"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -32,14 +32,32 @@ type rule struct {
 }
 
 type runSpec struct {
-	Cwd  string            `yaml:"cwd"`
-	Args []string          `yaml:"args"`
-	Env  map[string]string `yaml:"env"`
+	Cwd string            `yaml:"cwd"`
+	Env map[string]string `yaml:"env"`
+}
+
+type invocation struct {
+	Event cloudEvent        `json:"event"`
+	Rule  string            `json:"rule"`
+	RunID string            `json:"run_id"`
+	Cwd   string            `json:"cwd"`
+	Env   map[string]string `json:"env"`
+}
+
+type acceptedRun struct {
+	Rule  string `json:"rule"`
+	RunID string `json:"run_id"`
+}
+
+type invocationRunner interface {
+	Run(invocation)
 }
 
 type eventServer struct {
 	rulesDir string
-	dshPath  string
+	runner   invocationRunner
+	newRunID func() (string, error)
+	logger   *slog.Logger
 }
 
 func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -67,30 +85,74 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	rules, err := loadRules(s.rulesDir)
 	if err != nil {
-		log.Printf("load rules: %v", err)
+		s.log().Error("load rules", "error", err)
 		http.Error(w, "rules are invalid", http.StatusInternalServerError)
 		return
 	}
 
+	matches := make([]rule, 0, len(rules))
 	for _, candidate := range rules {
-		if !candidate.matches(event) {
-			continue
+		if candidate.matches(event) {
+			matches = append(matches, candidate)
 		}
-		if err := s.launch(candidate); err != nil {
-			log.Printf("launch rule %s: %v", candidate.name, err)
-			http.Error(w, "failed to start dsh", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(struct {
-			Rule string `json:"rule"`
-		}{Rule: candidate.name})
+	}
+	if len(matches) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if s.runner == nil {
+		s.log().Error("runner is not configured")
+		http.Error(w, "runner is unavailable", http.StatusInternalServerError)
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	newRunID := s.newRunID
+	if newRunID == nil {
+		newRunID = newGenesisRunID
+	}
+	invocations := make([]invocation, 0, len(matches))
+	accepted := make([]acceptedRun, 0, len(matches))
+	for _, matched := range matches {
+		runID, err := newRunID()
+		if err != nil {
+			s.log().Error("create Genesis run ID", "rule", matched.name, "error", err)
+			http.Error(w, "failed to create run ID", http.StatusInternalServerError)
+			return
+		}
+		invocations = append(invocations, invocation{
+			Event: event,
+			Rule:  matched.name,
+			RunID: runID,
+			Cwd:   matched.Run.Cwd,
+			Env:   matched.Run.Env,
+		})
+		accepted = append(accepted, acceptedRun{Rule: matched.name, RunID: runID})
+	}
+
+	for _, document := range invocations {
+		go s.runner.Run(document)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(struct {
+		Runs []acceptedRun `json:"runs"`
+	}{Runs: accepted})
+}
+
+func (s *eventServer) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
+}
+
+func newGenesisRunID() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return "gen_" + hex.EncodeToString(random[:]), nil
 }
 
 func decodeCloudEvent(w http.ResponseWriter, r *http.Request) (cloudEvent, error) {
@@ -146,38 +208,6 @@ func (r rule) matches(event cloudEvent) bool {
 	return true
 }
 
-func (s *eventServer) launch(r rule) error {
-	command := exec.Command(s.dshPath, r.Run.Args...)
-	command.Dir = r.Run.Cwd
-	command.Env = r.Run.environment()
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	if err := command.Start(); err != nil {
-		return err
-	}
-
-	go func() {
-		if err := command.Wait(); err != nil {
-			log.Printf("rule %s: dsh exited: %v", r.name, err)
-		}
-	}()
-	return nil
-}
-
-func (r runSpec) environment() []string {
-	keys := make([]string, 0, len(r.Env))
-	for key := range r.Env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	environment := make([]string, 0, len(keys))
-	for _, key := range keys {
-		environment = append(environment, key+"="+r.Env[key])
-	}
-	return environment
-}
-
 func loadRules(directory string) ([]rule, error) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -212,6 +242,9 @@ func loadRules(directory string) ([]rule, error) {
 		}
 
 		loaded.name = entry.Name()
+		if loaded.Run.Env == nil {
+			loaded.Run.Env = map[string]string{}
+		}
 		if err := loaded.validate(); err != nil {
 			return nil, fmt.Errorf("%s: %w", entry.Name(), err)
 		}
@@ -238,11 +271,6 @@ func (r rule) validate() error {
 	}
 	if strings.ContainsRune(r.Run.Cwd, '\x00') {
 		return errors.New("run.cwd must contain no NUL")
-	}
-	for index, argument := range r.Run.Args {
-		if strings.ContainsRune(argument, '\x00') {
-			return fmt.Errorf("run.args[%d] must contain no NUL", index)
-		}
 	}
 	for key, value := range r.Run.Env {
 		if key == "" || strings.Contains(key, "=") || strings.ContainsRune(key, '\x00') {

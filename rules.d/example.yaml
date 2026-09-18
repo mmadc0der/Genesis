@@ -4,8 +4,6 @@ match:
   subject: hello
 run:
   cwd: /tmp
-  args:
-    - run
-    - example
   env:
-    GENESIS_EXAMPLE: "1"
+    DEEPSEEK_API_KEY: replace-with-a-real-key
+    PATH: /usr/local/bin:/usr/bin:/bin
