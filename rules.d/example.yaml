@@ -1,0 +1,11 @@
+match:
+  type: dev.genesis.run
+  source: urn:genesis:example
+  subject: hello
+run:
+  cwd: /tmp
+  args:
+    - run
+    - example
+  env:
+    GENESIS_EXAMPLE: "1"
