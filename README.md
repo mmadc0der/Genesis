@@ -12,7 +12,7 @@ looked up in `PATH`.
 
 ## Install and run
 
-Go 1.22+ and Python 3.10+ are required.
+Go 1.22+ and Python 3.10+ with `venv` support are required.
 
 ```sh
 python3 -m venv .venv
@@ -170,6 +170,9 @@ for _ in $(seq 1 100); do
   ! grep -q '"msg":"Genesis run finished"' "$tmp/server.log" || break
   sleep 0.05
 done
+test -f "$tmp/invocation.json" || { cat "$tmp/server.log"; exit 1; }
+grep -q '"msg":"Genesis run finished"' "$tmp/server.log" ||
+  { cat "$tmp/server.log"; exit 1; }
 cat "$tmp/invocation.json"
 cat "$tmp/server.log"
 
