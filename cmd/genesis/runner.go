@@ -26,6 +26,7 @@ type runnerResult struct {
 	FinishReason      *string        `json:"finish_reason"`
 	FinalResponse     *string        `json:"final_response"`
 	Error             *runnerFailure `json:"error"`
+	Diagnostics       any            `json:"diagnostics"`
 }
 
 type runnerFailure struct {
@@ -65,6 +66,22 @@ func (r processRunner) Run(document invocation) {
 		r.logResult(logger, document, runnerResult{}, decodeErr, stderr.String())
 		return
 	}
+	if result.Error == nil &&
+		(result.FinishReason == nil || *result.FinishReason != "completed") {
+		reason := "<missing>"
+		errorType := "DeepSeekRunIncomplete"
+		if result.FinishReason != nil {
+			reason = *result.FinishReason
+			if reason == "error" {
+				errorType = "DeepSeekRunError"
+			}
+		}
+		message := fmt.Sprintf("DeepSeek run finished with finish_reason=%q", reason)
+		if result.FinalResponse == nil || *result.FinalResponse == "" {
+			message += " and an empty final response"
+		}
+		result.Error = &runnerFailure{Type: errorType, Message: message}
+	}
 	if processErr != nil {
 		if result.Error == nil {
 			result.Error = &runnerFailure{Type: "ProcessError", Message: processErr.Error()}
@@ -102,6 +119,7 @@ func (r processRunner) logResult(
 		"deepseek_session_id", optionalString(result.DeepSeekSessionID),
 		"finish_reason", optionalString(result.FinishReason),
 		"final_response", optionalString(result.FinalResponse),
+		"diagnostics", result.Diagnostics,
 		"stderr", strings.TrimSpace(stderr),
 	}
 

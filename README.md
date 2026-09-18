@@ -90,8 +90,11 @@ requests therefore do not upload or append session-trace suffixes.
 
 Genesis emits JSON logs. The completion record contains `genesis_run_id`,
 `rule`, `deepseek_session_id`, `finish_reason`, `final_response`, `error_type`,
-`error`, and captured runner `stderr`. Failures remain asynchronous and are
-not retried.
+`error`, `diagnostics`, and captured runner `stderr`. Any finish reason other
+than `completed` is logged at `ERROR`, even when the SDK returned no explicit
+exception. Diagnostics include the relevant `turn/end`, related error events,
+and non-session notifications. Exceptions and runner stderr are retained.
+Failures remain asynchronous and are not retried.
 
 ## Credential-free verification
 
@@ -120,7 +123,7 @@ mkdir -p "$tmp/bin" "$tmp/rules" "$tmp/work"
 cat >"$tmp/bin/python3" <<'SH'
 #!/bin/sh
 /bin/cat >"$GENESIS_CAPTURE"
-printf '%s\n' '{"deepseek_session_id":"fake-session","finish_reason":"completed","final_response":"fake response","error":null}'
+printf '%s\n' '{"deepseek_session_id":"fake-session","finish_reason":"completed","final_response":"fake response","error":null,"diagnostics":null}'
 SH
 chmod +x "$tmp/bin/python3"
 

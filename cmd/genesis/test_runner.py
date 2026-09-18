@@ -47,6 +47,39 @@ class FakeHarness:
         )
 
 
+class ErrorHarness(FakeHarness):
+    def run(self, message):
+        self.message = message
+        return SimpleNamespace(
+            session_id="deepseek-session-error",
+            finish_reason="error",
+            final_response="",
+            events=[
+                {"type": "message/start", "data": {"ignored": True}},
+                {
+                    "type": "agent/error",
+                    "data": {"message": "provider request failed"},
+                },
+                {
+                    "type": "turn/end",
+                    "data": {
+                        "reason": {
+                            "kind": "error",
+                            "message": "upstream unavailable",
+                        }
+                    },
+                },
+            ],
+            notifications=[
+                SimpleNamespace(method="session.event", payload={"ignored": True}),
+                SimpleNamespace(
+                    method="runtime.warning",
+                    payload={"message": "connection closed"},
+                ),
+            ],
+        )
+
+
 class RunnerTests(unittest.TestCase):
     def setUp(self):
         FakeHarness.instances.clear()
@@ -81,6 +114,7 @@ class RunnerTests(unittest.TestCase):
                 "finish_reason": "completed",
                 "final_response": "finished",
                 "error": None,
+                "diagnostics": None,
             },
         )
         harness = FakeHarness.instances[0]
@@ -141,6 +175,65 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertFalse(patch_path.exists())
 
+    def test_error_finish_returns_diagnostics_and_structured_failure(self):
+        result = runner.execute(
+            {
+                "event": {
+                    "specversion": "1.0",
+                    "id": "event-error",
+                    "source": "urn:test",
+                    "type": "dev.genesis.test",
+                },
+                "rule": "error.yaml",
+                "run_id": "gen_error",
+                "cwd": str(Path.cwd().resolve()),
+                "env": {"DEEPSEEK_API_KEY": "test-key"},
+            },
+            harness_factory=ErrorHarness,
+        )
+
+        self.assertEqual(result["deepseek_session_id"], "deepseek-session-error")
+        self.assertEqual(result["finish_reason"], "error")
+        self.assertEqual(result["final_response"], "")
+        self.assertEqual(result["error"]["type"], "DeepSeekRunError")
+        self.assertIn("finish_reason='error'", result["error"]["message"])
+        self.assertIn("empty final response", result["error"]["message"])
+        self.assertEqual(
+            result["diagnostics"]["turn_end"],
+            {
+                "type": "turn/end",
+                "data": {
+                    "reason": {
+                        "kind": "error",
+                        "message": "upstream unavailable",
+                    }
+                },
+            },
+        )
+        self.assertEqual(
+            [event["type"] for event in result["diagnostics"]["events"]],
+            ["agent/error", "turn/end"],
+        )
+        self.assertEqual(
+            result["diagnostics"]["notifications"],
+            [
+                {
+                    "method": "runtime.warning",
+                    "payload": {"message": "connection closed"},
+                }
+            ],
+        )
+        stdin = io.StringIO("{}")
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(sys, "stdin", stdin),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(runner, "execute", return_value=result),
+        ):
+            status = runner.main()
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(stdout.getvalue()), result)
+
     def test_validation_rejects_non_string_environment_values(self):
         with self.assertRaisesRegex(ValueError, "env"):
             runner.validate_invocation(
@@ -170,6 +263,7 @@ class RunnerTests(unittest.TestCase):
                 "deepseek_session_id": None,
                 "finish_reason": None,
                 "final_response": None,
+                "diagnostics": None,
                 "error": {"type": "RuntimeError", "message": "boom"},
             },
         )

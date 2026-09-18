@@ -234,7 +234,7 @@ func TestProcessRunnerCapturesInvocationAndStructuredResult(t *testing.T) {
 	fakePython := writeExecutable(t, `
 #!/bin/sh
 /bin/cat >"$GENESIS_CAPTURE"
-printf '%s\n' '{"deepseek_session_id":"dsh-session-1","finish_reason":"completed","final_response":"done","error":null}'
+printf '%s\n' '{"deepseek_session_id":"dsh-session-1","finish_reason":"completed","final_response":"done","error":null,"diagnostics":null}'
 `)
 
 	var logs bytes.Buffer
@@ -292,8 +292,8 @@ func TestProcessRunnerStructuredLogsErrors(t *testing.T) {
 	fakePython := writeExecutable(t, `
 #!/bin/sh
 /bin/cat >/dev/null
-printf '%s\n' '{"deepseek_session_id":null,"finish_reason":null,"final_response":null,"error":{"type":"RuntimeError","message":"boom"}}'
-exit 1
+printf '%s\n' '{"deepseek_session_id":"dsh-error","finish_reason":"error","final_response":"","error":null,"diagnostics":{"turn_end":{"type":"turn/end","data":{"reason":{"kind":"error","message":"upstream unavailable"}}},"events":[{"type":"agent/error","data":{"message":"provider request failed"}},{"type":"turn/end","data":{"reason":{"kind":"error","message":"upstream unavailable"}}}],"notifications":[]}}'
+printf '%s\n' 'runner stderr' >&2
 `)
 	var logs bytes.Buffer
 	runner := processRunner{
@@ -305,10 +305,22 @@ exit 1
 
 	records := decodeLogRecords(t, logs.Bytes())
 	finished := records[len(records)-1]
+	errorMessage, _ := finished["error"].(string)
 	if finished["level"] != "ERROR" ||
-		finished["error_type"] != "RuntimeError" ||
-		finished["error"] != "boom" {
+		finished["error_type"] != "DeepSeekRunError" ||
+		!strings.Contains(errorMessage, "empty final response") ||
+		finished["finish_reason"] != "error" ||
+		finished["final_response"] != "" ||
+		finished["stderr"] != "runner stderr" {
 		t.Fatalf("error log = %#v", finished)
+	}
+	diagnostics, ok := finished["diagnostics"].(map[string]any)
+	if !ok {
+		t.Fatalf("diagnostics = %#v", finished["diagnostics"])
+	}
+	turnEnd, ok := diagnostics["turn_end"].(map[string]any)
+	if !ok || turnEnd["type"] != "turn/end" {
+		t.Fatalf("turn/end diagnostics = %#v", diagnostics["turn_end"])
 	}
 }
 

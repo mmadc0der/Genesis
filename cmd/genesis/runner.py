@@ -84,11 +84,71 @@ def execute(
             ) as harness:
                 result = harness.run(message)
 
+    finish_reason = result.finish_reason
+    final_response = result.final_response
+    if finish_reason == "completed":
+        error = None
+        diagnostics = None
+    else:
+        error_type = (
+            "DeepSeekRunError"
+            if finish_reason == "error"
+            else "DeepSeekRunIncomplete"
+        )
+        reason = repr(finish_reason)
+        empty_response = " with an empty final response" if not final_response else ""
+        error = {
+            "type": error_type,
+            "message": (
+                f"DeepSeek run finished with finish_reason={reason}{empty_response}"
+            ),
+        }
+        diagnostics = extract_diagnostics(result)
+
     return {
         "deepseek_session_id": result.session_id,
-        "finish_reason": result.finish_reason,
-        "final_response": result.final_response,
-        "error": None,
+        "finish_reason": finish_reason,
+        "final_response": final_response,
+        "error": error,
+        "diagnostics": diagnostics,
+    }
+
+
+def extract_diagnostics(result: Any) -> dict[str, Any]:
+    events = [
+        event
+        for event in (getattr(result, "events", None) or [])
+        if isinstance(event, dict)
+    ]
+    turn_end = next(
+        (event for event in reversed(events) if event.get("type") == "turn/end"),
+        None,
+    )
+    interesting = [
+        event
+        for event in events
+        if isinstance(event.get("type"), str)
+        and (
+            "error" in event["type"].lower()
+            or event["type"] == "turn/end"
+        )
+    ]
+    selected_events = interesting if interesting else events[-8:]
+
+    notifications = []
+    for notification in getattr(result, "notifications", None) or []:
+        method = getattr(notification, "method", None)
+        if method != "session.event":
+            notifications.append(
+                {
+                    "method": method,
+                    "payload": getattr(notification, "payload", None),
+                }
+            )
+    return {
+        "turn_end": turn_end,
+        "events": selected_events,
+        "notifications": notifications,
     }
 
 
@@ -96,12 +156,13 @@ def main() -> int:
     try:
         invocation = json.load(sys.stdin)
         output = execute(invocation)
-        status = 0
+        status = 0 if output["error"] is None else 1
     except Exception as error:  # The Go parent records this structured failure.
         output = {
             "deepseek_session_id": None,
             "finish_reason": None,
             "final_response": None,
+            "diagnostics": None,
             "error": {
                 "type": type(error).__name__,
                 "message": str(error),
@@ -109,7 +170,13 @@ def main() -> int:
         }
         status = 1
 
-    json.dump(output, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    json.dump(
+        output,
+        sys.stdout,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
     sys.stdout.write("\n")
     sys.stdout.flush()
     return status
