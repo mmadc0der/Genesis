@@ -42,6 +42,7 @@ func (r processRunner) Run(document invocation) {
 	logger.Info("Genesis run started",
 		"genesis_run_id", document.RunID,
 		"rule", document.Rule,
+		"agent", document.Agent,
 	)
 
 	input, err := json.Marshal(document)
@@ -116,6 +117,7 @@ func (r processRunner) logResult(
 	fields := []any{
 		"genesis_run_id", document.RunID,
 		"rule", document.Rule,
+		"agent", document.Agent,
 		"deepseek_session_id", optionalString(result.DeepSeekSessionID),
 		"finish_reason", optionalString(result.FinishReason),
 		"final_response", optionalString(result.FinalResponse),

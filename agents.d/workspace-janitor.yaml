@@ -1,0 +1,8 @@
+instructions: |
+  You are the workspace janitor for this lab.
+  Read the CloudEvent, do only the work it asks, write results in the workspace, then stop.
+cwd: /tmp
+home: /tmp/genesis-home
+env:
+  PATH: /usr/local/bin:/usr/bin:/bin
+  LANG: C.UTF-8

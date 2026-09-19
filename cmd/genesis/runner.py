@@ -37,11 +37,15 @@ def validate_invocation(value: Any) -> dict[str, Any]:
         raise TypeError("invocation must be a JSON object")
     if not isinstance(value.get("event"), dict):
         raise TypeError("event must be a JSON object")
-    for field in ("rule", "run_id", "cwd"):
+    for field in ("rule", "agent", "run_id", "cwd", "home", "instructions"):
         if not isinstance(value.get(field), str) or not value[field]:
             raise ValueError(f"{field} must be a non-empty string")
+    if not str(value["instructions"]).strip():
+        raise ValueError("instructions must be a non-empty string")
     if not Path(value["cwd"]).is_absolute():
         raise ValueError("cwd must be absolute")
+    if not Path(value["home"]).is_absolute():
+        raise ValueError("home must be absolute")
     environment = value.get("env")
     if not isinstance(environment, dict) or not all(
         isinstance(key, str) and isinstance(item, str)
@@ -61,6 +65,12 @@ def execute(
 
         harness_factory = DeepSeekHarness
 
+    # Standing identity is DSH_SYSTEM_PROMPT (sdk-minimal personaPrefix hook).
+    # The user message stays the compact CloudEvent JSON and is not prepended.
+    environment = dict(invocation["env"])
+    environment["HOME"] = invocation["home"]
+    environment["DSH_SYSTEM_PROMPT"] = invocation["instructions"]
+
     message = json.dumps(
         invocation["event"],
         ensure_ascii=False,
@@ -71,7 +81,7 @@ def execute(
         patch_path = Path(dsh_home) / "session-log-off.patch.yml"
         patch_path.write_text(SESSION_LOG_OFF_PATCH, encoding="utf-8")
         with (
-            complete_environment(invocation["env"]),
+            complete_environment(environment),
             harness_factory(
                 provider="deepseek-official",
                 model="deepseek-v4-flash",

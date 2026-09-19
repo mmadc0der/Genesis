@@ -2,7 +2,4 @@ match:
   type: dev.genesis.run
   source: urn:genesis:example
   subject: hello
-run:
-  cwd: /tmp
-  env:
-    PATH: /usr/local/bin:/usr/bin:/bin
+agent: workspace-janitor

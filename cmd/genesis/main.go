@@ -13,6 +13,7 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	listen := flag.String("listen", "127.0.0.1:8787", "HTTP listen address")
+	agentsDir := flag.String("agents", "agents.d", "directory containing YAML agent definitions")
 	rulesDir := flag.String("rules", "rules.d", "directory containing YAML rules")
 	flag.Parse()
 	if flag.NArg() != 0 {
@@ -20,11 +21,20 @@ func main() {
 		os.Exit(2)
 	}
 
+	absoluteAgentsDir, err := filepath.Abs(*agentsDir)
+	if err != nil {
+		fail(logger, "resolve agents directory", err)
+	}
+	agents, err := loadAgents(absoluteAgentsDir)
+	if err != nil {
+		fail(logger, "load agents", err)
+	}
+
 	absoluteRulesDir, err := filepath.Abs(*rulesDir)
 	if err != nil {
 		fail(logger, "resolve rules directory", err)
 	}
-	rules, err := loadRules(absoluteRulesDir)
+	rules, err := loadRules(absoluteRulesDir, agents)
 	if err != nil {
 		fail(logger, "load rules", err)
 	}
@@ -42,16 +52,18 @@ func main() {
 	server := &http.Server{
 		Addr: *listen,
 		Handler: &eventServer{
-			rulesDir: absoluteRulesDir,
-			runner:   runner,
-			newRunID: newGenesisRunID,
-			apiKey:   inheritedAPIKey(),
-			logger:   logger,
+			agentsDir: absoluteAgentsDir,
+			rulesDir:  absoluteRulesDir,
+			runner:    runner,
+			newRunID:  newGenesisRunID,
+			secrets:   inheritedEnvironment(),
+			logger:    logger,
 		},
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	logger.Info("genesis listening",
 		"address", *listen,
+		"agents", len(agents),
 		"rules", len(rules),
 		"python", pythonPath,
 	)
@@ -63,8 +75,4 @@ func main() {
 func fail(logger *slog.Logger, message string, err error) {
 	logger.Error(message, "error", err)
 	os.Exit(1)
-}
-
-func inheritedAPIKey() string {
-	return os.Getenv(deepSeekAPIKey)
 }

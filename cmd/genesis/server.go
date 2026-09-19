@@ -13,40 +13,56 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
 
 const (
-	cloudEventsJSON = "application/cloudevents+json"
-	deepSeekAPIKey  = "DEEPSEEK_API_KEY"
-	maxEventBytes   = 1 << 20
+	cloudEventsJSON    = "application/cloudevents+json"
+	deepSeekAPIKey     = "DEEPSEEK_API_KEY"
+	homeEnvKey         = "HOME"
+	systemPromptEnvKey = "DSH_SYSTEM_PROMPT"
+	maxEventBytes      = 1 << 20
 )
+
+var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type cloudEvent map[string]json.RawMessage
 
+// agentDefinition is a file-backed identity. cwd is the SDK workspace; home is
+// the child process Unix HOME. They separate workspace from environment under
+// the shared Genesis UID and are not a security sandbox.
+type agentDefinition struct {
+	Instructions string            `yaml:"instructions"`
+	Cwd          string            `yaml:"cwd"`
+	Home         string            `yaml:"home"`
+	Env          map[string]string `yaml:"env,omitempty"`
+	Secrets      []string          `yaml:"secrets,omitempty"`
+	id           string
+}
+
 type rule struct {
 	Match map[string]string `yaml:"match"`
-	Run   runSpec           `yaml:"run"`
+	Agent string            `yaml:"agent"`
 	name  string
 }
 
-type runSpec struct {
-	Cwd string            `yaml:"cwd"`
-	Env map[string]string `yaml:"env"`
-}
-
 type invocation struct {
-	Event cloudEvent        `json:"event"`
-	Rule  string            `json:"rule"`
-	RunID string            `json:"run_id"`
-	Cwd   string            `json:"cwd"`
-	Env   map[string]string `json:"env"`
+	Event        cloudEvent        `json:"event"`
+	Rule         string            `json:"rule"`
+	Agent        string            `json:"agent"`
+	RunID        string            `json:"run_id"`
+	Cwd          string            `json:"cwd"`
+	Home         string            `json:"home"`
+	Instructions string            `json:"instructions"`
+	Env          map[string]string `json:"env"`
 }
 
 type acceptedRun struct {
 	Rule  string `json:"rule"`
+	Agent string `json:"agent"`
 	RunID string `json:"run_id"`
 }
 
@@ -55,11 +71,12 @@ type invocationRunner interface {
 }
 
 type eventServer struct {
-	rulesDir string
-	runner   invocationRunner
-	newRunID func() (string, error)
-	apiKey   string
-	logger   *slog.Logger
+	agentsDir string
+	rulesDir  string
+	runner    invocationRunner
+	newRunID  func() (string, error)
+	secrets   map[string]string
+	logger    *slog.Logger
 }
 
 func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +102,13 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rules, err := loadRules(s.rulesDir)
+	agents, err := loadAgents(s.agentsDir)
+	if err != nil {
+		s.log().Error("load agents", "error", err)
+		http.Error(w, "agents are invalid", http.StatusInternalServerError)
+		return
+	}
+	rules, err := loadRules(s.rulesDir, agents)
 	if err != nil {
 		s.log().Error("load rules", "error", err)
 		http.Error(w, "rules are invalid", http.StatusInternalServerError)
@@ -115,20 +138,20 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	invocations := make([]invocation, 0, len(matches))
 	accepted := make([]acceptedRun, 0, len(matches))
 	for _, matched := range matches {
+		definition, ok := agents[matched.Agent]
+		if !ok {
+			s.log().Error("matched rule is missing its agent", "rule", matched.name, "agent", matched.Agent)
+			http.Error(w, "rules are invalid", http.StatusInternalServerError)
+			return
+		}
 		runID, err := newRunID()
 		if err != nil {
-			s.log().Error("create Genesis run ID", "rule", matched.name, "error", err)
+			s.log().Error("create Genesis run ID", "rule", matched.name, "agent", definition.id, "error", err)
 			http.Error(w, "failed to create run ID", http.StatusInternalServerError)
 			return
 		}
-		invocations = append(invocations, invocation{
-			Event: event,
-			Rule:  matched.name,
-			RunID: runID,
-			Cwd:   matched.Run.Cwd,
-			Env:   runtimeEnvironment(matched.Run.Env, s.apiKey),
-		})
-		accepted = append(accepted, acceptedRun{Rule: matched.name, RunID: runID})
+		invocations = append(invocations, snapshotInvocation(event, matched, definition, runID, s.secrets))
+		accepted = append(accepted, acceptedRun{Rule: matched.name, Agent: definition.id, RunID: runID})
 	}
 
 	for _, document := range invocations {
@@ -149,6 +172,25 @@ func (s *eventServer) log() *slog.Logger {
 	return slog.Default()
 }
 
+func snapshotInvocation(
+	event cloudEvent,
+	matched rule,
+	definition agentDefinition,
+	runID string,
+	secrets map[string]string,
+) invocation {
+	return invocation{
+		Event:        event,
+		Rule:         matched.name,
+		Agent:        definition.id,
+		RunID:        runID,
+		Cwd:          definition.Cwd,
+		Home:         definition.Home,
+		Instructions: definition.Instructions,
+		Env:          runtimeEnvironment(definition, secrets),
+	}
+}
+
 func newGenesisRunID() (string, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -157,14 +199,30 @@ func newGenesisRunID() (string, error) {
 	return "gen_" + hex.EncodeToString(random[:]), nil
 }
 
-func runtimeEnvironment(declared map[string]string, apiKey string) map[string]string {
-	environment := make(map[string]string, len(declared)+1)
-	for key, value := range declared {
+func inheritedEnvironment() map[string]string {
+	environment := map[string]string{}
+	for _, item := range os.Environ() {
+		key, value, found := strings.Cut(item, "=")
+		if !found || key == "" {
+			continue
+		}
 		environment[key] = value
 	}
-	if apiKey != "" {
-		environment[deepSeekAPIKey] = apiKey
+	return environment
+}
+
+func runtimeEnvironment(definition agentDefinition, secrets map[string]string) map[string]string {
+	environment := make(map[string]string, len(definition.Env)+len(definition.Secrets)+2)
+	for key, value := range definition.Env {
+		environment[key] = value
 	}
+	for _, name := range definition.Secrets {
+		if value := secrets[name]; value != "" {
+			environment[name] = value
+		}
+	}
+	environment[homeEnvKey] = definition.Home
+	environment[systemPromptEnvKey] = definition.Instructions
 	return environment
 }
 
@@ -221,44 +279,93 @@ func (r rule) matches(event cloudEvent) bool {
 	return true
 }
 
-func loadRules(directory string) ([]rule, error) {
+func loadYAMLDocument(path string, destination any) error {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	name := filepath.Base(path)
+	decoder := yaml.NewDecoder(bytes.NewReader(contents))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(destination); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("%s: file must contain one YAML document", name)
+		}
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
+}
+
+func yamlEntries(directory string) ([]os.DirEntry, error) {
 	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		extension := strings.ToLower(filepath.Ext(entry.Name()))
+		if entry.IsDir() || (extension != ".yaml" && extension != ".yml") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered, nil
+}
+
+func loadAgents(directory string) (map[string]agentDefinition, error) {
+	entries, err := yamlEntries(directory)
+	if err != nil {
+		return nil, err
+	}
+
+	agents := make(map[string]agentDefinition, len(entries))
+	for _, entry := range entries {
+		id, err := agentIDFromFilename(entry.Name())
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", entry.Name(), err)
+		}
+		if _, exists := agents[id]; exists {
+			return nil, fmt.Errorf("%s: duplicate agent id %q", entry.Name(), id)
+		}
+
+		var loaded agentDefinition
+		if err := loadYAMLDocument(filepath.Join(directory, entry.Name()), &loaded); err != nil {
+			return nil, err
+		}
+		if loaded.Env == nil {
+			loaded.Env = map[string]string{}
+		}
+		if loaded.Secrets == nil {
+			loaded.Secrets = []string{deepSeekAPIKey}
+		}
+		loaded.id = id
+		if err := loaded.validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", entry.Name(), err)
+		}
+		agents[id] = loaded
+	}
+	return agents, nil
+}
+
+func loadRules(directory string, agents map[string]agentDefinition) ([]rule, error) {
+	entries, err := yamlEntries(directory)
 	if err != nil {
 		return nil, err
 	}
 
 	rules := make([]rule, 0, len(entries))
 	for _, entry := range entries {
-		extension := strings.ToLower(filepath.Ext(entry.Name()))
-		if entry.IsDir() || (extension != ".yaml" && extension != ".yml") {
-			continue
-		}
-
-		path := filepath.Join(directory, entry.Name())
-		contents, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", entry.Name(), err)
-		}
-
-		decoder := yaml.NewDecoder(bytes.NewReader(contents))
-		decoder.KnownFields(true)
 		var loaded rule
-		if err := decoder.Decode(&loaded); err != nil {
-			return nil, fmt.Errorf("%s: %w", entry.Name(), err)
+		if err := loadYAMLDocument(filepath.Join(directory, entry.Name()), &loaded); err != nil {
+			return nil, err
 		}
-		var extra any
-		if err := decoder.Decode(&extra); err != io.EOF {
-			if err == nil {
-				return nil, fmt.Errorf("%s: rule file must contain one YAML document", entry.Name())
-			}
-			return nil, fmt.Errorf("%s: %w", entry.Name(), err)
-		}
-
 		loaded.name = entry.Name()
-		if loaded.Run.Env == nil {
-			loaded.Run.Env = map[string]string{}
-		}
-		if err := loaded.validate(); err != nil {
+		if err := loaded.validate(agents); err != nil {
 			return nil, fmt.Errorf("%s: %w", entry.Name(), err)
 		}
 		rules = append(rules, loaded)
@@ -266,7 +373,70 @@ func loadRules(directory string) ([]rule, error) {
 	return rules, nil
 }
 
-func (r rule) validate() error {
+func agentIDFromFilename(name string) (string, error) {
+	extension := filepath.Ext(name)
+	id := strings.TrimSuffix(name, extension)
+	if !agentIDPattern.MatchString(id) {
+		return "", fmt.Errorf("invalid agent id %q", id)
+	}
+	if strings.ContainsAny(id, `/\`) || strings.ContainsRune(id, '\x00') {
+		return "", fmt.Errorf("invalid agent id %q", id)
+	}
+	return id, nil
+}
+
+func (a agentDefinition) validate() error {
+	if strings.TrimSpace(a.Instructions) == "" {
+		return errors.New("instructions is required")
+	}
+	if strings.ContainsRune(a.Instructions, '\x00') {
+		return errors.New("instructions must contain no NUL")
+	}
+	if err := validateAbsolutePath("cwd", a.Cwd); err != nil {
+		return err
+	}
+	if err := validateAbsolutePath("home", a.Home); err != nil {
+		return err
+	}
+	if filepath.Clean(a.Cwd) == filepath.Clean(a.Home) {
+		return errors.New("cwd and home must be distinct paths")
+	}
+
+	seenSecrets := make(map[string]struct{}, len(a.Secrets))
+	for _, name := range a.Secrets {
+		if err := validateEnvKey(name); err != nil {
+			return fmt.Errorf("invalid secret name %q", name)
+		}
+		if _, duplicate := seenSecrets[name]; duplicate {
+			return fmt.Errorf("duplicate secret %q", name)
+		}
+		if source, reserved := reservedEnvKey(name); reserved {
+			return fmt.Errorf("secrets must not declare %s; Genesis sets it from %s", name, source)
+		}
+		seenSecrets[name] = struct{}{}
+	}
+
+	for key, value := range a.Env {
+		if err := validateEnvKey(key); err != nil {
+			return fmt.Errorf("invalid env key %q", key)
+		}
+		if strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("env[%q] must contain no NUL", key)
+		}
+		if key == deepSeekAPIKey {
+			return fmt.Errorf("env must not declare %s; named secrets are copied from the Genesis process", key)
+		}
+		if _, secret := seenSecrets[key]; secret {
+			return fmt.Errorf("env must not declare %s; it is listed in secrets", key)
+		}
+		if source, reserved := reservedEnvKey(key); reserved {
+			return fmt.Errorf("env must not declare %s; Genesis sets it from %s", key, source)
+		}
+	}
+	return nil
+}
+
+func (r rule) validate(agents map[string]agentDefinition) error {
 	if len(r.Match) == 0 {
 		return errors.New("match must contain at least one attribute")
 	}
@@ -275,26 +445,42 @@ func (r rule) validate() error {
 			return errors.New("match attribute names must be non-empty and contain no NUL")
 		}
 	}
+	if r.Agent == "" {
+		return errors.New("agent is required")
+	}
+	if _, ok := agents[r.Agent]; !ok {
+		return fmt.Errorf("agent %q is not defined", r.Agent)
+	}
+	return nil
+}
 
-	if r.Run.Cwd == "" {
-		return errors.New("run.cwd is required")
+func reservedEnvKey(name string) (string, bool) {
+	switch name {
+	case homeEnvKey:
+		return "home", true
+	case systemPromptEnvKey:
+		return "instructions", true
+	default:
+		return "", false
 	}
-	if !filepath.IsAbs(r.Run.Cwd) {
-		return errors.New("run.cwd must be an absolute path")
+}
+
+func validateAbsolutePath(field, value string) error {
+	if value == "" {
+		return fmt.Errorf("%s is required", field)
 	}
-	if strings.ContainsRune(r.Run.Cwd, '\x00') {
-		return errors.New("run.cwd must contain no NUL")
+	if !filepath.IsAbs(value) {
+		return fmt.Errorf("%s must be an absolute path", field)
 	}
-	for key, value := range r.Run.Env {
-		if key == deepSeekAPIKey {
-			return fmt.Errorf("run.env must not declare %s; Genesis inherits it", deepSeekAPIKey)
-		}
-		if key == "" || strings.Contains(key, "=") || strings.ContainsRune(key, '\x00') {
-			return fmt.Errorf("invalid run.env key %q", key)
-		}
-		if strings.ContainsRune(value, '\x00') {
-			return fmt.Errorf("run.env[%q] must contain no NUL", key)
-		}
+	if strings.ContainsRune(value, '\x00') {
+		return fmt.Errorf("%s must contain no NUL", field)
+	}
+	return nil
+}
+
+func validateEnvKey(key string) error {
+	if key == "" || strings.Contains(key, "=") || strings.ContainsRune(key, '\x00') {
+		return fmt.Errorf("invalid env key %q", key)
 	}
 	return nil
 }

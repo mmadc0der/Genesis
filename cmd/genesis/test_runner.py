@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,9 @@ SPEC = importlib.util.spec_from_file_location("genesis_runner", RUNNER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+
+INSTRUCTIONS = "You are the workspace janitor for this lab."
+AGENT_HOME = "/tmp/genesis-agent-home"
 
 
 class FakeHarness:
@@ -81,6 +85,31 @@ class ErrorHarness(FakeHarness):
         )
 
 
+def sample_invocation(**overrides):
+    workspace = str(Path.cwd().resolve())
+    document = {
+        "event": {
+            "specversion": "1.0",
+            "id": "event-1",
+            "source": "urn:test",
+            "type": "dev.genesis.test",
+            "data": {"unicode": "Привет", "nested": [1, True]},
+        },
+        "rule": "test.yaml",
+        "agent": "workspace-janitor",
+        "run_id": "gen_test",
+        "cwd": workspace,
+        "home": AGENT_HOME,
+        "instructions": INSTRUCTIONS,
+        "env": {
+            "DEEPSEEK_API_KEY": "genesis-key",
+            "ONLY_DECLARED": "yes",
+        },
+    }
+    document.update(overrides)
+    return document
+
+
 class RunnerTests(unittest.TestCase):
     def setUp(self):
         FakeHarness.instances.clear()
@@ -94,21 +123,13 @@ class RunnerTests(unittest.TestCase):
             "type": "dev.genesis.test",
             "data": {"unicode": "Привет", "nested": [1, True]},
         }
-        invocation = {
-            "event": event,
-            "rule": "test.yaml",
-            "run_id": "gen_test",
-            "cwd": workspace,
-            "env": {
-                "DEEPSEEK_API_KEY": "genesis-key",
-                "ONLY_DECLARED": "yes",
-            },
-        }
+        invocation = sample_invocation(event=event, cwd=workspace)
         with mock.patch.dict(
             os.environ,
             {
                 "DEEPSEEK_API_KEY": "ambient-key-must-not-win",
                 "AMBIENT_ONLY": "must-not-leak",
+                "HOME": "/ambient/home",
             },
         ):
             environment_before = dict(os.environ)
@@ -127,7 +148,16 @@ class RunnerTests(unittest.TestCase):
         )
         harness = FakeHarness.instances[0]
         self.assertEqual(json.loads(harness.message), event)
-        self.assertEqual(harness.environment, invocation["env"])
+        self.assertNotIn(INSTRUCTIONS, harness.message)
+        self.assertEqual(
+            harness.environment,
+            {
+                "DEEPSEEK_API_KEY": "genesis-key",
+                "ONLY_DECLARED": "yes",
+                "HOME": AGENT_HOME,
+                "DSH_SYSTEM_PROMPT": INSTRUCTIONS,
+            },
+        )
         self.assertEqual(
             {
                 key: value
@@ -145,48 +175,68 @@ class RunnerTests(unittest.TestCase):
             harness.kwargs["dsh_home"],
             harness.kwargs["runtime_cwd"],
         )
+        self.assertNotEqual(harness.kwargs["dsh_home"], AGENT_HOME)
+        self.assertNotEqual(harness.kwargs["dsh_home"], workspace)
         self.assertTrue(harness.home_existed)
         self.assertFalse(Path(harness.kwargs["dsh_home"]).exists())
         self.assertEqual(harness.environment["DEEPSEEK_API_KEY"], "genesis-key")
         self.assertNotIn("AMBIENT_ONLY", harness.environment)
 
+    def test_execute_sets_home_and_system_prompt_from_agent_snapshot(self):
+        invocation = sample_invocation(
+            env={"ONLY_DECLARED": "yes"},
+            home="/tmp/explicit-agent-home",
+            instructions="Standing identity only.",
+        )
+        runner.execute(invocation, harness_factory=FakeHarness)
+        harness = FakeHarness.instances[0]
+        self.assertEqual(harness.environment["HOME"], "/tmp/explicit-agent-home")
+        self.assertEqual(
+            harness.environment["DSH_SYSTEM_PROMPT"],
+            "Standing identity only.",
+        )
+        self.assertEqual(json.loads(harness.message), invocation["event"])
+        self.assertNotIn("Standing identity only.", harness.message)
+
     def test_execute_allows_missing_api_key_for_credential_free_tests(self):
         result = runner.execute(
-            {
-                "event": {
+            sample_invocation(
+                event={
                     "specversion": "1.0",
                     "id": "event-no-key",
                     "source": "urn:test",
                     "type": "dev.genesis.test",
                 },
-                "rule": "no-key.yaml",
-                "run_id": "gen_no_key",
-                "cwd": str(Path.cwd().resolve()),
-                "env": {"ONLY_DECLARED": "yes"},
-            },
+                rule="no-key.yaml",
+                run_id="gen_no_key",
+                env={"ONLY_DECLARED": "yes"},
+            ),
             harness_factory=FakeHarness,
         )
 
         self.assertEqual(result["finish_reason"], "completed")
         self.assertEqual(
             FakeHarness.instances[0].environment,
-            {"ONLY_DECLARED": "yes"},
+            {
+                "ONLY_DECLARED": "yes",
+                "HOME": AGENT_HOME,
+                "DSH_SYSTEM_PROMPT": INSTRUCTIONS,
+            },
         )
 
     def test_execute_supplies_version_coupled_session_log_privacy_patch(self):
         runner.execute(
-            {
-                "event": {
+            sample_invocation(
+                event={
                     "specversion": "1.0",
                     "id": "event-privacy",
                     "source": "urn:test",
                     "type": "dev.genesis.test",
                 },
-                "rule": "privacy.yaml",
-                "run_id": "gen_privacy",
-                "cwd": str(Path.cwd().resolve()),
-                "env": {"DEEPSEEK_API_KEY": "test-key"},
-            },
+                rule="privacy.yaml",
+                run_id="gen_privacy",
+                env={"DEEPSEEK_API_KEY": "test-key"},
+            ),
             harness_factory=FakeHarness,
         )
 
@@ -207,18 +257,17 @@ class RunnerTests(unittest.TestCase):
 
     def test_error_finish_returns_diagnostics_and_structured_failure(self):
         result = runner.execute(
-            {
-                "event": {
+            sample_invocation(
+                event={
                     "specversion": "1.0",
                     "id": "event-error",
                     "source": "urn:test",
                     "type": "dev.genesis.test",
                 },
-                "rule": "error.yaml",
-                "run_id": "gen_error",
-                "cwd": str(Path.cwd().resolve()),
-                "env": {"DEEPSEEK_API_KEY": "test-key"},
-            },
+                rule="error.yaml",
+                run_id="gen_error",
+                env={"DEEPSEEK_API_KEY": "test-key"},
+            ),
             harness_factory=ErrorHarness,
         )
 
@@ -267,14 +316,16 @@ class RunnerTests(unittest.TestCase):
     def test_validation_rejects_non_string_environment_values(self):
         with self.assertRaisesRegex(TypeError, "env"):
             runner.validate_invocation(
-                {
-                    "event": {},
-                    "rule": "test.yaml",
-                    "run_id": "gen_test",
-                    "cwd": str(Path.cwd().resolve()),
-                    "env": {"COUNT": 1},
-                }
+                sample_invocation(env={"COUNT": 1})
             )
+
+    def test_validation_requires_agent_home_and_instructions(self):
+        with self.assertRaisesRegex(ValueError, "agent"):
+            runner.validate_invocation(sample_invocation(agent=""))
+        with self.assertRaisesRegex(ValueError, "home"):
+            runner.validate_invocation(sample_invocation(home="relative-home"))
+        with self.assertRaisesRegex(ValueError, "instructions"):
+            runner.validate_invocation(sample_invocation(instructions="   "))
 
     def test_main_emits_structured_error(self):
         stdin = io.StringIO("{}")
@@ -326,6 +377,17 @@ class RunnerTests(unittest.TestCase):
                 "deepseek-harness-sdk": "0.1.5rc1",
             },
         )
+
+    def test_temporary_dsh_home_is_not_agent_home(self):
+        with tempfile.TemporaryDirectory() as agent_home:
+            runner.execute(
+                sample_invocation(home=agent_home),
+                harness_factory=FakeHarness,
+            )
+            harness = FakeHarness.instances[0]
+            self.assertNotEqual(harness.kwargs["dsh_home"], agent_home)
+            self.assertTrue(Path(agent_home).is_dir())
+            self.assertFalse(Path(harness.kwargs["dsh_home"]).exists())
 
 
 if __name__ == "__main__":
