@@ -315,9 +315,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_validation_rejects_non_string_environment_values(self):
         with self.assertRaisesRegex(TypeError, "env"):
-            runner.validate_invocation(
-                sample_invocation(env={"COUNT": 1})
-            )
+            runner.validate_invocation(sample_invocation(env={"COUNT": 1}))
 
     def test_validation_requires_agent_home_and_instructions(self):
         with self.assertRaisesRegex(ValueError, "agent"):
