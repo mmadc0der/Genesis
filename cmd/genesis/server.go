@@ -59,6 +59,8 @@ type invocation struct {
 	Home         string            `json:"home"`
 	Instructions string            `json:"instructions"`
 	Env          map[string]string `json:"env"`
+	RunDir       string            `json:"run_dir"`
+	DshHome      string            `json:"dsh_home"`
 }
 
 type acceptedRun struct {
@@ -80,6 +82,7 @@ type eventServer struct {
 	logger      *slog.Logger
 	syncToken   string
 	coordinator privilegedCoordinator
+	store       *runStore
 
 	mu         sync.RWMutex
 	syncing    bool
@@ -154,6 +157,11 @@ func (s *eventServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runner is unavailable", http.StatusInternalServerError)
 		return
 	}
+	if s.store == nil {
+		s.log().Error("run storage is not configured")
+		http.Error(w, "run storage is unavailable", http.StatusInternalServerError)
+		return
+	}
 
 	newRunID := s.newRunID
 	if newRunID == nil {
@@ -174,12 +182,24 @@ func (s *eventServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to create run ID", http.StatusInternalServerError)
 			return
 		}
-		invocations = append(invocations, snapshotInvocation(event, matched, definition, runID, s.secrets))
+		document := snapshotInvocation(event, matched, definition, runID, s.secrets)
+		if err := s.store.Accept(&document, secretValues(s.secrets, definition.Secrets, document.Env)); err != nil {
+			s.log().Error("create run storage", "rule", matched.name, "agent", definition.id, "run_id", runID, "error", err)
+			for _, previous := range invocations {
+				s.store.failAccept(previous.RunID, err.Error())
+			}
+			http.Error(w, "failed to create run storage", http.StatusInternalServerError)
+			return
+		}
+		invocations = append(invocations, document)
 		accepted = append(accepted, acceptedRun{Rule: matched.name, Agent: definition.id, RunID: runID})
 	}
 
 	for _, document := range invocations {
-		go s.runner.Run(document)
+		go func(document invocation) {
+			defer s.store.release(document.RunID)
+			s.runner.Run(document)
+		}(document)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

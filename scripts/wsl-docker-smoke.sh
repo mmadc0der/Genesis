@@ -117,9 +117,20 @@ if [ "$synced" != "202" ]; then
   cat /tmp/genesis-wsl-synced.out >&2 || true
   exit 1
 fi
+run_id="$(sed -n 's/.*"run_id":"\([^"]*\)".*/\1/p' /tmp/genesis-wsl-synced.out | head -n 1)"
+if [ -z "$run_id" ]; then
+  echo "POST /events 202 did not include a run_id" >&2
+  cat /tmp/genesis-wsl-synced.out >&2
+  exit 1
+fi
+if ! docker compose exec -T -u genesis genesis test -f "/var/lib/genesis/data/runs/$run_id/events.jsonl"; then
+  echo "run journal was not created before HTTP 202" >&2
+  docker compose exec -T -u genesis genesis ls -la /var/lib/genesis/data/runs >&2 || true
+  exit 1
+fi
 
 docker compose exec -T -u genesis genesis rm -f "$smoke_rule"
 
 echo "WSL Docker smoke passed."
-echo "Named volume genesis-config keeps agents/rules across compose down; compose down -v reseeds defaults."
+echo "Named volume genesis-config keeps agents/rules across compose down; genesis-data keeps run journals; compose down -v reseeds defaults."
 echo "Windows browsers can use http://127.0.0.1:8787/ because Docker Desktop publishes the port on localhost."

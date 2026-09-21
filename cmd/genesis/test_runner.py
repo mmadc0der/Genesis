@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest import mock
 
 RUNNER_PATH = Path(__file__).with_name("runner.py")
@@ -21,6 +21,15 @@ INSTRUCTIONS = "You are the workspace janitor for this lab."
 AGENT_HOME = "/tmp/genesis-agent-home"
 
 
+class FakeSession:
+    def __init__(self, harness: "FakeHarness", session_id: str):
+        self.harness = harness
+        self.id = session_id
+
+    def run(self, message, on_notification=None):
+        return self.harness.complete(message, on_notification)
+
+
 class FakeHarness:
     instances: ClassVar[list] = []
 
@@ -31,6 +40,8 @@ class FakeHarness:
         self.home_existed = False
         self.patch_existed = False
         self.patch_contents = None
+        self.session_id = "deepseek-session-1"
+        self.notifications: list[Any] = []
         self.__class__.instances.append(self)
 
     def __enter__(self):
@@ -43,20 +54,31 @@ class FakeHarness:
     def __exit__(self, _kind, _error, _traceback):
         return None
 
-    def run(self, message):
+    def start_session(self, session_id=None):
+        self.session_id = session_id or self.session_id
+        return FakeSession(self, self.session_id)
+
+    def complete(self, message, on_notification=None):
         self.message = message
+        if on_notification is not None:
+            for notification in self.notifications:
+                on_notification(notification)
         return SimpleNamespace(
-            session_id="deepseek-session-1",
+            session_id=self.session_id,
             finish_reason="completed",
             final_response="finished",
         )
 
 
 class ErrorHarness(FakeHarness):
-    def run(self, message):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.session_id = "deepseek-session-error"
+
+    def complete(self, message, on_notification=None):
         self.message = message
         return SimpleNamespace(
-            session_id="deepseek-session-error",
+            session_id=self.session_id,
             finish_reason="error",
             final_response="",
             events=[
@@ -82,6 +104,32 @@ class ErrorHarness(FakeHarness):
                     payload={"message": "connection closed"},
                 ),
             ],
+        )
+
+
+class NotifyingHarness(FakeHarness):
+    def complete(self, message, on_notification=None):
+        self.message = message
+        notifications = [
+            SimpleNamespace(
+                method="session.event",
+                payload={
+                    "sessionId": self.session_id,
+                    "event": {"type": "turn/start", "seq": 1, "data": {}},
+                },
+            ),
+            SimpleNamespace(
+                method="session.status",
+                payload={"sessionId": self.session_id, "status": "idle"},
+            ),
+        ]
+        if on_notification is not None:
+            for notification in notifications:
+                on_notification(notification)
+        return SimpleNamespace(
+            session_id=self.session_id,
+            finish_reason="completed",
+            final_response="finished",
         )
 
 
@@ -113,6 +161,19 @@ def sample_invocation(**overrides):
 class RunnerTests(unittest.TestCase):
     def setUp(self):
         FakeHarness.instances.clear()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dsh_home = str(Path(self.temp.name) / "dsh_home")
+        self.run_dir = str(Path(self.temp.name) / "run")
+        Path(self.dsh_home).mkdir()
+        Path(self.run_dir).mkdir()
+
+    def invocation(self, **overrides):
+        return sample_invocation(
+            dsh_home=self.dsh_home,
+            run_dir=self.run_dir,
+            **overrides,
+        )
 
     def test_execute_uses_complete_event_environment_and_sdk_minimal(self):
         workspace = str(Path.cwd().resolve())
@@ -123,7 +184,7 @@ class RunnerTests(unittest.TestCase):
             "type": "dev.genesis.test",
             "data": {"unicode": "Привет", "nested": [1, True]},
         }
-        invocation = sample_invocation(event=event, cwd=workspace)
+        invocation = self.invocation(event=event, cwd=workspace)
         with mock.patch.dict(
             os.environ,
             {
@@ -171,19 +232,17 @@ class RunnerTests(unittest.TestCase):
                 "profile": "sdk-minimal",
             },
         )
-        self.assertEqual(
-            harness.kwargs["dsh_home"],
-            harness.kwargs["runtime_cwd"],
-        )
+        self.assertEqual(harness.kwargs["dsh_home"], self.dsh_home)
+        self.assertEqual(harness.kwargs["runtime_cwd"], self.dsh_home)
         self.assertNotEqual(harness.kwargs["dsh_home"], AGENT_HOME)
         self.assertNotEqual(harness.kwargs["dsh_home"], workspace)
         self.assertTrue(harness.home_existed)
-        self.assertFalse(Path(harness.kwargs["dsh_home"]).exists())
+        self.assertTrue(Path(harness.kwargs["dsh_home"]).is_dir())
         self.assertEqual(harness.environment["DEEPSEEK_API_KEY"], "genesis-key")
         self.assertNotIn("AMBIENT_ONLY", harness.environment)
 
     def test_execute_sets_home_and_system_prompt_from_agent_snapshot(self):
-        invocation = sample_invocation(
+        invocation = self.invocation(
             env={"ONLY_DECLARED": "yes"},
             home="/tmp/explicit-agent-home",
             instructions="Standing identity only.",
@@ -200,7 +259,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_execute_allows_missing_api_key_for_credential_free_tests(self):
         result = runner.execute(
-            sample_invocation(
+            self.invocation(
                 event={
                     "specversion": "1.0",
                     "id": "event-no-key",
@@ -226,7 +285,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_execute_supplies_version_coupled_session_log_privacy_patch(self):
         runner.execute(
-            sample_invocation(
+            self.invocation(
                 event={
                     "specversion": "1.0",
                     "id": "event-privacy",
@@ -253,11 +312,23 @@ class RunnerTests(unittest.TestCase):
     enabled: false
 """,
         )
-        self.assertFalse(patch_path.exists())
+        self.assertTrue(patch_path.is_file())
+
+    def test_execute_uses_supplied_dsh_home_and_start_session(self):
+        created = []
+        result = runner.execute(
+            self.invocation(),
+            harness_factory=FakeHarness,
+            on_session_created=created.append,
+        )
+        self.assertEqual(result["deepseek_session_id"], "deepseek-session-1")
+        self.assertEqual(created, ["deepseek-session-1"])
+        self.assertEqual(FakeHarness.instances[0].kwargs["dsh_home"], self.dsh_home)
+        self.assertTrue(Path(self.dsh_home).is_dir())
 
     def test_error_finish_returns_diagnostics_and_structured_failure(self):
         result = runner.execute(
-            sample_invocation(
+            self.invocation(
                 event={
                     "specversion": "1.0",
                     "id": "event-error",
@@ -311,19 +382,23 @@ class RunnerTests(unittest.TestCase):
         ):
             status = runner.main()
         self.assertEqual(status, 1)
-        self.assertEqual(json.loads(stdout.getvalue()), result)
+        frames = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(frames[-1]["type"], "result")
+        self.assertEqual(frames[-1]["error"]["type"], "DeepSeekRunError")
 
     def test_validation_rejects_non_string_environment_values(self):
         with self.assertRaisesRegex(TypeError, "env"):
-            runner.validate_invocation(sample_invocation(env={"COUNT": 1}))
+            runner.validate_invocation(self.invocation(env={"COUNT": 1}))
 
-    def test_validation_requires_agent_home_and_instructions(self):
+    def test_validation_requires_agent_home_instructions_and_dsh_home(self):
         with self.assertRaisesRegex(ValueError, "agent"):
-            runner.validate_invocation(sample_invocation(agent=""))
+            runner.validate_invocation(self.invocation(agent=""))
         with self.assertRaisesRegex(ValueError, "home"):
-            runner.validate_invocation(sample_invocation(home="relative-home"))
+            runner.validate_invocation(self.invocation(home="relative-home"))
         with self.assertRaisesRegex(ValueError, "instructions"):
-            runner.validate_invocation(sample_invocation(instructions="   "))
+            runner.validate_invocation(self.invocation(instructions="   "))
+        with self.assertRaisesRegex(ValueError, "dsh_home"):
+            runner.validate_invocation(self.invocation(dsh_home="relative-dsh"))
 
     def test_main_emits_structured_error(self):
         stdin = io.StringIO("{}")
@@ -340,19 +415,48 @@ class RunnerTests(unittest.TestCase):
             status = runner.main()
 
         self.assertEqual(status, 1)
+        frames = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["type"], "result")
         self.assertEqual(
-            json.loads(stdout.getvalue()),
+            frames[0]["error"],
             {
-                "deepseek_session_id": None,
-                "finish_reason": None,
-                "final_response": None,
-                "diagnostics": None,
-                "error": {
-                    "type": "RuntimeError",
-                    "message": "DEEPSEEK_API_KEY is not set",
-                },
+                "type": "RuntimeError",
+                "message": "DEEPSEEK_API_KEY is not set",
             },
         )
+
+    def test_main_tees_session_created_notifications_and_one_result(self):
+        original = runner.execute
+
+        def wrapped(invocation, harness_factory=None, **kwargs):
+            return original(
+                invocation,
+                harness_factory=NotifyingHarness,
+                **kwargs,
+            )
+
+        stdin = io.StringIO(json.dumps(self.invocation()))
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(sys, "stdin", stdin),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(runner, "execute", wrapped),
+        ):
+            status = runner.main()
+
+        self.assertEqual(status, 0)
+        frames = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(frames[0]["type"], "session.created")
+        self.assertEqual(frames[0]["session_id"], "deepseek-session-1")
+        self.assertEqual(frames[1]["type"], "notification")
+        self.assertEqual(frames[1]["method"], "session.event")
+        self.assertEqual(frames[2]["type"], "notification")
+        self.assertEqual(frames[2]["method"], "session.status")
+        self.assertEqual(frames[3]["type"], "result")
+        self.assertEqual(frames[3]["finish_reason"], "completed")
+        self.assertEqual(sum(1 for frame in frames if frame["type"] == "result"), 1)
+        self.assertTrue(Path(self.dsh_home).is_dir())
 
     def test_official_sdk_and_runtime_versions_are_paired(self):
         root = Path(__file__).resolve().parents[2]
@@ -376,16 +480,16 @@ class RunnerTests(unittest.TestCase):
             },
         )
 
-    def test_temporary_dsh_home_is_not_agent_home(self):
+    def test_supplied_dsh_home_is_not_agent_home(self):
         with tempfile.TemporaryDirectory() as agent_home:
             runner.execute(
-                sample_invocation(home=agent_home),
+                self.invocation(home=agent_home),
                 harness_factory=FakeHarness,
             )
             harness = FakeHarness.instances[0]
             self.assertNotEqual(harness.kwargs["dsh_home"], agent_home)
             self.assertTrue(Path(agent_home).is_dir())
-            self.assertFalse(Path(harness.kwargs["dsh_home"]).exists())
+            self.assertTrue(Path(harness.kwargs["dsh_home"]).is_dir())
 
 
 if __name__ == "__main__":

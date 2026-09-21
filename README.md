@@ -35,16 +35,17 @@ export GENESIS_SYNC_TOKEN='replace-with-a-local-sync-token'
 mkdir -p bin
 go build -o bin/genesis ./cmd/genesis
 uv run --locked ./bin/genesis launch \
-  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d
+  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d -data genesis-data
 ```
 
 `genesis -listen ...` still runs the listener in this process. `launch` is
 the supervisor: it inherits no extra HTTP port and keeps a private socketpair
-for privileged coordination. An empty `-sync-token` / `GENESIS_SYNC_TOKEN`
-disables `POST /sync` (`401` `sync is disabled`); set a token to activate
-filesystem edits. When `launch` runs as root it requires `-listener-user` /
-`GENESIS_LISTENER_USER` and execs the listener as that user. Non-root launch
-keeps the current user and does not need that flag.
+for privileged coordination. `-data` (default `genesis-data`) is the per-run
+journal root; an invalid path refuses to listen. An empty `-sync-token` /
+`GENESIS_SYNC_TOKEN` disables `POST /sync` (`401` `sync is disabled`); set a
+token to activate filesystem edits. When `launch` runs as root it requires
+`-listener-user` / `GENESIS_LISTENER_USER` and execs the listener as that
+user. Non-root launch keeps the current user and does not need that flag.
 
 `uv run` places the managed `.venv` first in `PATH`. Equivalently, activate it
 with `. .venv/bin/activate` before running `./bin/genesis`. Genesis resolves
@@ -124,7 +125,9 @@ curl -i http://127.0.0.1:8787/events \
   }'
 ```
 
-A match returns `202` immediately with one Genesis run ID per rule:
+A match returns `202` immediately with one Genesis run ID per rule. Genesis
+creates that run's directory under `-data` (default `genesis-data`) **before**
+the `202`:
 
 ```json
 {
@@ -139,23 +142,49 @@ A match returns `202` immediately with one Genesis run ID per rule:
 ```
 
 No match returns `204`. Each accepted match snapshots the resolved agent into
-its invocation. Each one-shot runner uses a fresh temporary Harness home,
-invokes `provider="deepseek-official"`, model `deepseek-v4-flash`, and
-profile `sdk-minimal`, and deletes the home afterward. That throwaway
-`dsh_home` is Genesis-owned and is not the agent `home`. The compact JSON
-serialization of the complete CloudEvent is the sole session user message.
-Instructions are standing identity, not prepended onto that payload. For the
-pinned `0.1.5rc1` profile, the runner also supplies a per-run Cordis patch
-setting `session-log-deepseek.enabled: false`; canonical DeepSeek API
-requests therefore do not upload or append session-trace suffixes.
+its invocation. Each one-shot runner uses a Genesis-owned `dsh_home` under
+`-data/runs/<run_id>/`, invokes `provider="deepseek-official"`, model
+`deepseek-v4-flash`, and profile `sdk-minimal`, and **retains** that home
+(including DeepSeek session JSONL) after the child exits. `dsh_home` is not
+the agent `home`. The compact JSON serialization of the complete CloudEvent is
+the sole session user message. Instructions are standing identity, not
+prepended onto that payload. For the pinned `0.1.5rc1` profile, the runner also
+supplies a per-run Cordis patch setting `session-log-deepseek.enabled: false`;
+canonical DeepSeek API requests therefore do not upload or append session-trace
+suffixes.
+
+The embedded Python runner writes flushed NDJSON on stdout: `session.created`
+as soon as `start_session()` returns, then raw SDK `on_notification` frames,
+then exactly one `result`. Go stream-reads that pipe while the child runs,
+maps root-session turn/tool brackets into Genesis lifecycle CloudEvents, and
+appends them to `events.jsonl` before in-process fan-out. Those records are
+observations, not ingress: do not POST them back to `/events`.
+
+```
+<data>/runs/gen_<hex>/
+  events.jsonl    # CloudEvents 1.0 lifecycle records
+  stderr.log
+  result.json     # terminal runner object, redacted
+  dsh_home/       # retained SDK home / session JSONL
+```
+
+Lifecycle types are `dev.genesis.run.accepted`, `start`, `session.created`,
+`turn`, `tool`, `result`, `error`, and `end`. Each event has a unique `evt_`
+id, a per-run `sequence`, `time`, run/agent/rule identity, optional
+`sessionid`, and causation (`causeid` / `causesource` / `causetype`) to the
+incoming CloudEvent. Turn and tool payloads keep a `raw` SDK notification
+without making SDK schema the domain vocabulary. There is no live token type:
+the pinned SDK does not deliver `assistant/chunk` or adapter `text-delta` on
+this pipe.
 
 Genesis emits JSON logs. The completion record contains `genesis_run_id`,
-`rule`, `agent`, `deepseek_session_id`, `finish_reason`, `final_response`,
-`error_type`, `error`, `diagnostics`, and captured runner `stderr`. Any finish
-reason other than `completed` is logged at `ERROR`, even when the SDK returned
-no explicit exception. Diagnostics include the relevant `turn/end`, related
-error events, and non-session notifications. Exceptions and runner stderr are
-retained. Failures remain asynchronous and are not retried.
+`rule`, `agent`, `run_dir`, `deepseek_session_id`, `finish_reason`,
+`final_response`, `error_type`, `error`, `diagnostics`, and captured runner
+`stderr`. Any finish reason other than `completed` is logged at `ERROR`, even
+when the SDK returned no explicit exception. Diagnostics include the relevant
+`turn/end`, related error events, and non-session notifications. Exceptions
+and runner stderr are retained. Failures remain asynchronous and are not
+retried. Secret values never appear in journals, slog, or `stderr.log`.
 
 ## Credential-free verification
 
@@ -184,12 +213,14 @@ and structured logs:
 
 ```sh
 tmp="$(mktemp -d)"
-mkdir -p "$tmp/bin" "$tmp/agents" "$tmp/rules" "$tmp/work" "$tmp/home"
+mkdir -p "$tmp/bin" "$tmp/agents" "$tmp/rules" "$tmp/work" "$tmp/home" "$tmp/data"
 
 cat >"$tmp/bin/python3" <<'SH'
 #!/bin/sh
 /bin/cat >"$GENESIS_CAPTURE"
-printf '%s\n' '{"deepseek_session_id":"fake-session","finish_reason":"completed","final_response":"fake response","error":null,"diagnostics":null}'
+printf '%s\n' '{"v":1,"type":"session.created","run_id":"ignored","session_id":"fake-session"}'
+printf '%s\n' '{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"fake-session","event":{"type":"turn/start","seq":1,"data":{}}}}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"fake-session","finish_reason":"completed","final_response":"fake response","error":null,"diagnostics":null}'
 SH
 chmod +x "$tmp/bin/python3"
 
@@ -212,7 +243,7 @@ go build -o "$tmp/genesis" ./cmd/genesis
 env -u DEEPSEEK_API_KEY \
   GENESIS_CAPTURE="$tmp/invocation.json" PATH="$tmp/bin:$PATH" \
   "$tmp/genesis" -listen 127.0.0.1:18787 \
-  -agents "$tmp/agents" -rules "$tmp/rules" \
+  -agents "$tmp/agents" -rules "$tmp/rules" -data "$tmp/data" \
   >"$tmp/server.log" 2>&1 &
 server_pid=$!
 cleanup() {
@@ -261,7 +292,17 @@ grep -q '"DSH_SYSTEM_PROMPT"' "$tmp/invocation.json" ||
   { cat "$tmp/invocation.json"; exit 1; }
 ! grep -q 'DEEPSEEK_API_KEY' "$tmp/invocation.json" ||
   { cat "$tmp/invocation.json"; exit 1; }
+test -d "$tmp/data/runs" || { cat "$tmp/server.log"; exit 1; }
+run_dir="$(find "$tmp/data/runs" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+test -n "$run_dir" || { ls -la "$tmp/data"; cat "$tmp/server.log"; exit 1; }
+grep -q '"type":"dev.genesis.run.accepted"' "$run_dir/events.jsonl" ||
+  { cat "$run_dir/events.jsonl"; exit 1; }
+grep -q '"type":"dev.genesis.run.end"' "$run_dir/events.jsonl" ||
+  { cat "$run_dir/events.jsonl"; exit 1; }
+! grep -q 'DEEPSEEK_API_KEY' "$run_dir/events.jsonl" ||
+  { cat "$run_dir/events.jsonl"; exit 1; }
 cat "$tmp/invocation.json"
+cat "$run_dir/events.jsonl"
 cat "$tmp/server.log"
 
 cleanup
@@ -299,7 +340,8 @@ chmod 600 /tmp/genesis-live-agents/workspace-janitor.yaml \
 uv run --locked ./bin/genesis \
   -listen 127.0.0.1:18787 \
   -agents /tmp/genesis-live-agents \
-  -rules /tmp/genesis-live-rules
+  -rules /tmp/genesis-live-rules \
+  -data /tmp/genesis-live-data
 ```
 
 From another terminal, send:
@@ -317,7 +359,7 @@ curl -i http://127.0.0.1:18787/events \
 ```
 
 The request returns before the model finishes; watch the first terminal for
-the completion log.
+the completion log and `tail -f /tmp/genesis-live-data/runs/gen_*/events.jsonl`.
 
 ## POST /sync
 
@@ -355,11 +397,12 @@ This path is for Docker Desktop's Linux engine via a WSL distro. It is not
 validated on this project's cloud VMs unless `docker` is installed there.
 
 Agents and rules are **not** bind-mounted from the WSL tree. Compose mounts
-the named volume `genesis-config` at `/var/lib/genesis/config`. That volume
-is owned by the image `genesis` user (uid `65532`). The first time the
-volume is created, the entrypoint copies default YAML from
+the named volume `genesis-config` at `/var/lib/genesis/config` and
+`genesis-data` at `/var/lib/genesis/data`. Those volumes are owned by the
+image `genesis` user (uid `65532`). The first time `genesis-config` is
+created, the entrypoint copies default YAML from
 `/usr/share/genesis/defaults`. Later `docker compose up` keeps whatever is
-already in the volume. The genesis binary and `/app/.venv` stay root-owned
+already in the volumes. The genesis binary and `/app/.venv` stay root-owned
 and are not writable by `genesis`.
 
 1. Install Docker Desktop on Windows and enable WSL 2.
@@ -406,9 +449,11 @@ Line endings are forced to LF via `.gitattributes`.
 
 Persistence:
 
-- `docker compose down` stops the container and **keeps** `genesis-config`.
-  The next `up` reuses the same agents and rules.
-- `docker compose down -v` deletes `genesis-config`. The next `up` reseeds
-  the image defaults into a new volume. That is the reset.
+- `docker compose down` stops the container and **keeps** `genesis-config`
+  and `genesis-data`. The next `up` reuses the same agents, rules, and run
+  journals.
+- `docker compose down -v` deletes both volumes. The next `up` reseeds the
+  image defaults into a new config volume and starts with empty run storage.
+  That is the reset.
 
 

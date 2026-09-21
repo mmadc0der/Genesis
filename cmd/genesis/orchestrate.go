@@ -24,7 +24,7 @@ type listenerIdentity struct {
 	Groups   []uint32
 }
 
-func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, syncToken, listenerUser string) {
+func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, dataDir, syncToken, listenerUser string) {
 	identity, err := resolveListenerIdentity(os.Geteuid(), listenerUser)
 	if err != nil {
 		fail(logger, "resolve listener user", err)
@@ -53,11 +53,18 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, syncToken, list
 		parent.Close()
 		fail(logger, "resolve rules directory", err)
 	}
+	absoluteDataDir, err := filepath.Abs(dataDir)
+	if err != nil {
+		child.Close()
+		parent.Close()
+		fail(logger, "resolve data directory", err)
+	}
 
 	command := exec.Command(executable, "listen",
 		"-listen", listen,
 		"-agents", absoluteAgentsDir,
 		"-rules", absoluteRulesDir,
+		"-data", absoluteDataDir,
 	)
 	command.Env = launchChildEnv(syncToken, identity)
 	applyListenerIdentity(command, identity)
@@ -79,6 +86,7 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, syncToken, list
 		"address", listen,
 		"agents", absoluteAgentsDir,
 		"rules", absoluteRulesDir,
+		"data", absoluteDataDir,
 		"sync_configured", syncToken != "",
 	}
 	if identity != nil {

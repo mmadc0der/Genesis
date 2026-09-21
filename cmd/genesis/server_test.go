@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,11 @@ func (f *fakeRunner) Run(document invocation) {
 	if f.release != nil {
 		<-f.release
 	}
+}
+
+func testStore(t *testing.T) *runStore {
+	t.Helper()
+	return newRunStore(t.TempDir(), newEventBus(), slog.New(slog.NewJSONHandler(io.Discard, nil)))
 }
 
 func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
@@ -59,6 +65,7 @@ func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
 		rulesDir:  rulesDir,
 		runner:    fake,
 		logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		store:     testStore(t),
 		newRunID: func() (string, error) {
 			runID := runIDs[0]
 			runIDs = runIDs[1:]
@@ -166,6 +173,7 @@ func TestEventServerIgnoresFilesystemEditsUntilSync(t *testing.T) {
 		newRunID:  func() (string, error) { return "gen_reload", nil },
 		logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		syncToken: "sync-secret",
+		store:     testStore(t),
 	}
 	if err := server.loadInitialGeneration(); err != nil {
 		t.Fatal(err)
@@ -232,13 +240,18 @@ func TestEventServerKeepsCacheWhenDiskBecomesInvalid(t *testing.T) {
 		Agent: "ok",
 	})
 	fake := &fakeRunner{invocations: make(chan invocation, 2)}
+	n := 0
 	server := &eventServer{
 		agentsDir: agentsDir,
 		rulesDir:  rulesDir,
 		runner:    fake,
-		newRunID:  func() (string, error) { return "gen_ok", nil },
+		newRunID: func() (string, error) {
+			n++
+			return "gen_ok_" + strconv.Itoa(n), nil
+		},
 		logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		syncToken: "sync-secret",
+		store:     testStore(t),
 	}
 	if err := server.loadInitialGeneration(); err != nil {
 		t.Fatal(err)
@@ -547,14 +560,20 @@ func TestProcessRunnerCapturesInvocationAndStructuredResult(t *testing.T) {
 	fakePython := writeExecutable(t, `
 #!/bin/sh
 /bin/cat >"$GENESIS_CAPTURE"
-printf '%s\n' '{"deepseek_session_id":"dsh-session-1","finish_reason":"completed","final_response":"done","error":null,"diagnostics":null}'
+printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_test","session_id":"dsh-session-1"}'
+printf '%s\n' '{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"dsh-session-1","event":{"type":"turn/start","seq":1,"data":{}}}}'
+printf '%s\n' '{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"dsh-session-1","event":{"type":"tool/call","seq":2,"data":{"name":"bash","id":"call-1"}}}}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"dsh-session-1","finish_reason":"completed","final_response":"done","error":null,"diagnostics":null}'
 `)
 
 	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	store := newRunStore(t.TempDir(), newEventBus(), logger)
 	runner := processRunner{
 		pythonPath: fakePython,
 		source:     "embedded runner source",
-		logger:     slog.New(slog.NewJSONHandler(&logs, nil)),
+		logger:     logger,
+		store:      store,
 	}
 	document := invocation{
 		Event: cloudEvent{
@@ -570,6 +589,9 @@ printf '%s\n' '{"deepseek_session_id":"dsh-session-1","finish_reason":"completed
 		Home:         "/home/janitor",
 		Instructions: "You are the workspace janitor.",
 		Env:          map[string]string{"ONLY": "declared"},
+	}
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
 	}
 	runner.Run(document)
 
@@ -603,22 +625,44 @@ printf '%s\n' '{"deepseek_session_id":"dsh-session-1","finish_reason":"completed
 	if finished["error"] != nil {
 		t.Fatalf("success error = %#v", finished["error"])
 	}
+
+	events := readRunEvents(t, store, document.RunID)
+	assertEventTypes(t, events, []string{
+		lifecycleTypeAccepted,
+		lifecycleTypeStart,
+		lifecycleTypeSessionCreated,
+		lifecycleTypeTurn,
+		lifecycleTypeTool,
+		lifecycleTypeResult,
+		lifecycleTypeEnd,
+	})
+	if _, err := os.Stat(filepath.Join(document.DshHome)); err != nil {
+		t.Fatalf("dsh_home was not retained: %v", err)
+	}
 }
 
 func TestProcessRunnerStructuredLogsErrors(t *testing.T) {
 	fakePython := writeExecutable(t, `
 #!/bin/sh
 /bin/cat >/dev/null
-printf '%s\n' '{"deepseek_session_id":"dsh-error","finish_reason":"error","final_response":"","error":null,"diagnostics":{"turn_end":{"type":"turn/end","data":{"reason":{"kind":"error","message":"upstream unavailable"}}},"events":[{"type":"agent/error","data":{"message":"provider request failed"}},{"type":"turn/end","data":{"reason":{"kind":"error","message":"upstream unavailable"}}}],"notifications":[]}}'
+printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_bad","session_id":"dsh-error"}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"dsh-error","finish_reason":"error","final_response":"","error":null,"diagnostics":{"turn_end":{"type":"turn/end","data":{"reason":{"kind":"error","message":"upstream unavailable"}}},"events":[{"type":"agent/error","data":{"message":"provider request failed"}},{"type":"turn/end","data":{"reason":{"kind":"error","message":"upstream unavailable"}}}],"notifications":[]}}'
 printf '%s\n' 'runner stderr' >&2
 `)
 	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	store := newRunStore(t.TempDir(), newEventBus(), logger)
 	runner := processRunner{
 		pythonPath: fakePython,
 		source:     "embedded runner source",
-		logger:     slog.New(slog.NewJSONHandler(&logs, nil)),
+		logger:     logger,
+		store:      store,
 	}
-	runner.Run(invocation{Rule: "bad.yaml", Agent: "bad-agent", RunID: "gen_bad"})
+	document := invocation{Rule: "bad.yaml", Agent: "bad-agent", RunID: "gen_bad"}
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	runner.Run(document)
 
 	records := decodeLogRecords(t, logs.Bytes())
 	finished := records[len(records)-1]
@@ -639,6 +683,26 @@ printf '%s\n' 'runner stderr' >&2
 	turnEnd, ok := diagnostics["turn_end"].(map[string]any)
 	if !ok || turnEnd["type"] != "turn/end" {
 		t.Fatalf("turn/end diagnostics = %#v", diagnostics["turn_end"])
+	}
+}
+
+func readRunEvents(t *testing.T, store *runStore, runID string) []lifecycleEvent {
+	t.Helper()
+	events, err := readJournalPrefix(filepath.Join(store.dataDir, runsDirName, runID, eventsFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+func assertEventTypes(t *testing.T, events []lifecycleEvent, want []string) {
+	t.Helper()
+	got := make([]string, 0, len(events))
+	for _, event := range events {
+		got = append(got, event.Type)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("event types = %#v, want %#v", got, want)
 	}
 }
 

@@ -16,7 +16,12 @@ services:
       - type: volume
         source: config
         target: /var/lib/genesis/config
+      - type: volume
+        source: data
+        target: /var/lib/genesis/data
 
 volumes:
   config:
     name: genesis-config
+  data:
+    name: genesis-data

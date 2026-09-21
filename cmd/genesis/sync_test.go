@@ -248,6 +248,7 @@ func newSyncTestServer(t *testing.T, coordinator privilegedCoordinator) *eventSe
 		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		syncToken:   "sync-secret",
 		coordinator: coordinator,
+		store:       testStore(t),
 	}
 	if err := server.loadInitialGeneration(); err != nil {
 		t.Fatal(err)

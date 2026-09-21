@@ -15,7 +15,7 @@ RUN uv sync --locked --no-dev --compile-bytecode
 
 FROM python:3.12-bookworm
 RUN useradd --create-home --uid 65532 --shell /usr/sbin/nologin genesis \
-	&& mkdir -p /var/lib/genesis/config /usr/share/genesis/defaults
+	&& mkdir -p /var/lib/genesis/config /var/lib/genesis/data /usr/share/genesis/defaults
 WORKDIR /app
 COPY --from=build /out/genesis /usr/local/bin/genesis
 COPY --from=python-deps /app/.venv /app/.venv
@@ -33,4 +33,4 @@ EXPOSE 8787
 # Orchestrator stays root so it can drop the listener to `genesis`.
 USER root
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["launch", "-listen", "0.0.0.0:8787", "-agents", "/var/lib/genesis/config/agents.d", "-rules", "/var/lib/genesis/config/rules.d", "-listener-user", "genesis"]
+CMD ["launch", "-listen", "0.0.0.0:8787", "-agents", "/var/lib/genesis/config/agents.d", "-rules", "/var/lib/genesis/config/rules.d", "-data", "/var/lib/genesis/data", "-listener-user", "genesis"]

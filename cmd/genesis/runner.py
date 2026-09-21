@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +17,11 @@ SESSION_LOG_OFF_PATCH = """\
   config:
     enabled: false
 """
+
+MAX_STDOUT_FRAME_BYTES = 16 * 1024 * 1024
+SESSION_CREATED = "session.created"
+NOTIFICATION = "notification"
+RESULT = "result"
 
 
 @contextmanager
@@ -37,15 +41,28 @@ def validate_invocation(value: Any) -> dict[str, Any]:
         raise TypeError("invocation must be a JSON object")
     if not isinstance(value.get("event"), dict):
         raise TypeError("event must be a JSON object")
-    for field in ("rule", "agent", "run_id", "cwd", "home", "instructions"):
+    for field in (
+        "rule",
+        "agent",
+        "run_id",
+        "cwd",
+        "home",
+        "instructions",
+        "dsh_home",
+    ):
         if not isinstance(value.get(field), str) or not value[field]:
             raise ValueError(f"{field} must be a non-empty string")
     if not str(value["instructions"]).strip():
         raise ValueError("instructions must be a non-empty string")
-    if not Path(value["cwd"]).is_absolute():
-        raise ValueError("cwd must be absolute")
-    if not Path(value["home"]).is_absolute():
-        raise ValueError("home must be absolute")
+    for field in ("cwd", "home", "dsh_home"):
+        if not Path(value[field]).is_absolute():
+            raise ValueError(f"{field} must be absolute")
+    run_dir = value.get("run_dir")
+    if run_dir is not None:
+        if not isinstance(run_dir, str) or not run_dir:
+            raise ValueError("run_dir must be a non-empty string")
+        if not Path(run_dir).is_absolute():
+            raise ValueError("run_dir must be absolute")
     environment = value.get("env")
     if not isinstance(environment, dict) or not all(
         isinstance(key, str) and isinstance(item, str)
@@ -58,6 +75,8 @@ def validate_invocation(value: Any) -> dict[str, Any]:
 def execute(
     invocation: dict[str, Any],
     harness_factory: Callable[..., Any] | None = None,
+    on_session_created: Callable[[str], None] | None = None,
+    on_notification: Callable[[Any], None] | None = None,
 ) -> dict[str, Any]:
     invocation = validate_invocation(invocation)
     if harness_factory is None:
@@ -77,22 +96,33 @@ def execute(
         separators=(",", ":"),
         sort_keys=True,
     )
-    with tempfile.TemporaryDirectory(prefix=f"{invocation['run_id']}-") as dsh_home:
-        patch_path = Path(dsh_home) / "session-log-off.patch.yml"
-        patch_path.write_text(SESSION_LOG_OFF_PATCH, encoding="utf-8")
-        with (
-            complete_environment(environment),
-            harness_factory(
-                provider="deepseek-official",
-                model="deepseek-v4-flash",
-                cwd=invocation["cwd"],
-                runtime_cwd=dsh_home,
-                dsh_home=dsh_home,
-                profile="sdk-minimal",
-                patches=(str(patch_path),),
-            ) as harness,
-        ):
-            result = harness.run(message)
+    dsh_home = invocation["dsh_home"]
+    home_path = Path(dsh_home)
+    if not home_path.is_dir():
+        raise ValueError("dsh_home must be an existing directory")
+    if home_path.resolve() == Path(invocation["home"]).resolve():
+        raise ValueError("dsh_home must be distinct from agent home")
+    if home_path.resolve() == Path(invocation["cwd"]).resolve():
+        raise ValueError("dsh_home must be distinct from cwd")
+
+    patch_path = home_path / "session-log-off.patch.yml"
+    patch_path.write_text(SESSION_LOG_OFF_PATCH, encoding="utf-8")
+    with (
+        complete_environment(environment),
+        harness_factory(
+            provider="deepseek-official",
+            model="deepseek-v4-flash",
+            cwd=invocation["cwd"],
+            runtime_cwd=dsh_home,
+            dsh_home=dsh_home,
+            profile="sdk-minimal",
+            patches=(str(patch_path),),
+        ) as harness,
+    ):
+        session = harness.start_session()
+        if on_session_created is not None:
+            on_session_created(session.id)
+        result = session.run(message, on_notification=on_notification)
 
     finish_reason = result.finish_reason
     final_response = result.final_response
@@ -157,10 +187,62 @@ def extract_diagnostics(result: Any) -> dict[str, Any]:
     }
 
 
+def emit_frame(obj: dict[str, Any]) -> None:
+    line = json.dumps(
+        obj,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+    encoded = (line + "\n").encode("utf-8")
+    if len(encoded) > MAX_STDOUT_FRAME_BYTES:
+        sys.stderr.write("skipped oversized stdout frame\n")
+        sys.stderr.flush()
+        return
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
+def emit_notification(notification: Any) -> None:
+    try:
+        emit_frame(
+            {
+                "v": 1,
+                "type": NOTIFICATION,
+                "method": getattr(notification, "method", None),
+                "payload": getattr(notification, "payload", None),
+            }
+        )
+    except Exception as error:  # noqa: BLE001 - tee must not fail the run.
+        sys.stderr.write(f"skipped notification: {error}\n")
+        sys.stderr.flush()
+
+
+def result_frame(output: dict[str, Any]) -> dict[str, Any]:
+    return {"v": 1, "type": RESULT, **output}
+
+
 def main() -> int:
+    output: dict[str, Any] | None = None
     try:
         invocation = json.load(sys.stdin)
-        output = execute(invocation)
+        run_id = invocation.get("run_id") if isinstance(invocation, dict) else None
+
+        def on_session_created(session_id: str) -> None:
+            emit_frame(
+                {
+                    "v": 1,
+                    "type": SESSION_CREATED,
+                    "run_id": run_id,
+                    "session_id": session_id,
+                }
+            )
+
+        output = execute(
+            invocation,
+            on_session_created=on_session_created,
+            on_notification=emit_notification,
+        )
         status = 0 if output["error"] is None else 1
     except Exception as error:  # noqa: BLE001 - return process errors to Go.
         output = {
@@ -175,15 +257,7 @@ def main() -> int:
         }
         status = 1
 
-    json.dump(
-        output,
-        sys.stdout,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        default=str,
-    )
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    emit_frame(result_frame(output))
     return status
 
 

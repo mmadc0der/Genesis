@@ -189,7 +189,8 @@ func TestLaunchBinarySupervisesListenerAndSync(t *testing.T) {
 	fakePython := writeExecutable(t, `
 #!/bin/sh
 /bin/cat >/dev/null
-printf '%s\n' '{"deepseek_session_id":"fake","finish_reason":"completed","final_response":"ok","error":null,"diagnostics":null}'
+printf '%s\n' '{"v":1,"type":"session.created","run_id":"fake","session_id":"fake"}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"fake","finish_reason":"completed","final_response":"ok","error":null,"diagnostics":null}'
 `)
 	if err := os.Rename(fakePython, filepath.Join(pythonDir, "python3")); err != nil {
 		t.Fatal(err)
@@ -207,10 +208,12 @@ printf '%s\n' '{"deepseek_session_id":"fake","finish_reason":"completed","final_
 	if err != nil {
 		t.Fatal(err)
 	}
+	dataDir := filepath.Join(dir, "data")
 	command := exec.Command(bin, "launch",
 		"-listen", addr,
 		"-agents", agentsDir,
 		"-rules", rulesDir,
+		"-data", dataDir,
 		"-sync-token", "launch-token",
 	)
 	command.Env = append(launchTestEnv(pythonDir), syncTokenEnv+"=unused-parent")
@@ -348,7 +351,7 @@ func TestLaunchBinaryDisablesSyncWithoutToken(t *testing.T) {
 	if err := os.Mkdir(pythonDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fakePython := writeExecutable(t, "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '{}'\n")
+	fakePython := writeExecutable(t, "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '{\"v\":1,\"type\":\"result\",\"deepseek_session_id\":null,\"finish_reason\":null,\"final_response\":null,\"error\":null,\"diagnostics\":null}'\n")
 	if err := os.Rename(fakePython, filepath.Join(pythonDir, "python3")); err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +366,7 @@ func TestLaunchBinaryDisablesSyncWithoutToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(bin, "launch", "-listen", addr, "-agents", agentsDir, "-rules", rulesDir)
+	command := exec.Command(bin, "launch", "-listen", addr, "-agents", agentsDir, "-rules", rulesDir, "-data", filepath.Join(dir, "data"))
 	command.Env = launchTestEnv(pythonDir)
 	command.Stdout = logFile
 	command.Stderr = logFile

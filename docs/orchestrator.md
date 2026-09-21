@@ -125,8 +125,10 @@ commands. Compose runs `genesis launch` as root, drops the listener to the
 image `genesis` user, and publishes `8787`. Agents and rules live on the
 named volume `genesis-config` at `/var/lib/genesis/config`, writable by
 `genesis` and seeded from `/usr/share/genesis/defaults` on first volume
-creation. `docker compose down` keeps the volume; `docker compose down -v`
-deletes it so the next `up` reseeds defaults. The binary and `/app/.venv`
+creation. Run journals live on named volume `genesis-data` at
+`/var/lib/genesis/data`. `docker compose down` keeps both volumes;
+`docker compose down -v` deletes them so the next `up` reseeds config
+defaults and starts with empty run storage. The binary and `/app/.venv`
 are not writable by `genesis`. Supply `GENESIS_SYNC_TOKEN` in compose; the
 binary will not invent one. The privileged protocol still reports
 unsupported host diffs.
