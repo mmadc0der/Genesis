@@ -2,6 +2,7 @@
 # Exact Docker Desktop + WSL smoke test for Genesis.
 # Run this from the repository root inside a WSL distro that has Docker
 # Desktop integration enabled. Do not run it from PowerShell or cmd.exe.
+# Agents and rules live on the named volume genesis-config, not a host bind.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -30,11 +31,11 @@ esac
 
 token="${GENESIS_SYNC_TOKEN:-compose-sync-token}"
 export GENESIS_SYNC_TOKEN="$token"
-smoke_rule="rules.d/wsl-smoke.yaml"
+smoke_rule=/var/lib/genesis/config/rules.d/wsl-smoke.yaml
 
 docker compose up --build -d
 cleanup() {
-  rm -f "$smoke_rule"
+  docker compose exec -T -u genesis genesis rm -f "$smoke_rule" >/dev/null 2>&1 || true
   docker compose down >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -61,7 +62,16 @@ if ! docker compose logs | grep -q '"listener_user":"genesis"'; then
   exit 1
 fi
 
-cat >"$smoke_rule" <<'YAML'
+if docker compose exec -T -u genesis genesis sh -c 'touch /usr/local/bin/genesis' >/dev/null 2>&1; then
+  echo "genesis was able to write the genesis binary" >&2
+  exit 1
+fi
+if docker compose exec -T -u genesis genesis sh -c 'touch /app/.venv/genesis-write-probe' >/dev/null 2>&1; then
+  echo "genesis was able to write the runtime venv" >&2
+  exit 1
+fi
+
+docker compose exec -T -u genesis genesis tee "$smoke_rule" >/dev/null <<'YAML'
 match:
   type: dev.genesis.wsl
 agent: workspace-janitor
@@ -108,5 +118,8 @@ if [ "$synced" != "202" ]; then
   exit 1
 fi
 
+docker compose exec -T -u genesis genesis rm -f "$smoke_rule"
+
 echo "WSL Docker smoke passed."
+echo "Named volume genesis-config keeps agents/rules across compose down; compose down -v reseeds defaults."
 echo "Windows browsers can use http://127.0.0.1:8787/ because Docker Desktop publishes the port on localhost."

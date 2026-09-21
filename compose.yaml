@@ -13,11 +13,10 @@ services:
       GENESIS_SYNC_TOKEN: ${GENESIS_SYNC_TOKEN:-compose-sync-token}
       GENESIS_LISTENER_USER: genesis
     volumes:
-      - type: bind
-        source: ./agents.d
-        target: /app/agents.d
-        read_only: true
-      - type: bind
-        source: ./rules.d
-        target: /app/rules.d
-        read_only: true
+      - type: volume
+        source: config
+        target: /var/lib/genesis/config
+
+volumes:
+  config:
+    name: genesis-config

@@ -354,11 +354,19 @@ invent one.
 This path is for Docker Desktop's Linux engine via a WSL distro. It is not
 validated on this project's cloud VMs unless `docker` is installed there.
 
+Agents and rules are **not** bind-mounted from the WSL tree. Compose mounts
+the named volume `genesis-config` at `/var/lib/genesis/config`. That volume
+is owned by the image `genesis` user (uid `65532`). The first time the
+volume is created, the entrypoint copies default YAML from
+`/usr/share/genesis/defaults`. Later `docker compose up` keeps whatever is
+already in the volume. The genesis binary and `/app/.venv` stay root-owned
+and are not writable by `genesis`.
+
 1. Install Docker Desktop on Windows and enable WSL 2.
 2. Settings → Resources → WSL integration: enable your distro (for example
    Ubuntu).
-3. Clone the repository **inside WSL**, for example `~/src/genesis`. Do not
-   use `/mnt/c/...` or `\\wsl$\...` as the compose bind-mount source.
+3. Clone the repository **inside WSL**, for example `~/src/genesis`, so the
+   image build context is a Linux filesystem. Do not build from `/mnt/c/...`.
 4. From a WSL shell, not PowerShell:
 
 ```sh
@@ -369,22 +377,38 @@ export GENESIS_SYNC_TOKEN='compose-sync-token'
 docker compose up --build
 ```
 
-5. From WSL, or from Windows via Desktop's localhost publish:
+5. Edit configuration **inside the volume** as `genesis`, then sync:
 
 ```sh
+docker compose exec -u genesis genesis tee \
+  /var/lib/genesis/config/rules.d/lab.yaml >/dev/null <<'YAML'
+match:
+  type: dev.genesis.lab
+agent: workspace-janitor
+YAML
 curl -i http://127.0.0.1:8787/sync \
   -H "Authorization: Bearer $GENESIS_SYNC_TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"scope":["agents","rules"]}'
 ```
 
-6. One-shot wrapper with the same checks, including a host-side rule edit
-   that stays inactive until `/sync`: `sh scripts/wsl-docker-smoke.sh`.
+Windows browsers can use `http://127.0.0.1:8787/` because Docker Desktop
+publishes the port on localhost.
 
-Compose runs `genesis launch` as root and drops the listener to the image
-`genesis` user (uid `65532`). Publish `8787:8787`. Supply
-`GENESIS_SYNC_TOKEN`; the binary will not generate one. Do not set
+6. One-shot wrapper: `sh scripts/wsl-docker-smoke.sh`. It writes and removes
+   a temporary rule inside the container as `genesis` and checks that the
+   edit stays inactive until `/sync`.
+
+Compose runs `genesis launch` as root and drops the listener to `genesis`.
+Supply `GENESIS_SYNC_TOKEN`; the binary will not generate one. Do not set
 `network_mode: host` (it does not mean the same thing on Docker Desktop).
-Line endings are forced to LF via `.gitattributes`. If bind-mounted YAML is
-unreadable, relax file mode to `0644` inside WSL.
+Line endings are forced to LF via `.gitattributes`.
+
+Persistence:
+
+- `docker compose down` stops the container and **keeps** `genesis-config`.
+  The next `up` reuses the same agents and rules.
+- `docker compose down -v` deletes `genesis-config`. The next `up` reseeds
+  the image defaults into a new volume. That is the reset.
+
 

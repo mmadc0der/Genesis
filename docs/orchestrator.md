@@ -122,6 +122,11 @@ reload `DEEPSEEK_API_KEY`. The runner strips `GENESIS_SYNC_TOKEN` and
 
 Use the Linux engine through WSL. See the README for the exact smoke
 commands. Compose runs `genesis launch` as root, drops the listener to the
-image `genesis` user, and publishes `8787`. Supply `GENESIS_SYNC_TOKEN` in
-compose; the binary will not invent one. The privileged protocol still
-reports unsupported host diffs.
+image `genesis` user, and publishes `8787`. Agents and rules live on the
+named volume `genesis-config` at `/var/lib/genesis/config`, writable by
+`genesis` and seeded from `/usr/share/genesis/defaults` on first volume
+creation. `docker compose down` keeps the volume; `docker compose down -v`
+deletes it so the next `up` reseeds defaults. The binary and `/app/.venv`
+are not writable by `genesis`. Supply `GENESIS_SYNC_TOKEN` in compose; the
+binary will not invent one. The privileged protocol still reports
+unsupported host diffs.
