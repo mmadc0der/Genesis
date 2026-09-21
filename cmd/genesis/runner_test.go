@@ -172,15 +172,83 @@ printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-live","fini
 	}
 }
 
+func TestProcessRunnerDrainsStderrRemainderAfterCapWithoutDeadlock(t *testing.T) {
+	const overflow = "OVERFLOW"
+	fakePython := writeExecutable(t, `
+#!/bin/sh
+/bin/cat >/dev/null
+printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_stderr_cap","session_id":"session-stderr"}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-stderr","finish_reason":"completed","final_response":"ok","error":null,"diagnostics":null}'
+exec 1>&-
+/usr/bin/python3 -c '
+import sys
+chunk = b"x" * (1024 * 1024)
+for _ in range(16):
+    sys.stderr.buffer.write(chunk)
+sys.stderr.buffer.write(b"OVERFLOW")
+sys.stderr.buffer.write(b"y" * (256 * 1024))
+sys.stderr.buffer.flush()
+'
+`)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	store := newRunStore(t.TempDir(), newEventBus(), logger)
+	document := sampleRunInvocation("gen_stderr_cap")
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		processRunner{pythonPath: fakePython, source: "src", logger: logger, store: store}.Run(document)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("runner deadlocked after stderr exceeded the retained cap")
+	}
+
+	logged, err := os.ReadFile(filepath.Join(document.RunDir, stderrFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logged) != maxFrameBytes {
+		t.Fatalf("stderr.log length = %d, want %d", len(logged), maxFrameBytes)
+	}
+	if bytes.Contains(logged, []byte(overflow)) || bytes.Contains(logged, []byte("y")) {
+		t.Fatal("stderr.log retained bytes past the 16MiB cap")
+	}
+	if !bytes.Equal(logged, bytes.Repeat([]byte("x"), maxFrameBytes)) {
+		t.Fatal("stderr.log prefix is not the capped 16MiB of x")
+	}
+
+	records := decodeLogRecords(t, logs.Bytes())
+	finished := records[len(records)-1]
+	stderrText, _ := finished["stderr"].(string)
+	if len(stderrText) != maxFrameBytes {
+		t.Fatalf("log stderr length = %d, want %d", len(stderrText), maxFrameBytes)
+	}
+	if strings.Contains(stderrText, overflow) || strings.Contains(stderrText, "y") {
+		t.Fatal("slog stderr retained bytes past the 16MiB cap")
+	}
+	if finished["finish_reason"] != "completed" {
+		t.Fatalf("finish_reason = %v", finished["finish_reason"])
+	}
+}
+
 func TestProcessRunnerRedactsSecretsFromJournalAndLogs(t *testing.T) {
 	secret := "sk-live-secret-value"
 	capture := filepath.Join(t.TempDir(), "invocation.json")
 	t.Setenv("GENESIS_CAPTURE", capture)
 	fakePython := writeExecutable(t, `
 #!/bin/sh
-/bin/cat >"$GENESIS_CAPTURE"
+input=$(cat)
+printf '%s' "$input" >"$GENESIS_CAPTURE"
+dsh_home=$(printf '%s' "$input" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["dsh_home"])')
+mkdir -p "$dsh_home/sessions/dummy"
+printf '%s\n' 'audit sk-live-secret-value' >"$dsh_home/sessions/dummy/session.jsonl"
 printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_secret","session_id":"session-secret"}'
-printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-secret","finish_reason":"completed","final_response":"echo sk-live-secret-value","error":null,"diagnostics":null}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-secret","finish_reason":"completed","final_response":"echo sk-live-secret-value","error":null,"diagnostics":{"hint":"used sk-live-secret-value"}}'
 printf '%s\n' 'stderr mentions sk-live-secret-value' >&2
 `)
 	var logs bytes.Buffer
@@ -217,6 +285,29 @@ printf '%s\n' 'stderr mentions sk-live-secret-value' >&2
 	}
 	if !bytes.Contains(captured, []byte(secret)) {
 		t.Fatalf("child stdin missing secret: %s", captured)
+	}
+	resultFile, err := os.ReadFile(filepath.Join(document.RunDir, resultFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(resultFile, []byte(secret)) {
+		t.Fatalf("secret leaked into result.json: %s", resultFile)
+	}
+	sessionLog, err := os.ReadFile(filepath.Join(document.DshHome, "sessions", "dummy", "session.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(sessionLog, []byte(secret)) {
+		t.Fatalf("raw session audit lost the secret: %s", sessionLog)
+	}
+	records := decodeLogRecords(t, logs.Bytes())
+	finished := records[len(records)-1]
+	diagnostics, _ := json.Marshal(finished["diagnostics"])
+	if bytes.Contains(diagnostics, []byte(secret)) {
+		t.Fatalf("secret leaked into slog diagnostics: %s", diagnostics)
+	}
+	if !bytes.Contains(diagnostics, []byte(redactedSecret)) {
+		t.Fatalf("slog diagnostics missing redaction: %s", diagnostics)
 	}
 }
 

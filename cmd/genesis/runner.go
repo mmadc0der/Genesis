@@ -118,7 +118,10 @@ func (r processRunner) Run(document invocation) {
 			defer stderrFile.Close()
 			writer = io.MultiWriter(journal.redactor.writer(stderrFile), &stderrBuf)
 		}
-		_, _ = io.Copy(writer, io.LimitReader(stderr, maxFrameBytes))
+		// Keep only the capped prefix in the journal/log, but always drain
+		// the remainder to EOF. Stopping at the LimitReader cap leaves the
+		// OS pipe full and can deadlock Wait.
+		copyCappedThenDrain(writer, stderr, maxFrameBytes)
 	}()
 
 	state := r.consumeStdout(journal, document, stdout)
@@ -327,9 +330,12 @@ func (r processRunner) finish(
 		logErr = processErr
 	}
 	logged := result
-	if journal != nil && journal.redactor != nil && logged.FinalResponse != nil {
-		redacted := journal.redactor.text(*logged.FinalResponse)
-		logged.FinalResponse = &redacted
+	if journal != nil && journal.redactor != nil {
+		if logged.FinalResponse != nil {
+			redacted := journal.redactor.text(*logged.FinalResponse)
+			logged.FinalResponse = &redacted
+		}
+		logged.Diagnostics = journal.redactor.value(logged.Diagnostics)
 	}
 	r.logResult(logger, document, logged, logErr, stderr)
 }
@@ -398,6 +404,19 @@ func optionalString(value *string) any {
 		return nil
 	}
 	return *value
+}
+
+func copyCappedThenDrain(dst io.Writer, src io.Reader, limit int64) {
+	if src == nil {
+		return
+	}
+	if dst == nil {
+		dst = io.Discard
+	}
+	if limit > 0 {
+		_, _ = io.Copy(dst, io.LimitReader(src, limit))
+	}
+	_, _ = io.Copy(io.Discard, src)
 }
 
 func sanitizedChildEnv() []string {

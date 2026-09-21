@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"slices"
 	"strings"
@@ -55,6 +57,25 @@ func (r *redactor) bytes(input []byte) []byte {
 
 func (r *redactor) text(input string) string {
 	return string(r.bytes([]byte(input)))
+}
+
+func (r *redactor) value(input any) any {
+	if r == nil || input == nil {
+		return input
+	}
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return input
+	}
+	redacted := r.bytes(payload)
+	if bytes.Equal(redacted, payload) {
+		return input
+	}
+	var out any
+	if err := json.Unmarshal(redacted, &out); err != nil {
+		return string(redacted)
+	}
+	return out
 }
 
 func (r *redactor) writer(dst io.Writer) io.Writer {
