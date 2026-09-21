@@ -4,6 +4,12 @@ Genesis accepts structured CloudEvents and asynchronously starts one DeepSeek
 Harness session for every matching YAML rule. It builds one executable:
 `genesis`.
 
+`genesis` and `genesis listen` are the unprivileged event listener.
+`genesis launch` starts that listener as a child and supervises it over a
+private inherited Unix socketpair used only for typed privileged
+coordination. See [docs/orchestrator.md](docs/orchestrator.md) for the exact
+cache, `/sync`, and failure semantics.
+
 Each session runs through the official Python SDK with the standalone
 `sdk-minimal` profile. `pyproject.toml` and the committed `uv.lock` pin the
 official `deepseek-harness-sdk` and `deepseek-harness-runtime-bin` packages to
@@ -13,7 +19,8 @@ executable is looked up in `PATH`.
 Who runs is a file-backed agent in `agents.d/`. A rule only selects that
 identity. `cwd` is the SDK workspace and `home` is the child process Unix
 `HOME`. They are a workspace/environment split under the shared Genesis UID,
-not a security sandbox. Genesis does not switch OS users.
+not a security sandbox. Genesis does not switch OS users and does not apply
+root host diffs; current YAML cannot name OS users or packages.
 
 ## Install and run
 
@@ -23,12 +30,19 @@ Go 1.22+, Python 3.10+, and
 ```sh
 uv sync --locked
 export DEEPSEEK_API_KEY='replace-with-a-real-key'
+export GENESIS_SYNC_TOKEN='replace-with-a-local-sync-token'
 
 mkdir -p bin
 go build -o bin/genesis ./cmd/genesis
-uv run --locked ./bin/genesis \
+uv run --locked ./bin/genesis launch \
   -listen 127.0.0.1:8787 -agents agents.d -rules rules.d
 ```
+
+`genesis -listen ...` still runs the listener in this process. `launch` is
+the supervisor: it inherits no extra HTTP port, generates a sync token when
+`GENESIS_SYNC_TOKEN` / `-sync-token` is empty, and keeps a private
+socketpair for privileged coordination. Filesystem edits are inactive until
+`POST /sync`.
 
 `uv run` places the managed `.venv` first in `PATH`. Equivalently, activate it
 with `. .venv/bin/activate` before running `./bin/genesis`. Genesis resolves
@@ -78,9 +92,10 @@ agent: workspace-janitor
 
 `match` entries are exact, case-sensitive comparisons against top-level string
 CloudEvent attributes. `agent` is a required agent ID. Every matching rule
-runs, in lexical filename order, and both directories are reloaded and
-validated for every request. A missing agent reference or leftover `run`
-block fails closed.
+runs, in lexical filename order. The listener caches agents and rules at
+start; later filesystem edits are inactive until an authorized `POST /sync`.
+A missing agent reference or leftover `run` block fails closed at load or
+sync time.
 
 The rule name is its filename. Rules have no `cwd`, environment, arguments,
 prompt, model, executable, or other run configuration.
@@ -301,3 +316,69 @@ curl -i http://127.0.0.1:18787/events \
 
 The request returns before the model finishes; watch the first terminal for
 the completion log.
+
+## POST /sync
+
+`POST /sync` reloads the requested YAML layers into the listener cache and
+asks the inherited privileged coordinator (when `genesis launch` attached
+one) to evaluate a typed host plan. It does not scan the filesystem on
+`POST /events`.
+
+```sh
+curl -i http://127.0.0.1:8787/sync \
+  -H "Authorization: Bearer $GENESIS_SYNC_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"scope":["agents","rules"]}'
+```
+
+`scope` is optional. `["rules"]` or `["agents"]` rereads only that directory.
+That is not host/matcher atomicity: a rules-only sync can activate new rules
+against previously cached agents while a newly written agent file stays
+invisible. Invalid YAML or a broken privileged socket leaves the previous
+cache in place. The JSON `privileged` object reports `attached`,
+`host_mutation: "none"`, empty `applied`, and explicit `unsupported` diffs
+for cwd/home and declared env keys. Genesis does not useradd, chown, or
+install packages.
+
+While sync runs, `POST /events` returns `503` with `Retry-After: 1`. A second
+sync returns `409`. In-flight runs keep the snapshot they were accepted with.
+
+Bearer auth is a local operator token, not a sandbox. Agents share the
+Genesis UID.
+
+## Docker Desktop on Windows with the repo in WSL
+
+This path is for Docker Desktop's Linux engine via a WSL distro. It is not
+validated on this project's cloud VMs unless `docker` is installed there.
+
+1. Install Docker Desktop on Windows and enable WSL 2.
+2. Settings → Resources → WSL integration: enable your distro (for example
+   Ubuntu).
+3. Clone the repository **inside WSL**, for example `~/src/genesis`. Do not
+   use `/mnt/c/...` or `\\wsl$\...` as the compose bind-mount source.
+4. From a WSL shell, not PowerShell:
+
+```sh
+cd ~/src/genesis
+docker compose version
+export DEEPSEEK_API_KEY='replace-with-a-real-key'
+export GENESIS_SYNC_TOKEN='compose-sync-token'
+docker compose up --build
+```
+
+5. From WSL, or from Windows via Desktop's localhost publish:
+
+```sh
+curl -i http://127.0.0.1:8787/sync \
+  -H "Authorization: Bearer $GENESIS_SYNC_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"scope":["agents","rules"]}'
+```
+
+6. One-shot wrapper with the same checks: `sh scripts/wsl-docker-smoke.sh`.
+
+Compose runs `genesis launch` as uid `65532` and publishes `8787:8787`. Do
+not set `network_mode: host` (it does not mean the same thing on Docker
+Desktop). Line endings are forced to LF via `.gitattributes`. If bind-mounted
+YAML is unreadable, relax file mode to `0644` inside WSL.
+

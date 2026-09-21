@@ -66,6 +66,9 @@ func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
 		},
 		secrets: inheritedEnvironment(),
 	}
+	if err := server.loadInitialGeneration(); err != nil {
+		t.Fatal(err)
+	}
 	event := map[string]any{
 		"specversion": "1.0",
 		"id":          "evt-1",
@@ -145,7 +148,7 @@ func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
 	}
 }
 
-func TestEventServerReloadsAgentsAndRulesEveryRequest(t *testing.T) {
+func TestEventServerIgnoresFilesystemEditsUntilSync(t *testing.T) {
 	agentsDir := t.TempDir()
 	rulesDir := t.TempDir()
 	cwd, home := writeNamedAgent(t, agentsDir, "reload-agent.yaml", nil)
@@ -162,6 +165,10 @@ func TestEventServerReloadsAgentsAndRulesEveryRequest(t *testing.T) {
 		runner:    fake,
 		newRunID:  func() (string, error) { return "gen_reload", nil },
 		logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		syncToken: "sync-secret",
+	}
+	if err := server.loadInitialGeneration(); err != nil {
+		t.Fatal(err)
 	}
 	event := map[string]any{
 		"specversion": "1.0",
@@ -185,8 +192,17 @@ func TestEventServerReloadsAgentsAndRulesEveryRequest(t *testing.T) {
 		Home:         home,
 	})
 	response = sendEvent(server, event)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("unsynced edit status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = sendSync(server, "sync-secret", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("sync status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response = sendEvent(server, event)
 	if response.Code != http.StatusAccepted {
-		t.Fatalf("reloaded match status = %d, body = %s", response.Code, response.Body.String())
+		t.Fatalf("synced match status = %d, body = %s", response.Code, response.Body.String())
 	}
 	select {
 	case document := <-fake.invocations:
@@ -203,23 +219,29 @@ func TestEventServerReloadsAgentsAndRulesEveryRequest(t *testing.T) {
 			t.Fatalf("credential-free invocation inherited a key: %#v", document.Env)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("reloaded rule was not invoked")
+		t.Fatal("synced rule was not invoked")
 	}
 }
 
-func TestEventServerRejectsInvalidAgentsAndMissingReferences(t *testing.T) {
+func TestEventServerKeepsCacheWhenDiskBecomesInvalid(t *testing.T) {
 	agentsDir := t.TempDir()
 	rulesDir := t.TempDir()
 	writeNamedAgent(t, agentsDir, "ok.yaml", nil)
 	writeRule(t, rulesDir+"/ok.yaml", rule{
 		Match: map[string]string{"type": "com.example.run"},
-		Agent: "missing-agent",
+		Agent: "ok",
 	})
+	fake := &fakeRunner{invocations: make(chan invocation, 2)}
 	server := &eventServer{
 		agentsDir: agentsDir,
 		rulesDir:  rulesDir,
-		runner:    &fakeRunner{invocations: make(chan invocation, 1)},
+		runner:    fake,
+		newRunID:  func() (string, error) { return "gen_ok", nil },
 		logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		syncToken: "sync-secret",
+	}
+	if err := server.loadInitialGeneration(); err != nil {
+		t.Fatal(err)
 	}
 	event := map[string]any{
 		"specversion": "1.0",
@@ -228,9 +250,27 @@ func TestEventServerRejectsInvalidAgentsAndMissingReferences(t *testing.T) {
 		"type":        "com.example.run",
 	}
 	response := sendEvent(server, event)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("valid cache status = %d, body = %s", response.Code, response.Body.String())
+	}
+	<-fake.invocations
+
+	writeRule(t, rulesDir+"/ok.yaml", rule{
+		Match: map[string]string{"type": "com.example.run"},
+		Agent: "missing-agent",
+	})
+	response = sendEvent(server, event)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("stale valid cache status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response = sendSync(server, "sync-secret", nil)
 	if response.Code != http.StatusInternalServerError ||
 		!strings.Contains(response.Body.String(), "rules are invalid") {
-		t.Fatalf("missing agent status = %d, body = %s", response.Code, response.Body.String())
+		t.Fatalf("invalid rules sync status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response = sendEvent(server, event)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("cache after failed sync status = %d, body = %s", response.Code, response.Body.String())
 	}
 
 	if err := os.WriteFile(filepath.Join(agentsDir, "ok.yaml"), []byte("user: alice\n"), 0o600); err != nil {
@@ -240,10 +280,14 @@ func TestEventServerRejectsInvalidAgentsAndMissingReferences(t *testing.T) {
 		Match: map[string]string{"type": "com.example.run"},
 		Agent: "ok",
 	})
-	response = sendEvent(server, event)
+	response = sendSync(server, "sync-secret", nil)
 	if response.Code != http.StatusInternalServerError ||
 		!strings.Contains(response.Body.String(), "agents are invalid") {
-		t.Fatalf("invalid agent status = %d, body = %s", response.Code, response.Body.String())
+		t.Fatalf("invalid agent sync status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response = sendEvent(server, event)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("cache after invalid agent sync status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -637,6 +681,25 @@ func sendEvent(server *eventServer, event map[string]any) *httptest.ResponseReco
 	contents, _ := json.Marshal(event)
 	request := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(string(contents)))
 	request.Header.Set("Content-Type", cloudEventsJSON)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	return response
+}
+
+func sendSync(server *eventServer, token string, body any) *httptest.ResponseRecorder {
+	var reader io.Reader = http.NoBody
+	request := httptest.NewRequest(http.MethodPost, "/sync", reader)
+	if body != nil {
+		contents, err := json.Marshal(body)
+		if err != nil {
+			panic(err)
+		}
+		request = httptest.NewRequest(http.MethodPost, "/sync", bytes.NewReader(contents))
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 	return response

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -71,19 +72,41 @@ type invocationRunner interface {
 }
 
 type eventServer struct {
-	agentsDir string
-	rulesDir  string
-	runner    invocationRunner
-	newRunID  func() (string, error)
-	secrets   map[string]string
-	logger    *slog.Logger
+	agentsDir   string
+	rulesDir    string
+	runner      invocationRunner
+	newRunID    func() (string, error)
+	secrets     map[string]string
+	logger      *slog.Logger
+	syncToken   string
+	coordinator privilegedCoordinator
+
+	mu         sync.RWMutex
+	syncing    bool
+	generation *generation
 }
 
 func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/events" {
+	switch r.URL.Path {
+	case "/events":
+		s.handleEvents(w, r)
+	case "/sync":
+		s.handleSync(w, r)
+	default:
 		http.NotFound(w, r)
-		return
 	}
+}
+
+func (s *eventServer) loadInitialGeneration() error {
+	generation, err := loadGeneration(s.agentsDir, s.rulesDir)
+	if err != nil {
+		return err
+	}
+	s.generation = generation
+	return nil
+}
+
+func (s *eventServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method must be POST", http.StatusMethodNotAllowed)
@@ -102,21 +125,22 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agents, err := loadAgents(s.agentsDir)
-	if err != nil {
-		s.log().Error("load agents", "error", err)
-		http.Error(w, "agents are invalid", http.StatusInternalServerError)
+	s.mu.RLock()
+	if s.syncing {
+		s.mu.RUnlock()
+		w.Header().Set("Retry-After", syncRetryAfter)
+		http.Error(w, "sync in progress", http.StatusServiceUnavailable)
 		return
 	}
-	rules, err := loadRules(s.rulesDir, agents)
-	if err != nil {
-		s.log().Error("load rules", "error", err)
-		http.Error(w, "rules are invalid", http.StatusInternalServerError)
+	current := s.generation
+	s.mu.RUnlock()
+	if current == nil {
+		http.Error(w, "generation is not loaded", http.StatusInternalServerError)
 		return
 	}
 
-	matches := make([]rule, 0, len(rules))
-	for _, candidate := range rules {
+	matches := make([]rule, 0, len(current.rules))
+	for _, candidate := range current.rules {
 		if candidate.matches(event) {
 			matches = append(matches, candidate)
 		}
@@ -138,7 +162,7 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	invocations := make([]invocation, 0, len(matches))
 	accepted := make([]acceptedRun, 0, len(matches))
 	for _, matched := range matches {
-		definition, ok := agents[matched.Agent]
+		definition, ok := current.agents[matched.Agent]
 		if !ok {
 			s.log().Error("matched rule is missing its agent", "rule", matched.name, "agent", matched.Agent)
 			http.Error(w, "rules are invalid", http.StatusInternalServerError)

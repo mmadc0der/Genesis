@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -52,6 +53,7 @@ func (r processRunner) Run(document invocation) {
 	}
 
 	command := exec.Command(r.pythonPath, "-c", r.source)
+	command.Env = sanitizedChildEnv()
 	command.Stdin = bytes.NewReader(input)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -144,4 +146,17 @@ func optionalString(value *string) any {
 		return nil
 	}
 	return *value
+}
+
+func sanitizedChildEnv() []string {
+	environment := os.Environ()
+	filtered := make([]string, 0, len(environment))
+	for _, item := range environment {
+		key, _, _ := strings.Cut(item, "=")
+		if key == privilegedFDEnv || key == syncTokenEnv {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }

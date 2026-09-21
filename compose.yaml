@@ -1,0 +1,21 @@
+services:
+  genesis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: genesis:local
+    init: true
+    ports:
+      - "8787:8787"
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      GENESIS_SYNC_TOKEN: ${GENESIS_SYNC_TOKEN:-compose-sync-token}
+    volumes:
+      - type: bind
+        source: ./agents.d
+        target: /app/agents.d
+        read_only: true
+      - type: bind
+        source: ./rules.d
+        target: /app/rules.d
+        read_only: true
