@@ -169,11 +169,9 @@ class RunnerTests(unittest.TestCase):
         Path(self.run_dir).mkdir()
 
     def invocation(self, **overrides):
-        return sample_invocation(
-            dsh_home=self.dsh_home,
-            run_dir=self.run_dir,
-            **overrides,
-        )
+        document = sample_invocation(dsh_home=self.dsh_home, run_dir=self.run_dir)
+        document.update(overrides)
+        return document
 
     def test_execute_uses_complete_event_environment_and_sdk_minimal(self):
         workspace = str(Path.cwd().resolve())
