@@ -36,10 +36,12 @@ const (
 	defaultEventLimit      = 200
 	maxEventLimit          = 1000
 
-	driftInSync       = "in_sync"
-	driftDraft        = "draft"
-	driftListenerDown = "listener_unavailable"
-	driftDesiredBad   = "desired_invalid"
+	driftInSync         = "in_sync"
+	driftDraft          = "draft"
+	driftListenerDown   = "listener_unavailable"
+	driftDesiredBad     = "desired_invalid"
+	driftGenerationHuge = "generation_too_large"
+	maxGenerationBytes  = 32 << 20
 
 	presenceActive     = "active"
 	presenceDraft      = "draft"
@@ -62,16 +64,17 @@ type controlConfig struct {
 }
 
 type controlServer struct {
-	agentsDir      string
-	rulesDir       string
-	dataDir        string
-	listenerURL    string
-	syncToken      string
-	webDir         string
-	logger         *slog.Logger
-	listenerClient *http.Client
-	pollEvery      time.Duration
-	newEventID     func() (string, error)
+	agentsDir       string
+	rulesDir        string
+	dataDir         string
+	listenerURL     string
+	syncToken       string
+	webDir          string
+	logger          *slog.Logger
+	listenerClient  *http.Client
+	pollEvery       time.Duration
+	generationLimit int
+	newEventID      func() (string, error)
 }
 
 type controlState struct {
@@ -262,20 +265,25 @@ func newControlServer(cfg controlConfig, logger *slog.Logger) *controlServer {
 		logger = slog.Default()
 	}
 	return &controlServer{
-		agentsDir:      cfg.agentsDir,
-		rulesDir:       cfg.rulesDir,
-		dataDir:        cfg.dataDir,
-		listenerURL:    cfg.listenerURL,
-		syncToken:      cfg.syncToken,
-		webDir:         cfg.webDir,
-		logger:         logger,
-		listenerClient: &http.Client{Timeout: 45 * time.Second},
-		pollEvery:      250 * time.Millisecond,
-		newEventID:     newControlEventID,
+		agentsDir:       cfg.agentsDir,
+		rulesDir:        cfg.rulesDir,
+		dataDir:         cfg.dataDir,
+		listenerURL:     cfg.listenerURL,
+		syncToken:       cfg.syncToken,
+		webDir:          cfg.webDir,
+		logger:          logger,
+		listenerClient:  &http.Client{Timeout: 45 * time.Second},
+		pollEvery:       250 * time.Millisecond,
+		generationLimit: maxGenerationBytes,
+		newEventID:      newControlEventID,
 	}
 }
 
 func (c *controlServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !loopbackRequest(r) {
+		http.Error(w, "host is not loopback", http.StatusForbidden)
+		return
+	}
 	if r.URL.Path == "/api/live" {
 		c.handleLive(w, r)
 		return
@@ -379,6 +387,15 @@ func (c *controlServer) currentState(r *http.Request) controlState {
 	state.Listener = listener
 	if err != nil {
 		state.Listener.Error = err.Error()
+		var overflow generationTooLargeError
+		if errors.As(err, &overflow) {
+			state.Listener.Reachable = true
+			state.Listener.OK = false
+			if state.Drift != driftDesiredBad {
+				state.Drift = driftGenerationHuge
+			}
+			return state
+		}
 		if state.Drift != driftDesiredBad {
 			state.Drift = driftListenerDown
 		}
@@ -441,7 +458,11 @@ func (c *controlServer) fetchActive(r *http.Request) (*generationView, listenerS
 		return nil, status, errors.New("listener generation is unreachable")
 	}
 	defer genResp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(genResp.Body, maxControlBody))
+	limit := c.generationLimit
+	if limit <= 0 {
+		limit = maxGenerationBytes
+	}
+	body, err := readCapped(genResp.Body, limit)
 	if err != nil {
 		return nil, status, err
 	}
@@ -463,12 +484,12 @@ func (c *controlServer) fetchActive(r *http.Request) (*generationView, listenerS
 }
 
 func (c *controlServer) handleAgents(w http.ResponseWriter, r *http.Request) {
-	agents, err := c.listAgents(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	agents, desiredErr := c.listAgents(r)
+	payload := map[string]any{"agents": agents}
+	if desiredErr != "" {
+		payload["desired_error"] = desiredErr
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (c *controlServer) handleAgent(w http.ResponseWriter, r *http.Request) {
@@ -477,11 +498,7 @@ func (c *controlServer) handleAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid agent id", http.StatusBadRequest)
 		return
 	}
-	agents, err := c.listAgents(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	agents, _ := c.listAgents(r)
 	for _, agent := range agents {
 		if agent.ID == id {
 			writeJSON(w, http.StatusOK, agent)
@@ -491,11 +508,8 @@ func (c *controlServer) handleAgent(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (c *controlServer) listAgents(r *http.Request) ([]listedAgent, error) {
+func (c *controlServer) listAgents(r *http.Request) ([]listedAgent, string) {
 	state := c.currentState(r)
-	if state.Desired == nil && state.DesiredError != "" {
-		return nil, errors.New(state.DesiredError)
-	}
 	byID := map[string]listedAgent{}
 	if state.Desired != nil {
 		for _, agent := range state.Desired.Agents {
@@ -532,16 +546,16 @@ func (c *controlServer) listAgents(r *http.Request) ([]listedAgent, error) {
 	for _, id := range ids {
 		out = append(out, byID[id])
 	}
-	return out, nil
+	return out, state.DesiredError
 }
 
 func (c *controlServer) handleRules(w http.ResponseWriter, r *http.Request) {
-	rules, err := c.listRules(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	rules, desiredErr := c.listRules(r)
+	payload := map[string]any{"rules": rules}
+	if desiredErr != "" {
+		payload["desired_error"] = desiredErr
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rules": rules})
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (c *controlServer) handleRule(w http.ResponseWriter, r *http.Request) {
@@ -550,11 +564,7 @@ func (c *controlServer) handleRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	rules, err := c.listRules(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	rules, _ := c.listRules(r)
 	for _, candidate := range rules {
 		if candidate.Name == name {
 			writeJSON(w, http.StatusOK, candidate)
@@ -564,11 +574,8 @@ func (c *controlServer) handleRule(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (c *controlServer) listRules(r *http.Request) ([]listedRule, error) {
+func (c *controlServer) listRules(r *http.Request) ([]listedRule, string) {
 	state := c.currentState(r)
-	if state.Desired == nil && state.DesiredError != "" {
-		return nil, errors.New(state.DesiredError)
-	}
 	order := make([]string, 0)
 	byName := map[string]listedRule{}
 	if state.Desired != nil {
@@ -608,7 +615,7 @@ func (c *controlServer) listRules(r *http.Request) ([]listedRule, error) {
 		seen[name] = struct{}{}
 		out = append(out, byName[name])
 	}
-	return out, nil
+	return out, state.DesiredError
 }
 
 func sameAgent(left, right agentView) bool {
@@ -968,49 +975,98 @@ func (c *controlServer) messageEvent(body messageBody) (map[string]any, error) {
 	if body.Subject != "" {
 		attributes["subject"] = body.Subject
 	}
-	if attributes["type"] == "" {
-		return nil, errors.New("type is required when the rule does not match one")
+	return buildMessageEvent(attributes, body.Message, c.newEventID)
+}
+
+func buildMessageEvent(attributes map[string]string, message string, newID func() (string, error)) (map[string]any, error) {
+	if attributes == nil {
+		attributes = map[string]string{}
 	}
-	if attributes["source"] == "" {
-		attributes["source"] = controlSource
+	if value, ok := attributes["specversion"]; ok && value != "1.0" {
+		return nil, fmt.Errorf("rule match %q conflicts with required CloudEvent specversion 1.0", "specversion")
 	}
-	newID := c.newEventID
-	if newID == nil {
-		newID = newControlEventID
+	if _, ok := attributes["data"]; ok {
+		return nil, errors.New("rule match \"data\" conflicts with the message payload")
 	}
-	id, err := newID()
-	if err != nil {
-		return nil, err
+	for _, key := range []string{"id", "type", "source"} {
+		if value, ok := attributes[key]; ok && strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("rule match %q must be a non-empty string", key)
+		}
 	}
 	event := map[string]any{
 		"specversion": "1.0",
-		"id":          id,
-		"source":      attributes["source"],
-		"type":        attributes["type"],
-		"data":        map[string]any{"message": body.Message},
+		"data":        map[string]any{"message": message},
 	}
-	if subject := attributes["subject"]; subject != "" {
-		event["subject"] = subject
+	for key, value := range attributes {
+		if key == "specversion" {
+			continue
+		}
+		event[key] = value
+	}
+	if _, ok := event["id"]; !ok {
+		if newID == nil {
+			newID = newControlEventID
+		}
+		id, err := newID()
+		if err != nil {
+			return nil, err
+		}
+		event["id"] = id
+	}
+	if _, ok := event["source"]; !ok {
+		event["source"] = controlSource
+	}
+	eventType, _ := event["type"].(string)
+	if strings.TrimSpace(eventType) == "" {
+		return nil, errors.New("type is required when the rule does not match one")
+	}
+	source, _ := event["source"].(string)
+	if strings.TrimSpace(source) == "" {
+		return nil, errors.New("source must be a non-empty string")
 	}
 	return event, nil
 }
 
 func (c *controlServer) handlePostSync(w http.ResponseWriter, r *http.Request) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSyncBytes))
 	if err != nil {
 		http.Error(w, "invalid sync body", http.StatusBadRequest)
 		return
 	}
-	contentType := ""
-	if len(bytes.TrimSpace(body)) > 0 {
-		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-		if err != nil || mediaType != "application/json" {
-			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
-			return
-		}
-		contentType = "application/json"
+	if err := validateSyncObject(body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	c.forward(w, r, http.MethodPost, "/sync", contentType, body, true)
+	c.forward(w, r, http.MethodPost, "/sync", "application/json", body, true)
+}
+
+func validateSyncObject(body []byte) error {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return errors.New("sync body must be a JSON object")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	var payload syncRequest
+	if err := decoder.Decode(&payload); err != nil {
+		return fmt.Errorf("invalid sync JSON: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("sync body must contain one JSON object")
+		}
+		return fmt.Errorf("invalid sync JSON: %w", err)
+	}
+	if _, err := parseScope(payload.Scope); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *controlServer) forward(w http.ResponseWriter, r *http.Request, method, path, contentType string, body []byte, authorize bool) {
@@ -1080,6 +1136,56 @@ func (c *controlServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 
 func pathClean(urlPath string) string {
 	return strings.TrimPrefix(path.Clean("/"+urlPath), "/")
+}
+
+func loopbackRequest(r *http.Request) bool {
+	if !loopbackHost(r.Host) {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || !loopbackHost(parsed.Host) {
+		return false
+	}
+	return true
+}
+
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if split, _, err := net.SplitHostPort(hostport); err == nil {
+		host = split
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+type generationTooLargeError struct {
+	Limit int
+}
+
+func (e generationTooLargeError) Error() string {
+	return fmt.Sprintf("listener generation is larger than %d bytes", e.Limit)
+}
+
+func readCapped(reader io.Reader, max int) ([]byte, error) {
+	if max < 1 {
+		return nil, errors.New("generation read limit must be positive")
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, int64(max)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > max {
+		return nil, generationTooLargeError{Limit: max}
+	}
+	return body, nil
 }
 
 func newControlEventID() (string, error) {

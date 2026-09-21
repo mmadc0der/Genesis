@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { getJSON, postText } from "./api";
 import {
+  applyPanelLoad,
   buildMessage,
   driftLabel,
   eventLine,
@@ -9,8 +10,17 @@ import {
   mergeRuns,
   presenceLabel,
   shortDigest,
+  type PanelSnapshot,
+  type Settled,
 } from "./model";
 import type { Agent, ControlState, EventsPage, LifecycleEvent, LiveFrame, LiveOp, Rule, RunDetail, RunSummary } from "./types";
+
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  return promise.then(
+    (value) => ({ ok: true, value }),
+    (reason: unknown) => ({ ok: false, error: reason instanceof Error ? reason.message : "Request failed" }),
+  );
+}
 
 export function App() {
   const [loading, setLoading] = useState(true);
@@ -34,6 +44,8 @@ export function App() {
   const [railOpen, setRailOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [problems, setProblems] = useState<string[]>([]);
+  const snapshotRef = useRef<PanelSnapshot>({ state: null, agents: [], rules: [], runs: [], problems: [] });
   const selectedRunRef = useRef("");
   const cursorRef = useRef("0");
   const subsRef = useRef<LiveOp[]>([]);
@@ -44,16 +56,24 @@ export function App() {
   cursorRef.current = cursor;
 
   async function refreshCatalog() {
-    const [nextState, nextAgents, nextRules, nextRuns] = await Promise.all([
-      getJSON<ControlState>("/api/state"),
-      getJSON<{ agents: Agent[] }>("/api/agents"),
-      getJSON<{ rules: Rule[] }>("/api/rules"),
-      getJSON<{ runs: RunSummary[] }>("/api/runs"),
+    const [stateLoad, agentLoad, ruleLoad, runLoad] = await Promise.all([
+      settle(getJSON<ControlState>("/api/state")),
+      settle(getJSON<{ agents: Agent[] }>("/api/agents")),
+      settle(getJSON<{ rules: Rule[] }>("/api/rules")),
+      settle(getJSON<{ runs: RunSummary[] }>("/api/runs")),
     ]);
-    setState(nextState);
-    setAgents(nextAgents.agents);
-    setRules(nextRules.rules);
-    setRuns(nextRuns.runs);
+    const next = applyPanelLoad(snapshotRef.current, {
+      state: stateLoad,
+      agents: agentLoad,
+      rules: ruleLoad,
+      runs: runLoad,
+    });
+    snapshotRef.current = next;
+    setState(next.state);
+    setAgents(next.agents);
+    setRules(next.rules);
+    setRuns(next.runs);
+    setProblems(next.problems);
   }
 
   function sendLive(op: LiveOp) {
@@ -104,9 +124,7 @@ export function App() {
             }).catch(() => undefined);
           }
         } else if (frame.op === "state") {
-          void refreshCatalog().catch((reason: unknown) => {
-            setError(reason instanceof Error ? reason.message : "Refresh failed");
-          });
+          void refreshCatalog();
         }
       };
       socket.onclose = () => {
@@ -127,9 +145,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    refreshCatalog()
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Failed to load Genesis"))
-      .finally(() => setLoading(false));
+    refreshCatalog().finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
@@ -261,7 +277,11 @@ export function App() {
         </button>
       </header>
       {error ? <p class="banner">{error}</p> : null}
+      {problems.map((problem) => (
+        <p class="banner" key={problem}>{problem}</p>
+      ))}
       {state?.desired_error ? <p class="banner">{state.desired_error}</p> : null}
+      {state?.drift === "generation_too_large" && state.listener.error ? <p class="banner">{state.listener.error}</p> : null}
       {state && !state.listener.reachable ? (
         <p class="banner">The listener is unreachable. Journals can still be read. Sync and new messages wait until it returns.</p>
       ) : null}
@@ -273,7 +293,13 @@ export function App() {
         <aside class="rail">
           <section>
             <h2>Agents</h2>
-            {agents.length === 0 ? <p class="empty">No agents in the config directory.</p> : null}
+            {agents.length === 0 ? (
+              <p class="empty">
+                {problems.some((item) => item.toLowerCase().includes("agent"))
+                  ? "Agents could not be loaded."
+                  : "No agents in the config directory."}
+              </p>
+            ) : null}
             {agents.map((item) => (
               <button
                 type="button"
@@ -292,7 +318,13 @@ export function App() {
           </section>
           <section>
             <h2>Rules</h2>
-            {rules.length === 0 ? <p class="empty">No rules in the config directory.</p> : null}
+            {rules.length === 0 ? (
+              <p class="empty">
+                {problems.some((item) => item.toLowerCase().includes("rule"))
+                  ? "Rules could not be loaded."
+                  : "No rules in the config directory."}
+              </p>
+            ) : null}
             {rules.map((item) => (
               <button
                 type="button"
@@ -356,7 +388,11 @@ export function App() {
               </div>
               <div class="activity">
                 {visibleRuns.length === 0 ? (
-                  <p class="empty">No runs yet. Choose a rule and send a message. The active generation is what matches.</p>
+                  <p class="empty">
+                    {problems.some((item) => item.toLowerCase().includes("run"))
+                      ? "Runs could not be loaded."
+                      : "No runs yet. Choose a rule and send a message. The active generation is what matches."}
+                  </p>
                 ) : null}
                 {visibleRuns.map((run) => (
                   <button type="button" key={run.run_id} class="run" onClick={() => setSelectedRun(run.run_id)}>

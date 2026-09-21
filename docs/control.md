@@ -62,7 +62,7 @@ authoritative and the socket is not.
 | Method | Path | Behavior |
 |---|---|---|
 | `GET` | `/api/health` | control process is up |
-| `GET` | `/api/state` | desired files vs active generation (`in_sync`, `draft`, `listener_unavailable`, `desired_invalid`) |
+| `GET` | `/api/state` | desired files vs active generation (`in_sync`, `draft`, `listener_unavailable`, `desired_invalid`, `generation_too_large`) |
 | `GET` | `/api/agents` | agents from disk union the active cache, with `presence` |
 | `GET` | `/api/agents/{id}` | one agent |
 | `GET` | `/api/rules` | rules, same presence rules |
@@ -76,14 +76,36 @@ authoritative and the socket is not.
 
 `presence` is `active` (file matches the cache), `draft` (file differs or is
 new), `active_only` (cached, file gone), or `unknown` (listener not readable).
-Desired state remains the YAML files. The panel does not edit them.
+Desired state remains the YAML files. The panel does not edit them. Invalid
+desired YAML does not hide the active cache or the journals: `/api/state`
+still returns the active generation when the listener can, `/api/agents` and
+`/api/rules` return that cache with `desired_error` and HTTP 200, and
+`/api/runs` is read from disk either way. The UI keeps state and runs when an
+agent or rule request fails.
 `sync_configured` and `syncing` are listener facts on `active` and
 `listener`; a file snapshot omits them.
 
-`/api/messages` copies the named rule's `match` attributes, then applies
-non-empty type, source, and subject overrides. The message becomes
-`data.message`. The listener still matches only the active generation, so a
-draft rule does not match until sync.
+`/api/messages` copies every string attribute in the named rule's `match`,
+then applies non-empty type, source, and subject overrides. The message
+becomes `data.message`. `specversion` must be absent or `1.0`. A `data` match
+key, or an empty `id`, `type`, or `source`, is rejected before the listener
+sees the event. Other top-level match keys, including a caller-chosen `id`,
+are copied so the active rule can match them. The listener still matches only
+the active generation, so a draft rule does not match until sync.
+
+`POST /api/sync` always requires `Content-Type: application/json` and one JSON
+object (`{}` selects both scopes). A missing media type is 415. Arrays, null,
+strings, empty bodies, unknown fields, trailing values, and unknown scope
+names are 400 and are not forwarded.
+
+`GET /generation` is read up to 32 MiB. A larger body is
+`generation_too_large` with the listener still marked reachable. A connection
+failure stays `listener_unavailable`.
+
+Every control request, including static files and the WebSocket upgrade, must
+use a loopback `Host` (`127.0.0.1`, `localhost`, or `::1`, with or without a
+port). When `Origin` is present its host must be loopback too. Anything else
+is 403. Curl with no `Origin` is allowed when `Host` is loopback.
 
 ### WebSocket
 
@@ -102,7 +124,8 @@ sequence changed), `state` (digests and drift; refetch REST for the full
 document), `pong`, and `error`. Event frames exist only because the process
 re-read `events.jsonl`. They are not a second bus.
 
-Origins are limited to loopback (`127.0.0.1`, `localhost`, `[::1]`). There is
+The upgrade also requires a loopback `Host`, and a present `Origin` must be
+loopback (`127.0.0.1`, `localhost`, `[::1]`). There is
 no other authentication. Do not publish the control port beyond localhost.
 Inside Compose the process listens on `0.0.0.0` so Docker can forward it, and
 the published binding is `127.0.0.1:8790`.

@@ -66,7 +66,7 @@ button.row.selected, button.run:hover, button.row:hover { background: #222; }
 }
 .drift-in_sync, .presence-active, .state-completed, .live.on { color: #8dca9a; border-color: #355c40; }
 .drift-draft, .presence-draft, .state-open { color: #e0b15a; border-color: #6a5424; }
-.drift-listener_unavailable, .drift-desired_invalid, .presence-unknown, .state-failed, .line-error { color: #e08a8a; }
+.drift-listener_unavailable, .drift-desired_invalid, .drift-generation_too_large, .presence-unknown, .state-failed, .line-error { color: #e08a8a; }
 .presence-active_only { color: #8eb4d4; }
 
 .live { margin-left: auto; }

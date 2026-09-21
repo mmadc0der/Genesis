@@ -21,13 +21,13 @@ services:
   control:
     image: genesis:local
     init: true
-    user: "0:0"
+    user: "65532:65532"
     depends_on:
       - genesis
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        until [ -d /var/lib/genesis/config/agents.d ] && [ -d /var/lib/genesis/data/runs ]; do
+        until [ -O /var/lib/genesis/config/agents.d ] && [ -w /var/lib/genesis/config/agents.d ] && [ -x /var/lib/genesis/config/agents.d ] && [ -O /var/lib/genesis/config/rules.d ] && [ -w /var/lib/genesis/config/rules.d ] && [ -x /var/lib/genesis/config/rules.d ] && [ -O /var/lib/genesis/data/runs ] && [ -r /var/lib/genesis/data/runs ] && [ -x /var/lib/genesis/data/runs ]; do
           sleep 0.2
         done
         exec /usr/local/bin/genesis control \

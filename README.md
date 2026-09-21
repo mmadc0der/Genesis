@@ -472,8 +472,10 @@ Docker Desktop publishes that port on localhost only.
    edit stays inactive until `/sync`.
 
 Compose runs `genesis launch` as root and drops the listener to `genesis`.
-The control process runs as root so it can read the listener's `0700` journal
-directories through the read-only data mount. Supply `GENESIS_SYNC_TOKEN`;
+The control process runs as uid 65532 (`genesis`). It waits until the
+entrypoint has chowned config and data to that user, so it can write config
+and read the listener's `0700` journals through the read-only data mount
+without starting as root. Supply `GENESIS_SYNC_TOKEN`;
 the binary will not generate one. Do not set `network_mode: host` (it does
 not mean the same thing on Docker Desktop). Line endings are forced to LF
 via `.gitattributes`.

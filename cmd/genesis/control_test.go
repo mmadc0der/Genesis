@@ -188,7 +188,9 @@ func TestControlStaticAndEventProxy(t *testing.T) {
 		t.Fatalf("home = %s", home)
 	}
 	traversal := httptest.NewRecorder()
-	control.ServeHTTP(traversal, httptest.NewRequest(http.MethodGet, "/../../etc/passwd", nil))
+	traversalRequest := httptest.NewRequest(http.MethodGet, "/../../etc/passwd", nil)
+	traversalRequest.Host = "127.0.0.1"
+	control.ServeHTTP(traversal, traversalRequest)
 	if traversal.Code != http.StatusNotFound {
 		t.Fatalf("traversal status = %d body %s", traversal.Code, traversal.Body.String())
 	}
@@ -243,6 +245,321 @@ func TestControlListenerDownDoesNotInventToken(t *testing.T) {
 	if syncCode != http.StatusBadGateway {
 		t.Fatalf("sync while listener is down = %d", syncCode)
 	}
+}
+
+func TestControlSyncRequiresJSONObject(t *testing.T) {
+	control, _ := newPanelFixture(t)
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	missingType := postBare(t, panel.URL+"/api/sync", `{}`)
+	if missingType.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("missing content type = %d %s", missingType.Code, missingType.Body.String())
+	}
+	plain := postRaw(t, panel.URL+"/api/sync", "text/plain", `{}`, http.StatusUnsupportedMediaType)
+	if !strings.Contains(plain, "application/json") {
+		t.Fatalf("plain content type body = %s", plain)
+	}
+
+	for _, payload := range []string{"", "   ", "[]", "null", `"x"`} {
+		body := postJSON(t, panel.URL+"/api/sync", payload, http.StatusBadRequest)
+		if !strings.Contains(body, "JSON object") {
+			t.Fatalf("payload %q body = %s", payload, body)
+		}
+	}
+	if body := postJSON(t, panel.URL+"/api/sync", `{"token":"secret"}`, http.StatusBadRequest); !strings.Contains(body, "invalid sync JSON") {
+		t.Fatalf("unknown field = %s", body)
+	}
+	if body := postJSON(t, panel.URL+"/api/sync", `{"scope":["hosts"]}`, http.StatusBadRequest); !strings.Contains(body, "unknown sync scope") {
+		t.Fatalf("bad scope = %s", body)
+	}
+	if body := postJSON(t, panel.URL+"/api/sync", `{}{}`, http.StatusBadRequest); !strings.Contains(body, "one JSON object") {
+		t.Fatalf("trailing JSON = %s", body)
+	}
+
+	emptyObject := postRaw(t, panel.URL+"/api/sync", "application/json; charset=utf-8", `{}`, http.StatusOK)
+	if !strings.Contains(emptyObject, `"host_mutation":"none"`) || strings.Contains(emptyObject, panelToken) {
+		t.Fatalf("empty object sync = %s", emptyObject)
+	}
+}
+
+func TestControlRejectsNonLoopbackHost(t *testing.T) {
+	control, _ := newPanelFixture(t)
+	web := t.TempDir()
+	if err := os.WriteFile(filepath.Join(web, "index.html"), []byte("<title>Genesis</title>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	control.webDir = web
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+	if !strings.Contains(mustGET(t, panel.URL+"/"), "Genesis") {
+		t.Fatal("loopback test server did not serve the panel")
+	}
+
+	rejected := []struct {
+		path, host, origin string
+	}{
+		{"/api/state", "rebind.example", ""},
+		{"/", "rebind.example:8790", ""},
+		{"/api/live", "rebind.example", ""},
+		{"/api/state", "127.0.0.1:8790", "http://rebind.example"},
+		{"/api/health", "", ""},
+	}
+	for _, item := range rejected {
+		response := serveControl(control, item.path, item.host, item.origin, item.path == "/api/live")
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "host is not loopback") {
+			t.Fatalf("%s host %q origin %q = %d %s", item.path, item.host, item.origin, response.Code, response.Body.String())
+		}
+	}
+
+	allowed := []struct {
+		path, host, origin string
+	}{
+		{"/api/state", "127.0.0.1:8790", ""},
+		{"/api/health", "localhost", ""},
+		{"/", "[::1]:8790", ""},
+		{"/api/health", "127.0.0.1", "http://127.0.0.1:8790"},
+		{"/api/health", "localhost:8790", "http://[::1]:8790"},
+	}
+	for _, item := range allowed {
+		response := serveControl(control, item.path, item.host, item.origin, false)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s host %q origin %q = %d %s", item.path, item.host, item.origin, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestControlInvalidDesiredKeepsActiveAndRuns(t *testing.T) {
+	control, listener := newPanelFixture(t)
+	runID := "gen_kept"
+	runDir := filepath.Join(control.dataDir, runsDirName, runID)
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	event := sampleLifecycle(runID, "1", lifecycleTypeAccepted, map[string]any{"event_type": "dev.genesis.run"})
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, eventsFileName), append(payload, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(listener.agentsDir, "workspace-janitor.yaml"), []byte("nope: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	state := getJSON[controlState](t, panel.URL+"/api/state")
+	if state.Drift != driftDesiredBad || state.Desired != nil || state.Active == nil || state.Active.Digest == "" || state.DesiredError == "" {
+		t.Fatalf("state = %#v", state)
+	}
+	if !state.Listener.Reachable {
+		t.Fatalf("listener should stay reachable when desired YAML is invalid: %#v", state.Listener)
+	}
+
+	agentsBody := mustGET(t, panel.URL+"/api/agents")
+	var agents struct {
+		Agents       []listedAgent `json:"agents"`
+		DesiredError string        `json:"desired_error"`
+	}
+	if err := json.Unmarshal([]byte(agentsBody), &agents); err != nil {
+		t.Fatal(err)
+	}
+	if agents.DesiredError == "" || len(agents.Agents) != 1 || agents.Agents[0].ID != "workspace-janitor" || agents.Agents[0].Presence != presenceActiveOnly {
+		t.Fatalf("agents = %#v", agents)
+	}
+	rulesBody := mustGET(t, panel.URL+"/api/rules")
+	var rules struct {
+		Rules        []listedRule `json:"rules"`
+		DesiredError string       `json:"desired_error"`
+	}
+	if err := json.Unmarshal([]byte(rulesBody), &rules); err != nil {
+		t.Fatal(err)
+	}
+	if rules.DesiredError == "" || len(rules.Rules) != 1 || rules.Rules[0].Name != "example.yaml" || rules.Rules[0].Presence != presenceActiveOnly {
+		t.Fatalf("rules = %#v", rules)
+	}
+	runs := getJSON[struct {
+		Runs []runSummary `json:"runs"`
+	}](t, panel.URL+"/api/runs")
+	if len(runs.Runs) != 1 || runs.Runs[0].RunID != runID {
+		t.Fatalf("runs = %#v", runs.Runs)
+	}
+}
+
+func TestControlMessageCopiesMatchAttributes(t *testing.T) {
+	minted, err := buildMessageEvent(map[string]string{
+		"specversion": "1.0",
+		"id":          "fixed",
+		"type":        "dev.genesis.run",
+		"source":      "urn:genesis:example",
+		"subject":     "bench",
+		"dataset":     "lab",
+	}, "inspect", func() (string, error) {
+		t.Fatal("id was already present")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if minted["id"] != "fixed" || minted["dataset"] != "lab" || minted["subject"] != "bench" || minted["specversion"] != "1.0" {
+		t.Fatalf("event = %#v", minted)
+	}
+	payload, ok := minted["data"].(map[string]any)
+	if !ok || payload["message"] != "inspect" {
+		t.Fatalf("data = %#v", minted["data"])
+	}
+	if _, err := buildMessageEvent(map[string]string{"specversion": "0.3", "type": "dev.genesis.run"}, "x", nil); err == nil || !strings.Contains(err.Error(), "specversion") {
+		t.Fatalf("specversion conflict = %v", err)
+	}
+	if _, err := buildMessageEvent(map[string]string{"data": "payload", "type": "dev.genesis.run"}, "x", nil); err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("data conflict = %v", err)
+	}
+	if _, err := buildMessageEvent(map[string]string{"id": "  ", "type": "dev.genesis.run", "source": "urn:genesis:example"}, "x", nil); err == nil || !strings.Contains(err.Error(), "id") {
+		t.Fatalf("empty id = %v", err)
+	}
+
+	control, listener := newPanelFixture(t)
+	writeRule(t, filepath.Join(listener.rulesDir, "example.yaml"), rule{
+		Match: map[string]string{"type": "dev.genesis.other"},
+		Agent: "workspace-janitor",
+	})
+	writeRule(t, filepath.Join(listener.rulesDir, "dataset.yaml"), rule{
+		Match: map[string]string{
+			"type":    "dev.genesis.run",
+			"source":  "urn:genesis:example",
+			"dataset": "lab",
+			"id":      "fixed-id",
+		},
+		Agent: "workspace-janitor",
+	})
+	if err := listener.loadInitialGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	writeRule(t, filepath.Join(listener.rulesDir, "spec-conflict.yaml"), rule{
+		Match: map[string]string{"specversion": "0.3", "type": "dev.genesis.run", "source": "urn:genesis:example"},
+		Agent: "workspace-janitor",
+	})
+	writeRule(t, filepath.Join(listener.rulesDir, "data-conflict.yaml"), rule{
+		Match: map[string]string{"data": "payload", "type": "dev.genesis.run", "source": "urn:genesis:example"},
+		Agent: "workspace-janitor",
+	})
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	if body := postJSON(t, panel.URL+"/api/messages", `{"message":"no","rule":"spec-conflict.yaml"}`, http.StatusBadRequest); !strings.Contains(body, "specversion") {
+		t.Fatalf("specversion HTTP = %s", body)
+	}
+	if body := postJSON(t, panel.URL+"/api/messages", `{"message":"no","rule":"data-conflict.yaml"}`, http.StatusBadRequest); !strings.Contains(body, "data") {
+		t.Fatalf("data HTTP = %s", body)
+	}
+	accepted := postJSON(t, panel.URL+"/api/messages", `{"message":"inspect the bench","rule":"dataset.yaml"}`, http.StatusAccepted)
+	var body struct {
+		Runs []acceptedRun `json:"runs"`
+	}
+	if err := json.Unmarshal([]byte(accepted), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Runs) != 1 {
+		t.Fatalf("custom match was not applied: %s", accepted)
+	}
+	detail := getJSON[runDetail](t, panel.URL+"/api/runs/"+body.Runs[0].RunID)
+	if detail.CauseID != "fixed-id" || detail.CauseType != "dev.genesis.run" {
+		t.Fatalf("detail = %#v", detail)
+	}
+}
+
+func TestControlGenerationOverflowDistinctFromDown(t *testing.T) {
+	agentsDir := t.TempDir()
+	rulesDir := t.TempDir()
+	writeNamedAgent(t, agentsDir, "workspace-janitor.yaml", nil)
+	writeRule(t, filepath.Join(rulesDir, "example.yaml"), rule{
+		Match: map[string]string{"type": "dev.genesis.run"},
+		Agent: "workspace-janitor",
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/generation":
+			_, _ = w.Write(bytes.Repeat([]byte("x"), 64))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	control := newControlServer(controlConfig{
+		listenerURL: upstream.URL,
+		agentsDir:   agentsDir,
+		rulesDir:    rulesDir,
+		dataDir:     t.TempDir(),
+		syncToken:   panelToken,
+	}, discardLogger())
+	control.generationLimit = 32
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	state := getJSON[controlState](t, panel.URL+"/api/state")
+	if state.Drift != driftGenerationHuge || !state.Listener.Reachable || state.Listener.OK || state.Drift == driftListenerDown {
+		t.Fatalf("overflow state = %#v", state)
+	}
+	if !strings.Contains(state.Listener.Error, "larger than") || strings.Contains(state.Listener.Error, "unreachable") {
+		t.Fatalf("overflow error = %q", state.Listener.Error)
+	}
+
+	down := newControlServer(controlConfig{
+		listenerURL: "http://127.0.0.1:1",
+		agentsDir:   agentsDir,
+		rulesDir:    rulesDir,
+		dataDir:     t.TempDir(),
+		syncToken:   panelToken,
+	}, discardLogger())
+	downPanel := httptest.NewServer(down)
+	t.Cleanup(downPanel.Close)
+	unavailable := getJSON[controlState](t, downPanel.URL+"/api/state")
+	if unavailable.Drift != driftListenerDown || unavailable.Listener.Reachable || !strings.Contains(unavailable.Listener.Error, "unreachable") {
+		t.Fatalf("down state = %#v", unavailable)
+	}
+}
+
+func serveControl(control *controlServer, target, host, origin string, upgrade bool) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	request.Host = host
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+	if upgrade {
+		request.Header.Set("Connection", "Upgrade")
+		request.Header.Set("Upgrade", "websocket")
+		request.Header.Set("Sec-WebSocket-Version", "13")
+		request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	}
+	response := httptest.NewRecorder()
+	control.ServeHTTP(response, request)
+	return response
+}
+
+func postBare(t *testing.T, url, payload string) *httptest.ResponseRecorder {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, url, strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	recorder.Code = response.StatusCode
+	_, _ = recorder.Body.Write(body)
+	return recorder
 }
 
 func newPanelFixture(t *testing.T) (*controlServer, *eventServer) {

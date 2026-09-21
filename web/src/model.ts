@@ -1,4 +1,46 @@
-import type { LifecycleEvent, RunSummary } from "./types";
+import type { Agent, ControlState, LifecycleEvent, Rule, RunSummary } from "./types";
+
+export interface Settled<T> {
+  ok: boolean;
+  value?: T;
+  error?: string;
+}
+
+export interface PanelSnapshot {
+  state: ControlState | null;
+  agents: Agent[];
+  rules: Rule[];
+  runs: RunSummary[];
+  problems: string[];
+}
+
+export function applyPanelLoad(
+  previous: PanelSnapshot,
+  load: {
+    state: Settled<ControlState>;
+    agents: Settled<{ agents: Agent[] }>;
+    rules: Settled<{ rules: Rule[] }>;
+    runs: Settled<{ runs: RunSummary[] }>;
+  },
+): PanelSnapshot {
+  const problems: string[] = [];
+  const next: PanelSnapshot = {
+    state: previous.state,
+    agents: previous.agents,
+    rules: previous.rules,
+    runs: previous.runs,
+    problems,
+  };
+  if (load.state.ok && load.state.value) next.state = load.state.value;
+  else problems.push(load.state.error || "State is unavailable");
+  if (load.agents.ok && load.agents.value) next.agents = load.agents.value.agents;
+  else problems.push(load.agents.error || "Agents are unavailable");
+  if (load.rules.ok && load.rules.value) next.rules = load.rules.value.rules;
+  else problems.push(load.rules.error || "Rules are unavailable");
+  if (load.runs.ok && load.runs.value) next.runs = load.runs.value.runs;
+  else problems.push(load.runs.error || "Runs are unavailable");
+  return next;
+}
 
 export function shortDigest(digest: string | undefined): string {
   if (!digest) return "—";
@@ -16,6 +58,8 @@ export function driftLabel(drift: string | undefined): string {
       return "Listener down";
     case "desired_invalid":
       return "Config invalid";
+    case "generation_too_large":
+      return "Generation too large";
     default:
       return "Unknown";
   }

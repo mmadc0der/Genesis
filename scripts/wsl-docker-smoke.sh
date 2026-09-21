@@ -68,6 +68,11 @@ if curl -sf http://127.0.0.1:8790/api/state | grep -q "$token"; then
   echo "control API exposed the sync token" >&2
   exit 1
 fi
+control_uid="$(docker compose exec -T control id -u | tr -d '\r\n')"
+if [ "$control_uid" != "65532" ]; then
+  echo "control is running as uid ${control_uid}, expected genesis uid 65532" >&2
+  exit 1
+fi
 if docker compose exec -T control touch /var/lib/genesis/data/ro-probe >/dev/null 2>&1; then
   echo "control was able to write genesis-data" >&2
   exit 1

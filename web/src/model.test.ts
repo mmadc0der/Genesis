@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildMessage, driftLabel, eventLine, maxCursor, mergeEvents, shortDigest } from "./model";
-import type { LifecycleEvent } from "./types";
+import { applyPanelLoad, buildMessage, driftLabel, eventLine, maxCursor, mergeEvents, shortDigest } from "./model";
+import type { Agent, ControlState, LifecycleEvent, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
   return { sequence, type, data };
@@ -13,6 +13,7 @@ describe("control panel model", () => {
     expect(driftLabel("in_sync")).toBe("Active");
     expect(driftLabel("draft")).toBe("Draft");
     expect(driftLabel("listener_unavailable")).toBe("Listener down");
+    expect(driftLabel("generation_too_large")).toBe("Generation too large");
   });
 
   it("merges journal events by sequence without duplicates", () => {
@@ -55,5 +56,57 @@ describe("control panel model", () => {
     });
     expect(JSON.stringify(body)).not.toContain("Bearer");
     expect(JSON.stringify(body)).not.toContain("sync-token");
+  });
+
+  it("renders state and runs when the agent and rule catalogs fail", () => {
+    const state = {
+      drift: "desired_invalid",
+      desired_error: "agents are invalid",
+      listener: { reachable: true, ok: true, sync_configured: true, syncing: false },
+      active: null,
+      desired: null,
+    } satisfies ControlState;
+    const run = {
+      run_id: "gen_1",
+      agent: "workspace-janitor",
+      rule: "example.yaml",
+      state: "open",
+      last_seq: "1",
+    } satisfies RunSummary;
+    const view = applyPanelLoad(
+      { state: null, agents: [], rules: [], runs: [], problems: [] },
+      {
+        state: { ok: true, value: state },
+        agents: { ok: false, error: "agents are invalid" },
+        rules: { ok: false, error: "rules are invalid" },
+        runs: { ok: true, value: { runs: [run] } },
+      },
+    );
+    expect(view.state?.drift).toBe("desired_invalid");
+    expect(view.runs.map((item) => item.run_id)).toEqual(["gen_1"]);
+    expect(view.problems.join(" ")).toContain("agents are invalid");
+    expect(view.problems.join(" ")).toContain("rules are invalid");
+
+    const previousAgent: Agent = {
+      id: "workspace-janitor",
+      instructions: "keep",
+      cwd: "/work",
+      home: "/home",
+      env: {},
+      secrets: [],
+      presence: "active",
+    };
+    const kept = applyPanelLoad(
+      { state: null, agents: [previousAgent], rules: [], runs: [], problems: [] },
+      {
+        state: { ok: true, value: state },
+        agents: { ok: false, error: "agents are invalid" },
+        rules: { ok: true, value: { rules: [] } },
+        runs: { ok: true, value: { runs: [run] } },
+      },
+    );
+    expect(kept.agents.map((item) => item.id)).toEqual(["workspace-janitor"]);
+    expect(kept.state?.drift).toBe("desired_invalid");
+    expect(kept.runs.map((item) => item.run_id)).toEqual(["gen_1"]);
   });
 });

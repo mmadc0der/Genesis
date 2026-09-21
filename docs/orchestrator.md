@@ -136,8 +136,10 @@ and serves the panel. The journal file remains the replay source. See
 Use the Linux engine through WSL. See the README for the exact smoke
 commands. Compose runs `genesis launch` as root, drops the listener to the
 image `genesis` user, and does not publish the listener port. The control
-process is the published UI at host `127.0.0.1:8790`. It mounts
-`genesis-config` read-write and `genesis-data` read-only. The listener keeps
+process is the published UI at host `127.0.0.1:8790` and runs as uid
+65532. It mounts `genesis-config` read-write and `genesis-data` read-only,
+and starts only after the listener entrypoint has given those volumes to
+`genesis`. The listener keeps
 `genesis-data` read-write so it can append journals. Agents and rules live
 on `genesis-config` at `/var/lib/genesis/config`, seeded from
 `/usr/share/genesis/defaults` on first volume creation. Run journals live on
