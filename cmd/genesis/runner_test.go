@@ -14,6 +14,88 @@ import (
 	"time"
 )
 
+func TestProcessRunnerDrainsStderrAfterStdoutCloses(t *testing.T) {
+	const (
+		prefix  = "runner stderr"
+		trailer = "END_STDERR"
+		fill    = 256 * 1024
+	)
+	fakePython := writeExecutable(t, `
+#!/bin/sh
+/bin/cat >/dev/null
+printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_stderr","session_id":"session-stderr"}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-stderr","finish_reason":"completed","final_response":"ok","error":null,"diagnostics":null}'
+exec 1>&-
+/usr/bin/python3 -c 'import sys; sys.stderr.write("runner stderr\n" + "x"*262144 + "END_STDERR\n")'
+`)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	store := newRunStore(t.TempDir(), newEventBus(), logger)
+	document := sampleRunInvocation("gen_stderr")
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	processRunner{pythonPath: fakePython, source: "src", logger: logger, store: store}.Run(document)
+
+	records := decodeLogRecords(t, logs.Bytes())
+	finished := records[len(records)-1]
+	stderrText, _ := finished["stderr"].(string)
+	if !strings.HasPrefix(stderrText, prefix) || !strings.HasSuffix(stderrText, trailer) {
+		t.Fatalf("log stderr prefix/suffix missing: len=%d value=%q", len(stderrText), truncateForTest(stderrText))
+	}
+	wantLen := len(prefix) + 1 + fill + len(trailer)
+	if len(stderrText) != wantLen {
+		t.Fatalf("log stderr length = %d, want %d", len(stderrText), wantLen)
+	}
+	logged, err := os.ReadFile(filepath.Join(document.RunDir, stderrFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(logged)) != stderrText {
+		t.Fatalf("stderr.log does not match slog stderr")
+	}
+}
+
+func TestProcessRunnerDrainsStderrBeforeStdoutWithoutDeadlock(t *testing.T) {
+	fakePython := writeExecutable(t, `
+#!/bin/sh
+/bin/cat >/dev/null
+/usr/bin/python3 -c 'import sys; sys.stderr.write("x"*262144 + "\n"); sys.stderr.flush()'
+printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_stderr_first","session_id":"session-stderr"}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-stderr","finish_reason":"completed","final_response":"ok","error":null,"diagnostics":null}'
+`)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	store := newRunStore(t.TempDir(), newEventBus(), logger)
+	document := sampleRunInvocation("gen_stderr_first")
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		processRunner{pythonPath: fakePython, source: "src", logger: logger, store: store}.Run(document)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner deadlocked draining stderr before stdout")
+	}
+	logged, err := os.ReadFile(filepath.Join(document.RunDir, stderrFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bytes.TrimSpace(logged)) != 262144 {
+		t.Fatalf("stderr.log length = %d", len(bytes.TrimSpace(logged)))
+	}
+}
+
+func truncateForTest(value string) string {
+	if len(value) <= 64 {
+		return value
+	}
+	return value[:32] + "..." + value[len(value)-16:]
+}
+
 func TestProcessRunnerReadsFramesBeforeChildExits(t *testing.T) {
 	dir := t.TempDir()
 	ready := filepath.Join(dir, "ready")

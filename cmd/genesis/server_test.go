@@ -647,6 +647,10 @@ func TestProcessRunnerStructuredLogsErrors(t *testing.T) {
 /bin/cat >/dev/null
 printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_bad","session_id":"dsh-error"}'
 printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"dsh-error","finish_reason":"error","final_response":"","error":null,"diagnostics":{"turn_end":{"type":"turn/end","data":{"reason":{"kind":"error","message":"upstream unavailable"}}},"events":[{"type":"agent/error","data":{"message":"provider request failed"}},{"type":"turn/end","data":{"reason":{"kind":"error","message":"upstream unavailable"}}}],"notifications":[]}}'
+# Close stdout before writing stderr so Go observes stdout EOF while the
+# child is still producing diagnostics. Wait() must not run until that
+# pipe has been drained.
+exec 1>&-
 printf '%s\n' 'runner stderr' >&2
 `)
 	var logs bytes.Buffer
@@ -683,6 +687,13 @@ printf '%s\n' 'runner stderr' >&2
 	turnEnd, ok := diagnostics["turn_end"].(map[string]any)
 	if !ok || turnEnd["type"] != "turn/end" {
 		t.Fatalf("turn/end diagnostics = %#v", diagnostics["turn_end"])
+	}
+	loggedStderr, err := os.ReadFile(filepath.Join(document.RunDir, stderrFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(loggedStderr)) != "runner stderr" {
+		t.Fatalf("stderr.log = %q", loggedStderr)
 	}
 }
 

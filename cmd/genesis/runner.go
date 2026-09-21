@@ -122,8 +122,12 @@ func (r processRunner) Run(document invocation) {
 	}()
 
 	state := r.consumeStdout(journal, document, stdout)
-	waitErr := command.Wait()
+	// Cmd.Wait closes stdout/stderr pipes. Finish draining both before Wait,
+	// otherwise the last stderr bytes can be lost. Stderr is already being
+	// copied concurrently, so waiting for that copy after stdout EOF cannot
+	// fill the stdout pipe.
 	<-stderrDone
+	waitErr := command.Wait()
 	stderrText := journal.redactor.text(strings.TrimSpace(stderrBuf.String()))
 	r.finish(logger, journal, document, state, nil, waitErr, exitStatus(waitErr, command), stderrText)
 }
