@@ -90,6 +90,10 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method must be POST", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.syncToken == "" {
+		http.Error(w, "sync is disabled", http.StatusUnauthorized)
+		return
+	}
 	if !s.authorizedSync(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

@@ -5,11 +5,13 @@ services:
       dockerfile: Dockerfile
     image: genesis:local
     init: true
+    user: "0:0"
     ports:
       - "8787:8787"
     environment:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       GENESIS_SYNC_TOKEN: ${GENESIS_SYNC_TOKEN:-compose-sync-token}
+      GENESIS_LISTENER_USER: genesis
     volumes:
       - type: bind
         source: ./agents.d

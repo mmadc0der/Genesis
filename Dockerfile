@@ -17,11 +17,13 @@ FROM python:3.12-bookworm
 RUN useradd --create-home --uid 65532 --shell /usr/sbin/nologin genesis
 WORKDIR /app
 COPY --from=build /out/genesis /usr/local/bin/genesis
-COPY --from=python-deps /app/.venv /app/.venv
+COPY --from=python-deps --chown=genesis:genesis /app/.venv /app/.venv
 COPY agents.d /app/agents.d
 COPY rules.d /app/rules.d
 ENV PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-USER 65532:65532
+ENV GENESIS_LISTENER_USER=genesis
 EXPOSE 8787
+# The orchestrator stays root so it can drop the listener to `genesis`.
+USER root
 ENTRYPOINT ["/usr/local/bin/genesis"]
-CMD ["launch", "-listen", "0.0.0.0:8787", "-agents", "/app/agents.d", "-rules", "/app/rules.d"]
+CMD ["launch", "-listen", "0.0.0.0:8787", "-agents", "/app/agents.d", "-rules", "/app/rules.d", "-listener-user", "genesis"]

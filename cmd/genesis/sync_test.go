@@ -36,8 +36,9 @@ func (b *blockingCoordinator) Coordinate(ctx context.Context, plan privilegedPla
 func TestSyncRequiresBearerToken(t *testing.T) {
 	server := newSyncTestServer(t, nil)
 	response := sendSync(server, "", nil)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("missing token status = %d", response.Code)
+	if response.Code != http.StatusUnauthorized ||
+		!strings.Contains(response.Body.String(), "unauthorized") {
+		t.Fatalf("missing token status = %d body = %s", response.Code, response.Body.String())
 	}
 	response = sendSync(server, "wrong", nil)
 	if response.Code != http.StatusUnauthorized {
@@ -46,6 +47,16 @@ func TestSyncRequiresBearerToken(t *testing.T) {
 	response = sendSync(server, "sync-secret", nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("valid token status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestSyncDisabledWhenTokenEmpty(t *testing.T) {
+	server := newSyncTestServer(t, nil)
+	server.syncToken = ""
+	response := sendSync(server, "anything", nil)
+	if response.Code != http.StatusUnauthorized ||
+		!strings.Contains(response.Body.String(), "sync is disabled") {
+		t.Fatalf("disabled sync status = %d body = %s", response.Code, response.Body.String())
 	}
 }
 

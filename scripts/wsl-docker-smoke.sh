@@ -30,9 +30,11 @@ esac
 
 token="${GENESIS_SYNC_TOKEN:-compose-sync-token}"
 export GENESIS_SYNC_TOKEN="$token"
+smoke_rule="rules.d/wsl-smoke.yaml"
 
 docker compose up --build -d
 cleanup() {
+  rm -f "$smoke_rule"
   docker compose down >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -53,12 +55,24 @@ if [ "$ready" != 1 ]; then
   exit 1
 fi
 
+if ! docker compose logs | grep -q '"listener_user":"genesis"'; then
+  docker compose logs >&2
+  echo "orchestrator did not drop the listener to user genesis" >&2
+  exit 1
+fi
+
+cat >"$smoke_rule" <<'YAML'
+match:
+  type: dev.genesis.wsl
+agent: workspace-janitor
+YAML
+
 unsynced="$(curl -s -o /tmp/genesis-wsl-event.out -w '%{http_code}' \
   http://127.0.0.1:8787/events \
   -H 'Content-Type: application/cloudevents+json' \
   --data '{"specversion":"1.0","id":"wsl-1","source":"urn:genesis:wsl","type":"dev.genesis.wsl"}')"
 if [ "$unsynced" != "204" ]; then
-  echo "expected 204 for unmatched event before adding a rule, got $unsynced" >&2
+  echo "expected 204 for a newly written rule before /sync, got $unsynced" >&2
   cat /tmp/genesis-wsl-event.out >&2 || true
   exit 1
 fi
@@ -67,7 +81,7 @@ sync_code="$(curl -s -o /tmp/genesis-wsl-sync.out -w '%{http_code}' \
   http://127.0.0.1:8787/sync \
   -H 'Authorization: Bearer '"$token" \
   -H 'Content-Type: application/json' \
-  --data '{"scope":["agents","rules"]}')"
+  --data '{"scope":["rules"]}')"
 if [ "$sync_code" != "200" ]; then
   echo "expected 200 from POST /sync, got $sync_code" >&2
   cat /tmp/genesis-wsl-sync.out >&2 || true
@@ -81,6 +95,16 @@ fi
 if ! grep -q '"host_mutation":"none"' /tmp/genesis-wsl-sync.out; then
   echo "POST /sync claimed a host mutation" >&2
   cat /tmp/genesis-wsl-sync.out >&2
+  exit 1
+fi
+
+synced="$(curl -s -o /tmp/genesis-wsl-synced.out -w '%{http_code}' \
+  http://127.0.0.1:8787/events \
+  -H 'Content-Type: application/cloudevents+json' \
+  --data '{"specversion":"1.0","id":"wsl-2","source":"urn:genesis:wsl","type":"dev.genesis.wsl"}')"
+if [ "$synced" != "202" ]; then
+  echo "expected 202 after /sync picked up the new rule, got $synced" >&2
+  cat /tmp/genesis-wsl-synced.out >&2 || true
   exit 1
 fi
 

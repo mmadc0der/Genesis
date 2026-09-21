@@ -14,13 +14,18 @@ with flags is still listen, so previous command lines keep working.
 1. Creates a private `SOCK_STREAM` Unix `socketpair`.
 2. Starts `genesis listen` as a child, inheriting only the child end as file
    descriptor `3` (`GENESIS_PRIVILEGED_FD=3`).
-3. Serves typed privileged coordination on the parent end.
-4. Forwards `SIGINT` / `SIGTERM` to the child and exits with the child's code.
+3. When the parent is root, execs that child as `-listener-user` /
+   `GENESIS_LISTENER_USER`. Missing or unknown target users fail closed
+   before listen starts. Non-root launch leaves the listener at the current
+   uid.
+4. Serves typed privileged coordination on the parent end.
+5. Forwards `SIGINT` / `SIGTERM` to the child and exits with the child's code.
 
 The pair is never bound to a filesystem path. Nothing else can connect to it.
 The listener sets close-on-exec on the inherited descriptor so Python/`dsh`
-children do not receive it. Launch does not require uid 0 and does not
-escalate. The parent is a protocol supervisor, not a Linux root helper.
+children do not receive it. Launch does not escalate. A root parent is only
+a supervisor that can drop the listener uid; it is not a Linux host
+provisioner.
 
 ## Cache
 
@@ -35,10 +40,11 @@ There is no event queue. While a sync is running, `POST /events` returns
 ## POST /sync
 
 `POST /sync` is authorized with `Authorization: Bearer <token>`. The token is
-`-sync-token` or `GENESIS_SYNC_TOKEN`. Launch generates one when unset. An
-empty token disables `/sync` (`401`). This is not a strong capability
-boundary: agents share the listener UID and can read `/proc/<pid>/environ`.
-It only keeps accidental unauthenticated callers off the control path.
+`-sync-token` or `GENESIS_SYNC_TOKEN`. An empty token disables `/sync`
+(`401` `sync is disabled`). Launch does not generate a token. This is not a
+strong capability boundary: agents share the listener UID and can read
+`/proc/<pid>/environ`. It only keeps accidental unauthenticated callers off
+the control path.
 
 Optional JSON body:
 
@@ -115,6 +121,7 @@ reload `DEEPSEEK_API_KEY`. The runner strips `GENESIS_SYNC_TOKEN` and
 ## Docker Desktop on Windows / WSL
 
 Use the Linux engine through WSL. See the README for the exact smoke
-commands. Compose publishes `8787` and runs `genesis launch` as uid `65532`.
-That container user is not root; the privileged protocol still reports
-unsupported host diffs.
+commands. Compose runs `genesis launch` as root, drops the listener to the
+image `genesis` user, and publishes `8787`. Supply `GENESIS_SYNC_TOKEN` in
+compose; the binary will not invent one. The privileged protocol still
+reports unsupported host diffs.

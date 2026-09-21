@@ -33,8 +33,8 @@ func parseCommand(args []string) (string, []string) {
 }
 
 func runLaunchFromArgs(logger *slog.Logger, args []string) {
-	listen, agentsDir, rulesDir, syncToken := parseListenFlags("launch", args, logger)
-	runLaunch(logger, listen, agentsDir, rulesDir, syncToken)
+	listen, agentsDir, rulesDir, syncToken, listenerUser := parseLaunchFlags(args, logger)
+	runLaunch(logger, listen, agentsDir, rulesDir, syncToken, listenerUser)
 }
 
 func runListen(logger *slog.Logger, args []string) {
@@ -102,7 +102,23 @@ func parseListenFlags(command string, args []string, logger *slog.Logger) (liste
 	listenFlag := flags.String("listen", "127.0.0.1:8787", "HTTP listen address")
 	agentsFlag := flags.String("agents", "agents.d", "directory containing YAML agent definitions")
 	rulesFlag := flags.String("rules", "rules.d", "directory containing YAML rules")
-	tokenFlag := flags.String("sync-token", os.Getenv(syncTokenEnv), "bearer token required for POST /sync")
+	tokenFlag := flags.String("sync-token", os.Getenv(syncTokenEnv), "bearer token required for POST /sync; empty disables /sync")
+	parseFlagSet(flags, args, logger)
+	return *listenFlag, *agentsFlag, *rulesFlag, *tokenFlag
+}
+
+func parseLaunchFlags(args []string, logger *slog.Logger) (listen, agentsDir, rulesDir, syncToken, listenerUser string) {
+	flags := flag.NewFlagSet("launch", flag.ExitOnError)
+	listenFlag := flags.String("listen", "127.0.0.1:8787", "HTTP listen address")
+	agentsFlag := flags.String("agents", "agents.d", "directory containing YAML agent definitions")
+	rulesFlag := flags.String("rules", "rules.d", "directory containing YAML rules")
+	tokenFlag := flags.String("sync-token", os.Getenv(syncTokenEnv), "bearer token required for POST /sync; empty disables /sync")
+	listenerUserFlag := flags.String("listener-user", os.Getenv(listenerUserEnv), "OS user for the unprivileged listener; required when launch runs as root")
+	parseFlagSet(flags, args, logger)
+	return *listenFlag, *agentsFlag, *rulesFlag, *tokenFlag, *listenerUserFlag
+}
+
+func parseFlagSet(flags *flag.FlagSet, args []string, logger *slog.Logger) {
 	if err := flags.Parse(args); err != nil {
 		fail(logger, "parse flags", err)
 	}
@@ -110,7 +126,6 @@ func parseListenFlags(command string, args []string, logger *slog.Logger) (liste
 		logger.Error("unexpected arguments", "arguments", flags.Args())
 		os.Exit(2)
 	}
-	return *listenFlag, *agentsFlag, *rulesFlag, *tokenFlag
 }
 
 func fail(logger *slog.Logger, message string, err error) {

@@ -2,22 +2,32 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
 
-func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, syncToken string) {
-	if syncToken == "" {
-		generated, err := generateSyncToken()
-		if err != nil {
-			fail(logger, "generate sync token", err)
-		}
-		syncToken = generated
+const listenerUserEnv = "GENESIS_LISTENER_USER"
+
+type listenerIdentity struct {
+	Username string
+	Home     string
+	Uid      uint32
+	Gid      uint32
+	Groups   []uint32
+}
+
+func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, syncToken, listenerUser string) {
+	identity, err := resolveListenerIdentity(os.Geteuid(), listenerUser)
+	if err != nil {
+		fail(logger, "resolve listener user", err)
 	}
 
 	parent, child, err := privilegedSocketpair()
@@ -49,7 +59,8 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, syncToken strin
 		"-agents", absoluteAgentsDir,
 		"-rules", absoluteRulesDir,
 	)
-	command.Env = launchChildEnv(syncToken)
+	command.Env = launchChildEnv(syncToken, identity)
+	applyListenerIdentity(command, identity)
 	command.ExtraFiles = []*os.File{child}
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
@@ -61,13 +72,21 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, syncToken strin
 	}
 	child.Close()
 
-	logger.Info("genesis orchestrator started",
+	attrs := []any{
 		"pid", os.Getpid(),
+		"uid", os.Geteuid(),
 		"listener_pid", command.Process.Pid,
 		"address", listen,
 		"agents", absoluteAgentsDir,
 		"rules", absoluteRulesDir,
-	)
+		"sync_configured", syncToken != "",
+	}
+	if identity != nil {
+		attrs = append(attrs, "listener_user", identity.Username, "listener_uid", identity.Uid)
+	} else {
+		attrs = append(attrs, "listener_uid", os.Geteuid())
+	}
+	logger.Info("genesis orchestrator started", attrs...)
 
 	go servePrivilegedParent(parent, logger)
 	code := superviseListener(command, logger)
@@ -75,19 +94,110 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, syncToken strin
 	os.Exit(code)
 }
 
-func launchChildEnv(syncToken string) []string {
-	env := make([]string, 0, len(os.Environ())+2)
+func resolveListenerIdentity(euid int, requested string) (*listenerIdentity, error) {
+	if euid == 0 {
+		if requested == "" {
+			return nil, errors.New("genesis launch as root requires -listener-user or GENESIS_LISTENER_USER")
+		}
+		return lookupListenerIdentity(requested)
+	}
+	if requested == "" {
+		return nil, nil
+	}
+	identity, err := lookupListenerIdentity(requested)
+	if err != nil {
+		return nil, err
+	}
+	if int(identity.Uid) != euid {
+		return nil, fmt.Errorf("genesis launch cannot switch to user %q from uid %d", requested, euid)
+	}
+	return nil, nil
+}
+
+func lookupListenerIdentity(name string) (*listenerIdentity, error) {
+	account, err := user.Lookup(name)
+	if err != nil {
+		return nil, fmt.Errorf("listener user %q: %w", name, err)
+	}
+	uid, err := strconv.ParseUint(account.Uid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("listener user %q uid: %w", name, err)
+	}
+	gid, err := strconv.ParseUint(account.Gid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("listener user %q gid: %w", name, err)
+	}
+	identity := &listenerIdentity{
+		Username: account.Username,
+		Home:     account.HomeDir,
+		Uid:      uint32(uid),
+		Gid:      uint32(gid),
+		Groups:   []uint32{uint32(gid)},
+	}
+	groupIDs, err := account.GroupIds()
+	if err != nil {
+		return identity, nil
+	}
+	seen := map[uint32]struct{}{identity.Gid: {}}
+	for _, raw := range groupIDs {
+		value, err := strconv.ParseUint(raw, 10, 32)
+		if err != nil {
+			continue
+		}
+		gid := uint32(value)
+		if _, exists := seen[gid]; exists {
+			continue
+		}
+		seen[gid] = struct{}{}
+		identity.Groups = append(identity.Groups, gid)
+	}
+	return identity, nil
+}
+
+func applyListenerIdentity(command *exec.Cmd, identity *listenerIdentity) {
+	if command == nil || identity == nil {
+		return
+	}
+	if command.SysProcAttr == nil {
+		command.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	command.SysProcAttr.Credential = &syscall.Credential{
+		Uid:    identity.Uid,
+		Gid:    identity.Gid,
+		Groups: append([]uint32(nil), identity.Groups...),
+	}
+}
+
+func launchChildEnv(syncToken string, identity *listenerIdentity) []string {
+	skip := map[string]struct{}{
+		privilegedFDEnv: {},
+		syncTokenEnv:    {},
+	}
+	if identity != nil {
+		skip["HOME"] = struct{}{}
+		skip["USER"] = struct{}{}
+		skip["LOGNAME"] = struct{}{}
+		skip["USERNAME"] = struct{}{}
+	}
+	env := make([]string, 0, len(os.Environ())+5)
 	for _, item := range os.Environ() {
 		key, _, _ := strings.Cut(item, "=")
-		if key == privilegedFDEnv || key == syncTokenEnv {
+		if _, drop := skip[key]; drop {
 			continue
 		}
 		env = append(env, item)
 	}
-	return append(env,
-		syncTokenEnv+"="+syncToken,
-		privilegedFDEnv+"=3",
-	)
+	if syncToken != "" {
+		env = append(env, syncTokenEnv+"="+syncToken)
+	}
+	env = append(env, privilegedFDEnv+"=3")
+	if identity != nil {
+		env = append(env, "USER="+identity.Username, "LOGNAME="+identity.Username)
+		if identity.Home != "" {
+			env = append(env, "HOME="+identity.Home)
+		}
+	}
+	return env
 }
 
 func superviseListener(command *exec.Cmd, logger *slog.Logger) int {
@@ -126,8 +236,4 @@ func exitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return 1
-}
-
-func generateSyncToken() (string, error) {
-	return newIPCRequestID()
 }

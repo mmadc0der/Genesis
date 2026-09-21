@@ -39,10 +39,12 @@ uv run --locked ./bin/genesis launch \
 ```
 
 `genesis -listen ...` still runs the listener in this process. `launch` is
-the supervisor: it inherits no extra HTTP port, generates a sync token when
-`GENESIS_SYNC_TOKEN` / `-sync-token` is empty, and keeps a private
-socketpair for privileged coordination. Filesystem edits are inactive until
-`POST /sync`.
+the supervisor: it inherits no extra HTTP port and keeps a private socketpair
+for privileged coordination. An empty `-sync-token` / `GENESIS_SYNC_TOKEN`
+disables `POST /sync` (`401` `sync is disabled`); set a token to activate
+filesystem edits. When `launch` runs as root it requires `-listener-user` /
+`GENESIS_LISTENER_USER` and execs the listener as that user. Non-root launch
+keeps the current user and does not need that flag.
 
 `uv run` places the managed `.venv` first in `PATH`. Equivalently, activate it
 with `. .venv/bin/activate` before running `./bin/genesis`. Genesis resolves
@@ -344,7 +346,8 @@ While sync runs, `POST /events` returns `503` with `Retry-After: 1`. A second
 sync returns `409`. In-flight runs keep the snapshot they were accepted with.
 
 Bearer auth is a local operator token, not a sandbox. Agents share the
-Genesis UID.
+Genesis UID. Leaving the token empty disables `/sync`; Genesis does not
+invent one.
 
 ## Docker Desktop on Windows with the repo in WSL
 
@@ -375,10 +378,13 @@ curl -i http://127.0.0.1:8787/sync \
   --data '{"scope":["agents","rules"]}'
 ```
 
-6. One-shot wrapper with the same checks: `sh scripts/wsl-docker-smoke.sh`.
+6. One-shot wrapper with the same checks, including a host-side rule edit
+   that stays inactive until `/sync`: `sh scripts/wsl-docker-smoke.sh`.
 
-Compose runs `genesis launch` as uid `65532` and publishes `8787:8787`. Do
-not set `network_mode: host` (it does not mean the same thing on Docker
-Desktop). Line endings are forced to LF via `.gitattributes`. If bind-mounted
-YAML is unreadable, relax file mode to `0644` inside WSL.
+Compose runs `genesis launch` as root and drops the listener to the image
+`genesis` user (uid `65532`). Publish `8787:8787`. Supply
+`GENESIS_SYNC_TOKEN`; the binary will not generate one. Do not set
+`network_mode: host` (it does not mean the same thing on Docker Desktop).
+Line endings are forced to LF via `.gitattributes`. If bind-mounted YAML is
+unreadable, relax file mode to `0644` inside WSL.
 
