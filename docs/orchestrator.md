@@ -118,17 +118,32 @@ Secrets are still the listen process environment at start. Sync does not
 reload `DEEPSEEK_API_KEY`. The runner strips `GENESIS_SYNC_TOKEN` and
 `GENESIS_PRIVILEGED_FD` from Python's inherited environment.
 
+## Observe
+
+`GET /health` and `GET /generation` are read-only. They do not reload YAML,
+swap the cache, or accept a bearer. `/generation` returns the active agents,
+rules, digest, whether a sync token is configured, and whether a sync is in
+progress. It does not return the token. `POST /events` and `POST /sync` are
+unchanged.
+
+`genesis control` is a second process. It reads the config directories and
+the run journals, proxies CloudEvents and authorized sync to the listener,
+and serves the panel. The journal file remains the replay source. See
+[control.md](control.md).
+
 ## Docker Desktop on Windows / WSL
 
 Use the Linux engine through WSL. See the README for the exact smoke
 commands. Compose runs `genesis launch` as root, drops the listener to the
-image `genesis` user, and publishes `8787`. Agents and rules live on the
-named volume `genesis-config` at `/var/lib/genesis/config`, writable by
-`genesis` and seeded from `/usr/share/genesis/defaults` on first volume
-creation. Run journals live on named volume `genesis-data` at
-`/var/lib/genesis/data`. `docker compose down` keeps both volumes;
-`docker compose down -v` deletes them so the next `up` reseeds config
-defaults and starts with empty run storage. The binary and `/app/.venv`
-are not writable by `genesis`. Supply `GENESIS_SYNC_TOKEN` in compose; the
-binary will not invent one. The privileged protocol still reports
-unsupported host diffs.
+image `genesis` user, and does not publish the listener port. The control
+process is the published UI at host `127.0.0.1:8790`. It mounts
+`genesis-config` read-write and `genesis-data` read-only. The listener keeps
+`genesis-data` read-write so it can append journals. Agents and rules live
+on `genesis-config` at `/var/lib/genesis/config`, seeded from
+`/usr/share/genesis/defaults` on first volume creation. Run journals live on
+`genesis-data` at `/var/lib/genesis/data`. `docker compose down` keeps both
+volumes; `docker compose down -v` deletes them so the next `up` reseeds
+config defaults and starts with empty run storage. The binary and
+`/app/.venv` are not writable by `genesis`. Supply `GENESIS_SYNC_TOKEN` in
+compose; the binary will not invent one. The privileged protocol still
+reports unsupported host diffs.

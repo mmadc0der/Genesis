@@ -43,7 +43,7 @@ trap cleanup EXIT
 ready=0
 i=0
 while [ "$i" -lt 60 ]; do
-  if curl -s -o /dev/null http://127.0.0.1:8787/; then
+  if curl -sf -o /dev/null http://127.0.0.1:8790/api/health; then
     ready=1
     break
   fi
@@ -52,7 +52,28 @@ while [ "$i" -lt 60 ]; do
 done
 if [ "$ready" != 1 ]; then
   docker compose logs >&2
-  echo "genesis never became reachable on 127.0.0.1:8787" >&2
+  echo "genesis control never became reachable on 127.0.0.1:8790" >&2
+  exit 1
+fi
+
+if curl -sf -m 1 -o /dev/null http://127.0.0.1:8787/health; then
+  echo "listener port 8787 is published; only the control port should be" >&2
+  exit 1
+fi
+if ! curl -sf http://127.0.0.1:8790/ | grep -q Genesis; then
+  echo "control UI did not serve the Genesis panel" >&2
+  exit 1
+fi
+if curl -sf http://127.0.0.1:8790/api/state | grep -q "$token"; then
+  echo "control API exposed the sync token" >&2
+  exit 1
+fi
+if docker compose exec -T control touch /var/lib/genesis/data/ro-probe >/dev/null 2>&1; then
+  echo "control was able to write genesis-data" >&2
+  exit 1
+fi
+if ! docker compose exec -T control sh -c 'touch /var/lib/genesis/config/rw-probe && rm -f /var/lib/genesis/config/rw-probe'; then
+  echo "control could not write genesis-config" >&2
   exit 1
 fi
 
@@ -77,21 +98,43 @@ match:
 agent: workspace-janitor
 YAML
 
-unsynced="$(curl -s -o /tmp/genesis-wsl-event.out -w '%{http_code}' \
-  http://127.0.0.1:8787/events \
-  -H 'Content-Type: application/cloudevents+json' \
-  --data '{"specversion":"1.0","id":"wsl-1","source":"urn:genesis:wsl","type":"dev.genesis.wsl"}')"
+listener_request() {
+  docker compose exec -T \
+    -e M="$1" -e P="$2" -e C="${3:-}" -e B="${4:-}" -e A="${5:-}" \
+    genesis python3 -c '
+import os, urllib.error, urllib.request
+body = os.environ["B"].encode() or None
+req = urllib.request.Request("http://127.0.0.1:8787" + os.environ["P"], data=body, method=os.environ["M"])
+if os.environ["C"]:
+    req.add_header("Content-Type", os.environ["C"])
+if os.environ["A"]:
+    req.add_header("Authorization", os.environ["A"])
+try:
+    with urllib.request.urlopen(req) as resp:
+        data, code = resp.read().decode(), resp.status
+except urllib.error.HTTPError as exc:
+    data, code = exc.read().decode(), exc.code
+with open("/tmp/genesis-listener.out", "w") as handle:
+    handle.write(data)
+print(code)
+'
+}
+
+copy_listener_out() {
+  docker compose exec -T genesis cat /tmp/genesis-listener.out >"$1"
+}
+
+unsynced="$(listener_request POST /events application/cloudevents+json \
+  '{"specversion":"1.0","id":"wsl-1","source":"urn:genesis:wsl","type":"dev.genesis.wsl"}')"
+copy_listener_out /tmp/genesis-wsl-event.out
 if [ "$unsynced" != "204" ]; then
   echo "expected 204 for a newly written rule before /sync, got $unsynced" >&2
   cat /tmp/genesis-wsl-event.out >&2 || true
   exit 1
 fi
 
-sync_code="$(curl -s -o /tmp/genesis-wsl-sync.out -w '%{http_code}' \
-  http://127.0.0.1:8787/sync \
-  -H 'Authorization: Bearer '"$token" \
-  -H 'Content-Type: application/json' \
-  --data '{"scope":["rules"]}')"
+sync_code="$(listener_request POST /sync application/json '{"scope":["rules"]}' "Bearer $token")"
+copy_listener_out /tmp/genesis-wsl-sync.out
 if [ "$sync_code" != "200" ]; then
   echo "expected 200 from POST /sync, got $sync_code" >&2
   cat /tmp/genesis-wsl-sync.out >&2 || true
@@ -108,10 +151,9 @@ if ! grep -q '"host_mutation":"none"' /tmp/genesis-wsl-sync.out; then
   exit 1
 fi
 
-synced="$(curl -s -o /tmp/genesis-wsl-synced.out -w '%{http_code}' \
-  http://127.0.0.1:8787/events \
-  -H 'Content-Type: application/cloudevents+json' \
-  --data '{"specversion":"1.0","id":"wsl-2","source":"urn:genesis:wsl","type":"dev.genesis.wsl"}')"
+synced="$(listener_request POST /events application/cloudevents+json \
+  '{"specversion":"1.0","id":"wsl-2","source":"urn:genesis:wsl","type":"dev.genesis.wsl"}')"
+copy_listener_out /tmp/genesis-wsl-synced.out
 if [ "$synced" != "202" ]; then
   echo "expected 202 after /sync picked up the new rule, got $synced" >&2
   cat /tmp/genesis-wsl-synced.out >&2 || true
@@ -133,4 +175,4 @@ docker compose exec -T -u genesis genesis rm -f "$smoke_rule"
 
 echo "WSL Docker smoke passed."
 echo "Named volume genesis-config keeps agents/rules across compose down; genesis-data keeps run journals; compose down -v reseeds defaults."
-echo "Windows browsers can use http://127.0.0.1:8787/ because Docker Desktop publishes the port on localhost."
+echo "Windows browsers can use http://127.0.0.1:8790/ . The listener stays on the Compose network."

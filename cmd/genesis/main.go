@@ -19,6 +19,8 @@ func main() {
 		runListen(logger, args)
 	case "launch":
 		runLaunchFromArgs(logger, args)
+	case "control":
+		runControl(logger, args)
 	default:
 		logger.Error("unknown command", "command", command)
 		os.Exit(2)

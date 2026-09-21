@@ -1,0 +1,120 @@
+# Control panel
+
+`genesis control` is a separate process from `genesis listen` / `genesis launch`.
+It serves the operator UI and a small HTTP API. It does not match rules, start
+runs, or own the journal. The listener still does.
+
+```
+browser  -- REST + WebSocket -->  genesis control  -- POST /events, POST /sync -->  listener
+                                      |  reads YAML                         ^
+                                      |  reads events.jsonl                 |
+                                      v                                     |
+                                 genesis-config (read/write)          genesis-data (read-only)
+```
+
+The sync bearer stays in the control process. Browser requests never send or
+receive it. An empty token leaves `/sync` disabled; the panel does not invent
+one.
+
+## Run it
+
+Start the listener first, then the panel. Both default to loopback.
+
+```sh
+export GENESIS_SYNC_TOKEN='replace-with-a-local-sync-token'
+uv run --locked ./bin/genesis launch \
+  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d -data genesis-data
+
+./bin/genesis control \
+  -listen 127.0.0.1:8790 \
+  -listener http://127.0.0.1:8787 \
+  -agents agents.d -rules rules.d -data genesis-data \
+  -web web/dist
+```
+
+Build the UI with `npm ci --prefix web && npm run build --prefix web`.
+`npm run dev --prefix web` serves Vite on `127.0.0.1:4179` and proxies `/api`
+to the control process. The shipped UI is the files the Go process serves.
+
+`-data` must already exist. Control opens it read-only: it does not create
+run directories, chmod them, or truncate journals. A torn last JSONL line is
+skipped and left on disk for the listener.
+
+## Listener reads
+
+These are the only listener routes added for the panel. They do not reload
+YAML or swap the cache.
+
+| Method | Path | Body |
+|---|---|---|
+| `GET` | `/health` | `{"ok":true}` |
+| `GET` | `/generation` | active agents, rules, digest, `sync_configured`, `syncing` |
+
+`sync_configured` is a boolean. The token is not in the payload.
+
+## Control API
+
+Durable reads and commands are REST. Live updates are `GET /api/live`
+WebSocket text frames. Replay is a file read. If the socket drops, reconnect
+and pass `after` set to the last `sequence` you applied; the journal is
+authoritative and the socket is not.
+
+| Method | Path | Behavior |
+|---|---|---|
+| `GET` | `/api/health` | control process is up |
+| `GET` | `/api/state` | desired files vs active generation (`in_sync`, `draft`, `listener_unavailable`, `desired_invalid`) |
+| `GET` | `/api/agents` | agents from disk union the active cache, with `presence` |
+| `GET` | `/api/agents/{id}` | one agent |
+| `GET` | `/api/rules` | rules, same presence rules |
+| `GET` | `/api/rules/{file}` | one rule |
+| `GET` | `/api/runs?limit=` | recent run summaries from `events.jsonl` |
+| `GET` | `/api/runs/{id}` | summary, event count, redacted `result.json`, stderr tail |
+| `GET` | `/api/runs/{id}/events?after=&limit=` | journal lines with `sequence` greater than `after` |
+| `POST` | `/api/events` | proxy a CloudEvent to the listener; no bearer added |
+| `POST` | `/api/messages` | build a CloudEvent from `{message, rule?, type?, source?, subject?}` and proxy it |
+| `POST` | `/api/sync` | proxy to listener `POST /sync` and attach the bearer there |
+
+`presence` is `active` (file matches the cache), `draft` (file differs or is
+new), `active_only` (cached, file gone), or `unknown` (listener not readable).
+Desired state remains the YAML files. The panel does not edit them.
+`sync_configured` and `syncing` are listener facts on `active` and
+`listener`; a file snapshot omits them.
+
+`/api/messages` copies the named rule's `match` attributes, then applies
+non-empty type, source, and subject overrides. The message becomes
+`data.message`. The listener still matches only the active generation, so a
+draft rule does not match until sync.
+
+### WebSocket
+
+Client frames:
+
+```json
+{"op":"subscribe","topic":"run","run_id":"gen_…","after":"4"}
+{"op":"subscribe","topic":"runs"}
+{"op":"subscribe","topic":"state"}
+{"op":"unsubscribe","topic":"run","run_id":"gen_…"}
+{"op":"ping"}
+```
+
+Server frames are `event` (one journal line), `run` (a summary whose state or
+sequence changed), `state` (digests and drift; refetch REST for the full
+document), `pong`, and `error`. Event frames exist only because the process
+re-read `events.jsonl`. They are not a second bus.
+
+Origins are limited to loopback (`127.0.0.1`, `localhost`, `[::1]`). There is
+no other authentication. Do not publish the control port beyond localhost.
+Inside Compose the process listens on `0.0.0.0` so Docker can forward it, and
+the published binding is `127.0.0.1:8790`.
+
+## What this does not do
+
+- No live token stream. The pinned SDK does not emit `assistant/chunk` on the
+  runner pipe. Chat text is the settled `result` line.
+- No database, SSE channel, or external broker.
+- No YAML form editor, charts, or component library.
+- No cancel, retry, queue, or run timeout.
+- No write to `genesis-data`. Listener recovery still appends `interrupted`
+  and `end` for dead in-flight journals.
+- Control in another PID or container namespace does not treat a recorded pid
+  as alive or dead. A journal without `end` is `open`.

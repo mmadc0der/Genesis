@@ -8,3 +8,5 @@ __pycache__
 *.md
 docs
 scripts
+web/node_modules
+web/dist

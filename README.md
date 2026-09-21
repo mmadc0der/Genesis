@@ -24,7 +24,7 @@ root host diffs; current YAML cannot name OS users or packages.
 
 ## Install and run
 
-Go 1.22+, Python 3.10+, and
+Go 1.23+, Python 3.10+, Node.js 22+, and
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/) are required.
 
 ```sh
@@ -51,6 +51,27 @@ user. Non-root launch keeps the current user and does not need that flag.
 with `. .venv/bin/activate` before running `./bin/genesis`. Genesis resolves
 `python3` once at startup and embeds its one-shot Python runner in the Go
 binary.
+
+## Control panel
+
+`genesis control` is a second process. It serves a small Preact UI and REST
+API on `127.0.0.1:8790`, reads agent/rule files, reads run journals, and
+proxies CloudEvents plus authorized `POST /sync` to the listener. The sync
+token is not sent to the browser. Node is required only to build the UI.
+See [docs/control.md](docs/control.md).
+
+```sh
+npm ci --prefix web
+npm run build --prefix web
+./bin/genesis control \
+  -listen 127.0.0.1:8790 \
+  -listener http://127.0.0.1:8787 \
+  -agents agents.d -rules rules.d -data genesis-data \
+  -web web/dist
+```
+
+Open `http://127.0.0.1:8790/`. The listener stays on `127.0.0.1:8787`.
+`GET /health` and `GET /generation` are read-only views of that process.
 
 ## Agents
 
@@ -205,6 +226,10 @@ PYTHONPYCACHEPREFIX=/tmp/genesis-pycache \
   uv run --locked python -m py_compile \
     cmd/genesis/runner.py cmd/genesis/test_runner.py
 go build -o /tmp/genesis ./cmd/genesis
+npm ci --prefix web
+npm test --prefix web
+npm run check --prefix web
+npm run build --prefix web
 ```
 
 This self-contained smoke test also stays credential-free. It substitutes a
@@ -400,10 +425,14 @@ Agents and rules are **not** bind-mounted from the WSL tree. Compose mounts
 the named volume `genesis-config` at `/var/lib/genesis/config` and
 `genesis-data` at `/var/lib/genesis/data`. Those volumes are owned by the
 image `genesis` user (uid `65532`). The first time `genesis-config` is
-created, the entrypoint copies default YAML from
+created, the listener entrypoint copies default YAML from
 `/usr/share/genesis/defaults`. Later `docker compose up` keeps whatever is
 already in the volumes. The genesis binary and `/app/.venv` stay root-owned
 and are not writable by `genesis`.
+
+The listener is not published on the host. The control service is the UI,
+published only as `127.0.0.1:8790`. It mounts config read-write and run data
+read-only. The listener still writes journals.
 
 1. Install Docker Desktop on Windows and enable WSL 2.
 2. Settings → Resources → WSL integration: enable your distro (for example
@@ -429,23 +458,25 @@ match:
   type: dev.genesis.lab
 agent: workspace-janitor
 YAML
-curl -i http://127.0.0.1:8787/sync \
-  -H "Authorization: Bearer $GENESIS_SYNC_TOKEN" \
+curl -i http://127.0.0.1:8790/api/sync \
   -H 'Content-Type: application/json' \
   --data '{"scope":["agents","rules"]}'
 ```
 
-Windows browsers can use `http://127.0.0.1:8787/` because Docker Desktop
-publishes the port on localhost.
+The browser does not send the sync token. The control process adds it when
+it calls the listener. Windows browsers use `http://127.0.0.1:8790/` because
+Docker Desktop publishes that port on localhost only.
 
 6. One-shot wrapper: `sh scripts/wsl-docker-smoke.sh`. It writes and removes
    a temporary rule inside the container as `genesis` and checks that the
    edit stays inactive until `/sync`.
 
 Compose runs `genesis launch` as root and drops the listener to `genesis`.
-Supply `GENESIS_SYNC_TOKEN`; the binary will not generate one. Do not set
-`network_mode: host` (it does not mean the same thing on Docker Desktop).
-Line endings are forced to LF via `.gitattributes`.
+The control process runs as root so it can read the listener's `0700` journal
+directories through the read-only data mount. Supply `GENESIS_SYNC_TOKEN`;
+the binary will not generate one. Do not set `network_mode: host` (it does
+not mean the same thing on Docker Desktop). Line endings are forced to LF
+via `.gitattributes`.
 
 Persistence:
 

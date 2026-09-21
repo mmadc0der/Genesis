@@ -6,8 +6,6 @@ services:
     image: genesis:local
     init: true
     user: "0:0"
-    ports:
-      - "8787:8787"
     environment:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       GENESIS_SYNC_TOKEN: ${GENESIS_SYNC_TOKEN:-compose-sync-token}
@@ -19,6 +17,38 @@ services:
       - type: volume
         source: data
         target: /var/lib/genesis/data
+
+  control:
+    image: genesis:local
+    init: true
+    user: "0:0"
+    depends_on:
+      - genesis
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until [ -d /var/lib/genesis/config/agents.d ] && [ -d /var/lib/genesis/data/runs ]; do
+          sleep 0.2
+        done
+        exec /usr/local/bin/genesis control \
+          -listen 0.0.0.0:8790 \
+          -listener http://genesis:8787 \
+          -agents /var/lib/genesis/config/agents.d \
+          -rules /var/lib/genesis/config/rules.d \
+          -data /var/lib/genesis/data \
+          -web /usr/share/genesis/web
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      GENESIS_SYNC_TOKEN: ${GENESIS_SYNC_TOKEN:-compose-sync-token}
+    volumes:
+      - type: volume
+        source: config
+        target: /var/lib/genesis/config
+      - type: volume
+        source: data
+        target: /var/lib/genesis/data
+        read_only: true
 
 volumes:
   config:

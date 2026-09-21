@@ -95,6 +95,10 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleEvents(w, r)
 	case "/sync":
 		s.handleSync(w, r)
+	case "/health":
+		s.handleHealth(w, r)
+	case "/generation":
+		s.handleGeneration(w, r)
 	default:
 		http.NotFound(w, r)
 	}

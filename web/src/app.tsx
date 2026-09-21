@@ -1,0 +1,455 @@
+import { useEffect, useRef, useState } from "preact/hooks";
+import { getJSON, postText } from "./api";
+import {
+  buildMessage,
+  driftLabel,
+  eventLine,
+  maxCursor,
+  mergeEvents,
+  mergeRuns,
+  presenceLabel,
+  shortDigest,
+} from "./model";
+import type { Agent, ControlState, EventsPage, LifecycleEvent, LiveFrame, LiveOp, Rule, RunDetail, RunSummary } from "./types";
+
+export function App() {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [state, setState] = useState<ControlState | null>(null);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [rules, setRules] = useState<Rule[]>([]);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [selectedRun, setSelectedRun] = useState("");
+  const [selectedAgent, setSelectedAgent] = useState("");
+  const [selectedRule, setSelectedRule] = useState("");
+  const [events, setEvents] = useState<LifecycleEvent[]>([]);
+  const [cursor, setCursor] = useState("0");
+  const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [message, setMessage] = useState("");
+  const [eventType, setEventType] = useState("");
+  const [eventSource, setEventSource] = useState("");
+  const [eventSubject, setEventSubject] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const selectedRunRef = useRef("");
+  const cursorRef = useRef("0");
+  const subsRef = useRef<LiveOp[]>([]);
+  const socketRef = useRef<WebSocket | null>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+
+  selectedRunRef.current = selectedRun;
+  cursorRef.current = cursor;
+
+  async function refreshCatalog() {
+    const [nextState, nextAgents, nextRules, nextRuns] = await Promise.all([
+      getJSON<ControlState>("/api/state"),
+      getJSON<{ agents: Agent[] }>("/api/agents"),
+      getJSON<{ rules: Rule[] }>("/api/rules"),
+      getJSON<{ runs: RunSummary[] }>("/api/runs"),
+    ]);
+    setState(nextState);
+    setAgents(nextAgents.agents);
+    setRules(nextRules.rules);
+    setRuns(nextRuns.runs);
+  }
+
+  function sendLive(op: LiveOp) {
+    subsRef.current = subsRef.current.filter((item) => !(item.topic === op.topic && item.run_id === op.run_id));
+    if (op.op === "subscribe") subsRef.current.push(op);
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(op));
+    }
+  }
+
+  useEffect(() => {
+    let stopped = false;
+    let delay = 400;
+    let timer = 0;
+    const connect = () => {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const socket = new WebSocket(`${proto}://${location.host}/api/live`);
+      socketRef.current = socket;
+      socket.onopen = () => {
+        if (stopped) return;
+        setConnected(true);
+        delay = 400;
+        for (const op of subsRef.current) socket.send(JSON.stringify(op));
+      };
+      socket.onmessage = (messageEvent) => {
+        let frame: LiveFrame;
+        try {
+          frame = JSON.parse(String(messageEvent.data)) as LiveFrame;
+        } catch {
+          return;
+        }
+        if (frame.op === "event" && frame.event && frame.run_id === selectedRunRef.current) {
+          setEvents((current) => mergeEvents(current, [frame.event!]));
+          if (frame.cursor) {
+            cursorRef.current = frame.cursor;
+            setCursor(frame.cursor);
+            const stored = subsRef.current.find((item) => item.topic === "run" && item.run_id === frame.run_id);
+            if (stored) stored.after = frame.cursor;
+          }
+        } else if (frame.op === "run" && frame.run) {
+          setRuns((current) => mergeRuns(current, frame.run!));
+          if (frame.run.run_id === selectedRunRef.current && Number(frame.run.last_seq) > Number(cursorRef.current)) {
+            void getJSON<EventsPage>(`/api/runs/${frame.run.run_id}/events?after=${cursorRef.current}`).then((page) => {
+              setEvents((current) => mergeEvents(current, page.events));
+              setCursor(page.cursor);
+              cursorRef.current = page.cursor;
+            }).catch(() => undefined);
+          }
+        } else if (frame.op === "state") {
+          void refreshCatalog().catch((reason: unknown) => {
+            setError(reason instanceof Error ? reason.message : "Refresh failed");
+          });
+        }
+      };
+      socket.onclose = () => {
+        setConnected(false);
+        if (stopped) return;
+        timer = window.setTimeout(connect, delay);
+        delay = Math.min(delay * 2, 5000);
+      };
+    };
+    connect();
+    sendLive({ op: "subscribe", topic: "state" });
+    sendLive({ op: "subscribe", topic: "runs" });
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      socketRef.current?.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    refreshCatalog()
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Failed to load Genesis"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (!selectedRun) {
+      setEvents([]);
+      setDetail(null);
+      setCursor("0");
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      getJSON<EventsPage>(`/api/runs/${selectedRun}/events?limit=500`),
+      getJSON<RunDetail>(`/api/runs/${selectedRun}`),
+    ])
+      .then(([page, nextDetail]) => {
+        if (cancelled) return;
+        setEvents(page.events);
+        setCursor(page.cursor);
+        cursorRef.current = page.cursor;
+        setDetail(nextDetail);
+        sendLive({ op: "subscribe", topic: "run", run_id: selectedRun, after: page.cursor });
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : "Failed to load run");
+      });
+    return () => {
+      cancelled = true;
+      sendLive({ op: "unsubscribe", topic: "run", run_id: selectedRun });
+    };
+  }, [selectedRun]);
+
+  useEffect(() => {
+    const node = transcriptRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [events, selectedRun]);
+
+  const rule = rules.find((item) => item.name === selectedRule);
+  const agent = agents.find((item) => item.id === (selectedAgent || detail?.agent || rule?.agent));
+  const visibleRuns = runs.filter((run) => {
+    if (selectedRule && run.rule !== selectedRule) return false;
+    if (selectedAgent && run.agent !== selectedAgent) return false;
+    return true;
+  });
+
+  async function onSync() {
+    setBusy(true);
+    setNotice("");
+    try {
+      const result = await postText("/api/sync", "application/json", JSON.stringify({ scope: ["agents", "rules"] }));
+      if (result.status === 200) {
+        setNotice("Synced agents and rules into the active generation.");
+      } else {
+        setNotice(result.text.trim() || `Sync returned ${result.status}`);
+      }
+      await refreshCatalog();
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "Sync failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSubmit(event: Event) {
+    event.preventDefault();
+    const text = message.trim();
+    if (!text) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      const body = buildMessage({
+        message: text,
+        rule: selectedRule || undefined,
+        type: eventType || undefined,
+        source: eventSource || undefined,
+        subject: eventSubject || undefined,
+      });
+      const result = await postText("/api/messages", "application/json", JSON.stringify(body));
+      if (result.status === 202) {
+        const parsed = JSON.parse(result.text) as { runs?: Array<{ run_id: string }> };
+        const count = parsed.runs?.length ?? 0;
+        setNotice(count === 1 ? "Accepted 1 run." : `Accepted ${count} runs.`);
+        setMessage("");
+        if (parsed.runs && parsed.runs[0]) setSelectedRun(parsed.runs[0].run_id);
+        await refreshCatalog();
+      } else if (result.status === 204) {
+        setNotice("No active rule matched. Sync a draft rule, or set type and source to an active match.");
+      } else if (result.status === 503) {
+        setNotice("Sync is in progress. Send the message again in a moment.");
+      } else {
+        setNotice(result.text.trim() || `Listener returned ${result.status}`);
+      }
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "Send failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function chooseRule(name: string) {
+    const next = rules.find((item) => item.name === name);
+    setSelectedRule(name);
+    setSelectedAgent("");
+    setEventType(next?.match.type ?? "");
+    setEventSource(next?.match.source ?? "");
+    setEventSubject(next?.match.subject ?? "");
+    setRailOpen(false);
+  }
+
+  return (
+    <div class={`shell ${railOpen ? "show-rail" : ""} ${drawerOpen ? "show-drawer" : ""}`}>
+      <header class="topbar">
+        <button type="button" class="text" onClick={() => setRailOpen((open) => !open)} aria-expanded={railOpen}>
+          Agents
+        </button>
+        <strong>Genesis</strong>
+        <span class={`pill drift-${state?.drift ?? "unknown"}`}>{driftLabel(state?.drift)}</span>
+        <span class="mono digest" title={state?.active?.digest || ""}>
+          active {shortDigest(state?.active?.digest)}
+        </span>
+        <span class="mono digest" title={state?.desired?.digest || ""}>
+          draft {shortDigest(state?.desired?.digest)}
+        </span>
+        <button type="button" onClick={onSync} disabled={busy || !state?.listener.reachable || state.listener.syncing}>
+          {state?.listener.syncing ? "Syncing" : "Sync"}
+        </button>
+        <span class={`live ${connected ? "on" : ""}`}>{connected ? "live" : "reconnecting"}</span>
+        <button type="button" class="text" onClick={() => setDrawerOpen((open) => !open)} aria-expanded={drawerOpen}>
+          Details
+        </button>
+      </header>
+      {error ? <p class="banner">{error}</p> : null}
+      {state?.desired_error ? <p class="banner">{state.desired_error}</p> : null}
+      {state && !state.listener.reachable ? (
+        <p class="banner">The listener is unreachable. Journals can still be read. Sync and new messages wait until it returns.</p>
+      ) : null}
+      {state?.listener.reachable && !state.listener.sync_configured ? (
+        <p class="banner">Sync is disabled. The panel has no token to send, and it will not invent one.</p>
+      ) : null}
+
+      <div class="body">
+        <aside class="rail">
+          <section>
+            <h2>Agents</h2>
+            {agents.length === 0 ? <p class="empty">No agents in the config directory.</p> : null}
+            {agents.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                class={item.id === (selectedAgent || agent?.id) ? "row selected" : "row"}
+                onClick={() => {
+                  setSelectedAgent(item.id);
+                  setSelectedRule("");
+                  setRailOpen(false);
+                }}
+              >
+                <span>{item.id}</span>
+                <em class={`presence presence-${item.presence}`}>{presenceLabel(item.presence)}</em>
+              </button>
+            ))}
+          </section>
+          <section>
+            <h2>Rules</h2>
+            {rules.length === 0 ? <p class="empty">No rules in the config directory.</p> : null}
+            {rules.map((item) => (
+              <button
+                type="button"
+                key={item.name}
+                class={item.name === selectedRule ? "row selected" : "row"}
+                onClick={() => chooseRule(item.name)}
+              >
+                <span>
+                  <strong>{item.match.type || item.name}</strong>
+                  <small>{item.name} → {item.agent}</small>
+                </span>
+                <em class={`presence presence-${item.presence}`}>{presenceLabel(item.presence)}</em>
+              </button>
+            ))}
+          </section>
+        </aside>
+
+        <main class="center">
+          {loading ? <p class="empty">Loading the control panel…</p> : null}
+          {!loading && selectedRun ? (
+            <>
+              <div class="center-head">
+                <button type="button" class="text" onClick={() => setSelectedRun("")}>
+                  Activity
+                </button>
+                <span class="mono">{selectedRun}</span>
+              </div>
+              <div class="transcript" ref={transcriptRef}>
+                {events.length === 0 ? <p class="empty">This run has no journal lines yet.</p> : null}
+                {events.map((item) => {
+                  const line = eventLine(item);
+                  return (
+                    <article key={`${item.sequence}-${item.id ?? item.type}`} class={`line line-${line.kind}`}>
+                      <header>
+                        <span>{line.kind}</span>
+                        <time>{item.time || ""}</time>
+                      </header>
+                      <p>{line.text}</p>
+                    </article>
+                  );
+                })}
+              </div>
+            </>
+          ) : null}
+          {!loading && !selectedRun ? (
+            <>
+              <div class="center-head">
+                <span>Activity</span>
+                {selectedRule || selectedAgent ? (
+                  <button
+                    type="button"
+                    class="text"
+                    onClick={() => {
+                      setSelectedRule("");
+                      setSelectedAgent("");
+                    }}
+                  >
+                    Clear filter
+                  </button>
+                ) : null}
+              </div>
+              <div class="activity">
+                {visibleRuns.length === 0 ? (
+                  <p class="empty">No runs yet. Choose a rule and send a message. The active generation is what matches.</p>
+                ) : null}
+                {visibleRuns.map((run) => (
+                  <button type="button" key={run.run_id} class="run" onClick={() => setSelectedRun(run.run_id)}>
+                    <span class={`state state-${run.state}`}>{run.state}</span>
+                    <span>
+                      <strong>{run.agent}</strong>
+                      <small>{run.rule} · {run.cause_type || "event"}</small>
+                    </span>
+                    <span class="mono">{run.run_id.slice(0, 12)}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </main>
+
+        <aside class="drawer">
+          <h2>Details</h2>
+          {detail && selectedRun ? (
+            <dl>
+              <dt>Run</dt>
+              <dd class="mono">{detail.run_id}</dd>
+              <dt>State</dt>
+              <dd>{detail.state}</dd>
+              <dt>Agent</dt>
+              <dd>{detail.agent}</dd>
+              <dt>Rule</dt>
+              <dd>{detail.rule}</dd>
+              <dt>Session</dt>
+              <dd class="mono">{detail.session_id || "—"}</dd>
+              <dt>Cause</dt>
+              <dd>{detail.cause_type || "—"} {detail.cause_id || ""}</dd>
+              <dt>Finish</dt>
+              <dd>{detail.finish_reason || "—"}</dd>
+              <dt>Error</dt>
+              <dd>{detail.error || "—"}</dd>
+            </dl>
+          ) : (
+            <p class="empty">Select a run to see its journal summary.</p>
+          )}
+          {agent ? (
+            <section>
+              <h3>{agent.id}</h3>
+              <p class="instructions">{agent.instructions}</p>
+              <p class="mono path">{agent.cwd}</p>
+              <p class="mono path">{agent.home}</p>
+              <p>Secrets: {agent.secrets.length ? agent.secrets.join(", ") : "none"}</p>
+            </section>
+          ) : null}
+          {rule ? (
+            <section>
+              <h3>{rule.name}</h3>
+              <ul>
+                {Object.entries(rule.match).map(([key, value]) => (
+                  <li key={key}>
+                    <span class="mono">{key}</span> {value}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+          {detail?.stderr_tail ? <pre>{detail.stderr_tail}</pre> : null}
+        </aside>
+      </div>
+
+      <form class="composer" onSubmit={onSubmit}>
+        {notice ? <p class="notice">{notice}</p> : null}
+        <div class="fields">
+          <label>
+            Type
+            <input value={eventType} onInput={(event) => setEventType(event.currentTarget.value)} placeholder="from the selected rule" />
+          </label>
+          <label>
+            Source
+            <input value={eventSource} onInput={(event) => setEventSource(event.currentTarget.value)} placeholder="urn:genesis:control" />
+          </label>
+          <label>
+            Subject
+            <input value={eventSubject} onInput={(event) => setEventSubject(event.currentTarget.value)} />
+          </label>
+        </div>
+        <div class="send-row">
+          <textarea
+            value={message}
+            onInput={(event) => setMessage(event.currentTarget.value)}
+            placeholder={selectedRule ? `Message for ${selectedRule}` : "Message. Select a rule so the active match is filled in."}
+            rows={3}
+          />
+          <button type="submit" disabled={busy || !message.trim()}>
+            Send
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
