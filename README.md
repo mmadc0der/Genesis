@@ -11,7 +11,9 @@ coordination. See [docs/orchestrator.md](docs/orchestrator.md) for the exact
 cache, `/sync`, and failure semantics. The committed `workspace-janitor`
 example declares a dedicated OS user, so non-root `listen` / `launch` refuse
 it. Use Docker Compose for that identity, or drop `user` and `setup` for a
-shared-UID local process.
+shared-UID local process. The committed `designer` agent deliberately omits
+`user` and edits YAML on the writable config root; see
+[docs/designer.md](docs/designer.md).
 
 Each session runs through the official Python SDK with the standalone
 `sdk-minimal` profile. `pyproject.toml` and the committed `uv.lock` pin the
@@ -80,6 +82,8 @@ npm run build --prefix web
 
 Open `http://127.0.0.1:8790/`. The listener stays on `127.0.0.1:8787`.
 `GET /health` and `GET /generation` are read-only views of that process.
+Select the `designer.yaml` rule (`dev.genesis.user.message`) to send a
+user message to the shared-UID designer. After it writes YAML, click Sync.
 
 ## Agents
 
@@ -120,6 +124,15 @@ users, unknown fields, and invalid filename stems are rejected.
 Several rules may point at the same agent. Concurrent matches share `cwd` and
 `home` and may race; Genesis does not queue them.
 
+The committed `designer` agent omits `user` on purpose so it can keep
+`cwd: /var/lib/genesis/config` (the writable Compose config root). It runs as
+the shared listener UID. Its standing instructions describe agents, rules,
+event matching, `user`/`home`/`cwd`, safe YAML edits, active vs desired
+generations, and that an operator must Sync after it writes files. It may
+create or update agent and rule YAML. It must not reconcile OS users, install
+packages, or perform arbitrary root actions. Dedicated `cwd` cannot be that
+config path; do not add `user:` to the designer.
+
 ## Rules
 
 One rule lives in each `.yaml` or `.yml` file:
@@ -138,6 +151,11 @@ runs, in lexical filename order. The listener caches agents and rules at
 start; later filesystem edits are inactive until an authorized `POST /sync`.
 A missing agent reference or leftover `run` block fails closed at load or
 sync time.
+
+`rules.d/designer.yaml` is the dedicated user-message rule. The control panel
+copies its match (`type: dev.genesis.user.message`, `source:
+urn:genesis:control`, `subject: designer`) and puts the composer text in
+`data.message`.
 
 The rule name is its filename. Rules have no `cwd`, environment, arguments,
 prompt, model, executable, or other run configuration.
@@ -443,11 +461,13 @@ validated on this project's cloud VMs unless `docker` is installed there.
 Agents and rules are **not** bind-mounted from the WSL tree. Compose mounts
 the named volume `genesis-config` at `/var/lib/genesis/config` and
 `genesis-data` at `/var/lib/genesis/data`. Those volumes are owned by the
-image `genesis` user (uid `65532`). The first time `genesis-config` is
-created, the listener entrypoint copies default YAML from
-`/usr/share/genesis/defaults`. Later `docker compose up` keeps whatever is
-already in the volumes. The genesis binary and `/app/.venv` stay root-owned
-and are not writable by `genesis`.
+image `genesis` user (uid `65532`). On every listener start the entrypoint
+copies **missing** default YAML from `/usr/share/genesis/defaults` into the
+volume. Existing files are left unchanged, including operator-edited janitor
+or rule YAML on a reused volume. That is how an image upgrade can deliver
+`designer.yaml` without overwriting desired config. A deleted default
+filename is copied again; file contents are never replaced. The genesis
+binary and `/app/.venv` stay root-owned and are not writable by `genesis`.
 
 The listener is not published on the host. The control service is the UI,
 published only as `127.0.0.1:8790`. It mounts config read-write and run data
@@ -486,9 +506,16 @@ The browser does not send the sync token. The control process adds it when
 it calls the listener. Windows browsers use `http://127.0.0.1:8790/` because
 Docker Desktop publishes that port on localhost only.
 
-6. One-shot wrapper: `sh scripts/wsl-docker-smoke.sh`. It writes and removes
-   a temporary rule inside the container as `genesis` and checks that the
-   edit stays inactive until `/sync`.
+6. One-shot wrapper: `sh scripts/wsl-docker-smoke.sh`. It keeps named
+   volumes, writes and removes a temporary rule as `genesis`, checks that the
+   edit stays inactive until `/sync`, and checks that missing designer files
+   were seeded without overwriting existing YAML. If the volume janitor lacks
+   `user:`, it fails closed with a persisted-volume diagnosis instead of
+   treating shared-UID output as a dedicated-user pass.
+7. Destructive clean-volume smoke (deletes `genesis-config` and
+   `genesis-data`): `sh scripts/wsl-docker-smoke.sh --reset-volumes`.
+   Inspect or update a reused volume without deleting it: see
+   [docs/designer.md](docs/designer.md).
 
 Compose runs `genesis launch` as root and drops the listener to `genesis`.
 Dedicated agent users are created in the container at launch and on agents
@@ -504,9 +531,16 @@ Persistence:
 
 - `docker compose down` stops the container and **keeps** `genesis-config`
   and `genesis-data`. The next `up` reuses the same agents, rules, and run
-  journals.
+  journals, then copies any **new** default filenames that are missing.
+  Existing file contents are not replaced.
 - `docker compose down -v` deletes both volumes. The next `up` reseeds the
   image defaults into a new config volume and starts with empty run storage.
-  That is the reset.
+  That is the explicit destructive reset.
+
+If only the `genesis` OS user exists, agent output is owned by `genesis`, the
+UI says Shared listener UID, and active/draft digests match, that is reused
+pre-upgrade volume YAML, not a successful dedicated-user test. Inspect and
+optionally copy a single default file, or use `--reset-volumes`. Do not
+weaken persistence to make that look like a pass.
 
 

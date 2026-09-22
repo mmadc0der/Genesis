@@ -94,6 +94,12 @@ sees the event. Other top-level match keys, including a caller-chosen `id`,
 are copied so the active rule can match them. The listener still matches only
 the active generation, so a draft rule does not match until sync.
 
+The committed `designer.yaml` rule is the dedicated user-message match
+(`dev.genesis.user.message` / `urn:genesis:control` / `subject: designer`).
+Select it in the panel. The designer agent has no `user`; Details shows
+Shared listener UID. After it writes YAML, click Sync. See
+[designer.md](designer.md).
+
 `POST /api/sync` always requires `Content-Type: application/json` and one JSON
 object (`{}` selects both scopes). A missing media type is 415. Arrays, null,
 strings, empty bodies, unknown fields, trailing values, and unknown scope

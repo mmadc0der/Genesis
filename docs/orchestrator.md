@@ -172,12 +172,14 @@ process is the published UI at host `127.0.0.1:8790` and runs as uid
 and starts only after the listener entrypoint has given those volumes to
 `genesis`. The listener keeps
 `genesis-data` read-write so it can append journals. Agents and rules live
-on `genesis-config` at `/var/lib/genesis/config`, seeded from
-`/usr/share/genesis/defaults` on first volume creation. Run journals live on
+on `genesis-config` at `/var/lib/genesis/config`. The entrypoint copies
+**missing** files from `/usr/share/genesis/defaults` on every start and
+never overwrites existing volume YAML. Run journals live on
 `genesis-data` at `/var/lib/genesis/data`. `docker compose down` keeps both
 volumes; `docker compose down -v` deletes them so the next `up` reseeds
 config defaults and starts with empty run storage. The binary and
 `/app/.venv` are not writable by `genesis`. Supply `GENESIS_SYNC_TOKEN` in
 compose; the binary will not invent one. Dedicated agent homes live under
 `/home/<user>` in the container writable layer and are recreated on the next
-launch if the container is replaced.
+launch if the container is replaced. The designer agent omits `user` and
+uses the config volume as cwd; see [designer.md](designer.md).
