@@ -157,7 +157,7 @@ func TestDockerEntrypointSeedsMissingDefaultsWithoutOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runSeed := func() {
+	runSeed := func() []byte {
 		t.Helper()
 		cmd := exec.Command("sh", entrypoint, "seed-config")
 		cmd.Env = append(os.Environ(),
@@ -169,15 +169,22 @@ func TestDockerEntrypointSeedsMissingDefaultsWithoutOverwrite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed-config: %v\n%s", err, output)
 		}
-		if !bytes.Contains(output, []byte("seeded missing agents.d/designer.yaml")) {
-			t.Fatalf("expected designer seed log, got:\n%s", output)
-		}
 		if bytes.Contains(output, []byte("workspace-janitor.yaml")) {
 			t.Fatalf("seeded existing janitor:\n%s", output)
 		}
+		return output
 	}
-	runSeed()
-	runSeed()
+	first := runSeed()
+	if !bytes.Contains(first, []byte("seeded missing agents.d/designer.yaml")) {
+		t.Fatalf("expected designer seed log, got:\n%s", first)
+	}
+	if !bytes.Contains(first, []byte("seeded missing rules.d/designer.yaml")) {
+		t.Fatalf("expected designer rule seed log, got:\n%s", first)
+	}
+	second := runSeed()
+	if bytes.Contains(second, []byte("seeded missing")) {
+		t.Fatalf("second seed copied files that already existed:\n%s", second)
+	}
 
 	gotJanitor, err := os.ReadFile(filepath.Join(config, "agents.d", "workspace-janitor.yaml"))
 	if err != nil {
