@@ -9,9 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
-	"time"
 )
 
 type spawnRequest struct {
@@ -54,13 +54,14 @@ type privilegedState struct {
 	pythonPath   string
 	source       string
 	listenerUser string
+	dataDir      string
 
 	mu      sync.Mutex
 	users   map[string]reconciledIdentity
 	spawned map[int]*spawnedChild
 }
 
-func newPrivilegedState(logger *slog.Logger, pythonPath, source, listenerUser string) *privilegedState {
+func newPrivilegedState(logger *slog.Logger, pythonPath, source, listenerUser, dataDir string) *privilegedState {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -71,6 +72,7 @@ func newPrivilegedState(logger *slog.Logger, pythonPath, source, listenerUser st
 		pythonPath:   pythonPath,
 		source:       source,
 		listenerUser: listenerUser,
+		dataDir:      dataDir,
 		users:        map[string]reconciledIdentity{},
 		spawned:      map[int]*spawnedChild{},
 	}
@@ -90,23 +92,36 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 	if !ok {
 		return 0, fmt.Errorf("OS user %q is not a reconciled agent identity", req.User)
 	}
-	if err := prepareSpawnDirs(s.host, req, identity); err != nil {
+	if identity.UID < minRegularUID {
+		return 0, fmt.Errorf("refusing to spawn system uid %d for %q", identity.UID, req.User)
+	}
+	if req.Agent == "" || req.Agent != identity.Agent {
+		return 0, fmt.Errorf("spawn agent %q does not match reconciled identity", req.Agent)
+	}
+	if filepath.Clean(req.Cwd) != filepath.Clean(identity.Cwd) {
+		return 0, errors.New("spawn cwd does not match reconciled identity")
+	}
+	if filepath.Clean(req.Home) != filepath.Clean(identity.Home) {
+		return 0, errors.New("spawn home does not match reconciled identity")
+	}
+	if err := prepareSpawnDirs(s.host, s.dataDir, req, identity); err != nil {
 		return 0, err
 	}
 
 	command := exec.Command(s.pythonPath, "-c", s.source)
-	command.Dir = req.Cwd
+	command.Dir = identity.Cwd
 	command.Env = spawnEnv(identity, req.Env)
 	command.Stdin = stdin
 	command.Stdout = stdout
 	command.Stderr = stderr
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cred := &syscall.Credential{
+		Uid:    identity.UID,
+		Gid:    identity.GID,
+		Groups: append([]uint32{}, identity.Groups...),
+	}
 	if os.Geteuid() == 0 || int(identity.UID) != os.Geteuid() || int(identity.GID) != os.Getegid() {
-		command.SysProcAttr.Credential = &syscall.Credential{
-			Uid:    identity.UID,
-			Gid:    identity.GID,
-			Groups: append([]uint32(nil), identity.Groups...),
-		}
+		command.SysProcAttr.Credential = cred
 	}
 	if err := command.Start(); err != nil {
 		return 0, err
@@ -162,9 +177,16 @@ func (s *privilegedState) killAll() {
 	s.mu.Unlock()
 }
 
-func prepareSpawnDirs(host hostAPI, req spawnRequest, identity reconciledIdentity) error {
+func prepareSpawnDirs(host hostAPI, dataDir string, req spawnRequest, identity reconciledIdentity) error {
 	if host == nil {
 		return errors.New("privileged host is not configured")
+	}
+	if dataDir == "" {
+		return errors.New("privileged data directory is not configured")
+	}
+	dataDir = filepath.Clean(dataDir)
+	if !filepath.IsAbs(dataDir) {
+		return errors.New("data directory must be absolute")
 	}
 	if err := validateAbsolutePath("run_dir", req.RunDir); err != nil {
 		return err
@@ -172,21 +194,59 @@ func prepareSpawnDirs(host hostAPI, req spawnRequest, identity reconciledIdentit
 	if err := validateAbsolutePath("dsh_home", req.DshHome); err != nil {
 		return err
 	}
-	if !pathHasPrefix(req.DshHome, req.RunDir) {
-		return errors.New("dsh_home must be inside run_dir")
+	runDir := filepath.Clean(req.RunDir)
+	dshHome := filepath.Clean(req.DshHome)
+	runID := filepath.Base(runDir)
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+	wantRunDir := filepath.Join(dataDir, runsDirName, runID)
+	if runDir != wantRunDir {
+		return errors.New("run_dir must be a run directory under the configured data directory")
+	}
+	if dshHome != filepath.Join(runDir, dshHomeDirName) {
+		return errors.New("dsh_home must be the dsh_home directory inside run_dir")
 	}
 	uid := int(identity.UID)
 	gid := int(identity.GID)
-	for _, path := range []string{filepath.Dir(filepath.Dir(req.RunDir)), filepath.Dir(req.RunDir), req.RunDir} {
-		if err := host.Chmod(path, 0o711); err != nil {
+	for _, path := range []string{dataDir, filepath.Join(dataDir, runsDirName), runDir} {
+		if err := chmodExistingDir(host, path, 0o711); err != nil {
 			return fmt.Errorf("chmod %s: %w", path, err)
 		}
 	}
-	if err := host.Chown(req.DshHome, uid, gid); err != nil {
+	if err := chownExistingDir(host, dshHome, uid, gid); err != nil {
 		return fmt.Errorf("chown dsh_home: %w", err)
 	}
-	if err := host.Chmod(req.DshHome, 0o700); err != nil {
+	if err := chmodExistingDir(host, dshHome, 0o700); err != nil {
 		return fmt.Errorf("chmod dsh_home: %w", err)
+	}
+	return nil
+}
+
+func chmodExistingDir(host hostAPI, path string, mode os.FileMode) error {
+	if err := refuseSymlinkStat(host, path); err != nil {
+		return err
+	}
+	return host.Chmod(path, mode)
+}
+
+func chownExistingDir(host hostAPI, path string, uid, gid int) error {
+	if err := refuseSymlinkStat(host, path); err != nil {
+		return err
+	}
+	return host.Chown(path, uid, gid)
+}
+
+func refuseSymlinkStat(host hostAPI, path string) error {
+	info, err := host.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%q is a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%q is not a directory", path)
 	}
 	return nil
 }
@@ -197,13 +257,13 @@ func spawnEnv(identity reconciledIdentity, extra map[string]string) []string {
 		"USER":    identity.Username,
 		"LOGNAME": identity.Username,
 		"SHELL":   agentShell,
-		"PATH":    os.Getenv("PATH"),
-	}
-	if env["PATH"] == "" {
-		env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+		"PATH":    "/usr/local/bin:/usr/bin:/bin",
 	}
 	for key, value := range extra {
-		if key == privilegedFDEnv || key == syncTokenEnv {
+		if key == privilegedFDEnv || key == syncTokenEnv || key == listenerUserEnv {
+			continue
+		}
+		if key == "" || strings.Contains(key, "=") || strings.ContainsRune(key, '\x00') {
 			continue
 		}
 		env[key] = value
@@ -223,38 +283,13 @@ func (c *ipcCoordinator) Spawn(ctx context.Context, req spawnRequest, stdin, std
 	if stdin == nil || stdout == nil || stderr == nil {
 		return 0, errors.New("spawn requires stdin, stdout, and stderr files")
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	unixConn, err := unixConnOf(c.conn)
-	if err != nil {
-		return 0, err
-	}
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return 0, err
 	}
-	id, err := newIPCRequestID()
+	reply, err := c.roundTrip(ctx, ipcOpSpawn, payload, stdin, stdout, stderr)
 	if err != nil {
 		return 0, err
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := unixConn.SetDeadline(deadline); err != nil {
-			return 0, err
-		}
-		defer func() { _ = unixConn.SetDeadline(time.Time{}) }()
-	}
-	if err := writeIPCMessageWithFDs(unixConn, ipcEnvelope{ID: id, Op: ipcOpSpawn, Payload: payload}, stdin, stdout, stderr); err != nil {
-		return 0, err
-	}
-	var reply ipcEnvelope
-	if err := readIPCMessage(unixConn, &reply); err != nil {
-		return 0, err
-	}
-	if reply.ID != id {
-		return 0, fmt.Errorf("privileged ipc id mismatch")
-	}
-	if reply.Error != "" {
-		return 0, errors.New(reply.Error)
 	}
 	var result spawnReply
 	if err := decodeExactJSON(reply.Payload, &result); err != nil {
@@ -267,34 +302,13 @@ func (c *ipcCoordinator) Spawn(ctx context.Context, req spawnRequest, stdin, std
 }
 
 func (c *ipcCoordinator) Wait(ctx context.Context, pid int) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	payload, err := json.Marshal(waitRequest{PID: pid})
 	if err != nil {
 		return -1, err
 	}
-	id, err := newIPCRequestID()
+	reply, err := c.roundTrip(ctx, ipcOpWait, payload)
 	if err != nil {
 		return -1, err
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := c.conn.SetDeadline(deadline); err != nil {
-			return -1, err
-		}
-		defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
-	}
-	if err := writeIPCMessage(c.conn, ipcEnvelope{ID: id, Op: ipcOpWait, Payload: payload}); err != nil {
-		return -1, err
-	}
-	var reply ipcEnvelope
-	if err := readIPCMessage(c.conn, &reply); err != nil {
-		return -1, err
-	}
-	if reply.ID != id {
-		return -1, fmt.Errorf("privileged ipc id mismatch")
-	}
-	if reply.Error != "" {
-		return -1, errors.New(reply.Error)
 	}
 	var result waitReply
 	if err := decodeExactJSON(reply.Payload, &result); err != nil {

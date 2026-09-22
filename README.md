@@ -103,7 +103,8 @@ env:
 `instructions`, `cwd`, and `home` are required. `cwd` and `home` must be
 absolute and distinct. `user` is optional. When set, it is a dedicated Linux
 account name (lowercase, not `root`/`genesis`/other reserved names). Two
-agents cannot share an OS user. `setup` is allowed only with `user` and is a
+agents cannot share an OS user. `home` must be `/home/<user>`. `cwd` must be
+inside that home, or exactly `/tmp` or `/var/tmp`. `setup` is allowed only with `user` and is a
 closed contract: `workspace` (`private`, `shared-read`, `shared-write`) and
 optional existing `groups`. There is no command, script, package, or shell
 field; the account always gets `/bin/bash`. `env` is the complete non-secret

@@ -97,8 +97,14 @@ never runs an agent-supplied shell snippet.
 
 `host_mutation` is `"applied"` when at least one dedicated user was
 reconciled, otherwise `"none"`. `applied` lists `ensure_agent_user:<id>`.
-Rules-only sync sends an empty plan. Removing an agent from YAML does not
-delete the Unix user or home; leftover names are listed in `retained`.
+Rules-only sync sends an empty plan (`agents: false`) and does not list
+retained users. Removing dedicated agents from YAML still does not delete
+the Unix user or home; leftover names are listed in `retained` on an agents
+sync.
+
+Dedicated `home` is always `/home/<user>`. `cwd` is inside that home, or
+exactly `/tmp` / `/var/tmp` (sticky, never chowned). Root will not mkdir or
+chown paths under `/tmp`, `/opt`, or other unmanaged trees.
 
 Allowlisted setup today: `workspace` (`private` / `shared-read` /
 `shared-write`) and existing supplementary `groups` (not `root`/`sudo`/other

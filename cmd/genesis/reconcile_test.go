@@ -93,18 +93,12 @@ func (m *memoryHost) Chmod(path string, mode os.FileMode) error {
 }
 
 func (m *memoryHost) Stat(path string) (os.FileInfo, error) {
-	if filepath.Clean(path) == "/tmp" {
-		info, err := os.Lstat("/tmp")
-		if err != nil {
-			return nil, err
-		}
-		return info, nil
-	}
-	if _, ok := m.dirs[filepath.Clean(path)]; ok {
+	cleaned := filepath.Clean(path)
+	if _, ok := m.dirs[cleaned]; ok {
 		info, err := os.Lstat(os.TempDir())
 		return info, err
 	}
-	return nil, os.ErrNotExist
+	return os.Lstat(cleaned)
 }
 
 func TestBuildPlanEmitsDedicatedUserIntent(t *testing.T) {
@@ -130,7 +124,10 @@ func TestBuildPlanEmitsDedicatedUserIntent(t *testing.T) {
 	if plan.Intents[1].Kind != intentProvisionDeclaredEnv {
 		t.Fatalf("env intent = %#v", plan.Intents[1])
 	}
-	if len(buildPlan(agents, false).Intents) != 0 {
+	if !plan.Agents {
+		t.Fatal("agent plan must mark the agents layer")
+	}
+	if len(buildPlan(agents, false).Intents) != 0 || buildPlan(agents, false).Agents {
 		t.Fatal("rules-only plan must have no intents")
 	}
 }
@@ -176,7 +173,7 @@ func TestApplyPlanCreatesUserIdempotentlyAndRetainsRemovedUsers(t *testing.T) {
 	if home.mode != 0o700 || home.uid != 2000 {
 		t.Fatalf("home = %#v", home)
 	}
-	removed, err := state.apply(privilegedPlan{Intents: []privilegedIntent{}})
+	removed, err := state.apply(privilegedPlan{Agents: true, Intents: []privilegedIntent{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +197,7 @@ func TestApplyPlanRejectsSystemUserAndForbiddenPaths(t *testing.T) {
 	state := &privilegedState{host: host, mutate: true, listenerUser: "genesis"}
 	_, err := state.apply(privilegedPlan{Intents: []privilegedIntent{{
 		Kind: intentEnsureAgentUser, Agent: "janitor", User: "janitor",
-		Home: "/home/janitor", Cwd: "/tmp/work", Shell: agentShell,
+		Home: "/home/janitor", Cwd: "/home/janitor/workspace", Shell: agentShell,
 	}}})
 	if err == nil || !strings.Contains(err.Error(), "system user") {
 		t.Fatalf("system user error = %v", err)
@@ -212,8 +209,18 @@ func TestApplyPlanRejectsSystemUserAndForbiddenPaths(t *testing.T) {
 		Kind: intentEnsureAgentUser, Agent: "janitor", User: "workspace-janitor",
 		Home: "/etc/passwd", Cwd: "/tmp/work", Shell: agentShell,
 	}}})
-	if err == nil || !strings.Contains(err.Error(), "not a permitted") {
+	if err == nil || (!strings.Contains(err.Error(), "home must be") && !strings.Contains(err.Error(), "not a permitted")) {
 		t.Fatalf("forbidden home error = %v", err)
+	}
+
+	host = newMemoryHost()
+	state = &privilegedState{host: host, mutate: true}
+	_, err = state.apply(privilegedPlan{Intents: []privilegedIntent{{
+		Kind: intentEnsureAgentUser, Agent: "janitor", User: "workspace-janitor",
+		Home: "/home/workspace-janitor", Cwd: "/tmp/work", Shell: agentShell,
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "not a permitted") {
+		t.Fatalf("tmp subdirectory cwd error = %v", err)
 	}
 
 	state = &privilegedState{host: newMemoryHost(), mutate: true, listenerUser: "workspace-janitor"}
@@ -265,6 +272,12 @@ func TestClassifyHostPath(t *testing.T) {
 	if _, err := classifyHostPath("/var/lib/genesis/data/runs"); err == nil {
 		t.Fatal("expected forbidden data")
 	}
+	if _, err := classifyHostPath("/tmp/work"); err == nil {
+		t.Fatal("expected forbidden /tmp subdirectory")
+	}
+	if _, err := classifyHostPath("/opt/agents"); err == nil {
+		t.Fatal("expected forbidden /opt")
+	}
 }
 
 func TestValidateOSUsername(t *testing.T) {
@@ -297,6 +310,76 @@ func TestApplySharedWorkspaceUsesGroup(t *testing.T) {
 	cwd := host.dirs["/home/workspace-janitor/workspace"]
 	if cwd.mode != 0o770 || cwd.gid != 42 {
 		t.Fatalf("cwd = %#v", cwd)
+	}
+}
+
+func TestApplyPlanRefusesForeignHomeAndLowUIDCreate(t *testing.T) {
+	host := newMemoryHost()
+	host.users["workspace-janitor"] = &unixAccount{Name: "workspace-janitor", UID: 2000, GID: 2000, Home: "/var/lib/workspace-janitor"}
+	state := &privilegedState{host: host, mutate: true}
+	_, err := state.apply(privilegedPlan{Intents: []privilegedIntent{{
+		Kind: intentEnsureAgentUser, Agent: "janitor", User: "workspace-janitor",
+		Home: "/home/workspace-janitor", Cwd: "/home/workspace-janitor/workspace", Shell: agentShell,
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "hijack") {
+		t.Fatalf("foreign home error = %v", err)
+	}
+
+	host = newMemoryHost()
+	host.nextUID = 50
+	state = &privilegedState{host: host, mutate: true}
+	_, err = state.apply(privilegedPlan{Intents: []privilegedIntent{{
+		Kind: intentEnsureAgentUser, Agent: "janitor", User: "workspace-janitor",
+		Home: "/home/workspace-janitor", Cwd: "/home/workspace-janitor/workspace", Shell: agentShell,
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "system user") {
+		t.Fatalf("low uid error = %v", err)
+	}
+}
+
+func TestApplyPlanRulesOnlyDoesNotMarkUsersRetained(t *testing.T) {
+	host := newMemoryHost()
+	state := &privilegedState{host: host, mutate: true, users: map[string]reconciledIdentity{}}
+	intent := privilegedIntent{
+		Kind:      intentEnsureAgentUser,
+		Agent:     "janitor",
+		User:      "workspace-janitor",
+		Home:      "/home/workspace-janitor",
+		Cwd:       "/home/workspace-janitor/workspace",
+		Shell:     agentShell,
+		Workspace: workspacePrivate,
+	}
+	if _, err := state.apply(privilegedPlan{Intents: []privilegedIntent{intent}}); err != nil {
+		t.Fatal(err)
+	}
+	rulesOnly, err := state.apply(privilegedPlan{Intents: []privilegedIntent{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rulesOnly.Retained) != 0 {
+		t.Fatalf("rules-only retained = %#v", rulesOnly.Retained)
+	}
+	if _, ok := state.lookupUser("workspace-janitor"); !ok {
+		t.Fatal("rules-only apply forgot the reconciled user")
+	}
+}
+
+func TestUnixHostEnsureDirRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	host := unixHost{}
+	if err := host.EnsureDir(link, os.Getuid(), os.Getgid(), 0o700); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink ensure error = %v", err)
+	}
+	if err := host.Chown(link, os.Getuid(), os.Getgid()); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink chown error = %v", err)
 	}
 }
 

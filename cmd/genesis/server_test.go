@@ -561,14 +561,29 @@ user: genesis
 	}
 	if err := os.WriteFile(agentsDir+"/other.yaml", []byte(`
 instructions: stay
-cwd: /home/other/workspace
-home: /home/other
+cwd: /home/workspace-janitor/other
+home: /home/workspace-janitor
 user: workspace-janitor
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "share OS user") {
 		t.Fatalf("duplicate user error = %v", err)
+	}
+
+	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(`
+instructions: stay
+cwd: /tmp/work
+home: /tmp/home
+user: workspace-janitor
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(agentsDir, "other.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "home must be") {
+		t.Fatalf("dedicated home path error = %v", err)
 	}
 }
 

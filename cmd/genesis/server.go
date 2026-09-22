@@ -480,6 +480,24 @@ func (a agentDefinition) validate() error {
 		if err := validateOSUsername(a.User); err != nil {
 			return fmt.Errorf("user: %w", err)
 		}
+		home := agentHomeDir(a.User)
+		if filepath.Clean(a.Home) != home {
+			return fmt.Errorf("home must be %s", home)
+		}
+		cwd := filepath.Clean(a.Cwd)
+		kind, err := classifyHostPath(cwd)
+		if err != nil {
+			return fmt.Errorf("cwd: %w", err)
+		}
+		switch kind {
+		case pathStickyShared:
+		case pathManaged:
+			if !pathHasPrefix(cwd, home) {
+				return fmt.Errorf("cwd must be inside %s", home)
+			}
+		default:
+			return fmt.Errorf("cwd %q is not a permitted workspace", a.Cwd)
+		}
 	}
 	if err := a.setupContract().validate(a.User != ""); err != nil {
 		return err

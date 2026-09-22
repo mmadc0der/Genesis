@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
-	"time"
 )
 
 const (
@@ -40,7 +39,12 @@ type ipcEnvelope struct {
 
 type ipcCoordinator struct {
 	conn net.Conn
-	mu   sync.Mutex
+
+	sendMu     sync.Mutex
+	readerOnce sync.Once
+	pendingMu  sync.Mutex
+	pending    map[string]chan ipcEnvelope
+	readErr    error
 }
 
 func privilegedSocketpair() (parent net.Conn, child *os.File, err error) {
@@ -82,35 +86,13 @@ func inheritedCoordinator() (privilegedCoordinator, func(), error) {
 }
 
 func (c *ipcCoordinator) Coordinate(ctx context.Context, plan privilegedPlan) (coordinateResult, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	payload, err := json.Marshal(plan)
 	if err != nil {
 		return coordinateResult{}, err
 	}
-	id, err := newIPCRequestID()
+	reply, err := c.roundTrip(ctx, ipcOpCoordinate, payload)
 	if err != nil {
 		return coordinateResult{}, err
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := c.conn.SetDeadline(deadline); err != nil {
-			return coordinateResult{}, err
-		}
-		defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
-	}
-	if err := writeIPCMessage(c.conn, ipcEnvelope{ID: id, Op: ipcOpCoordinate, Payload: payload}); err != nil {
-		return coordinateResult{}, err
-	}
-	var reply ipcEnvelope
-	if err := readIPCMessage(c.conn, &reply); err != nil {
-		return coordinateResult{}, err
-	}
-	if reply.ID != id {
-		return coordinateResult{}, fmt.Errorf("privileged ipc id mismatch")
-	}
-	if reply.Error != "" {
-		return coordinateResult{}, errors.New(reply.Error)
 	}
 	var result coordinateResult
 	if err := decodeExactJSON(reply.Payload, &result); err != nil {
@@ -119,12 +101,123 @@ func (c *ipcCoordinator) Coordinate(ctx context.Context, plan privilegedPlan) (c
 	return result, nil
 }
 
+func (c *ipcCoordinator) roundTrip(ctx context.Context, op string, payload json.RawMessage, files ...*os.File) (ipcEnvelope, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id, err := newIPCRequestID()
+	if err != nil {
+		return ipcEnvelope{}, err
+	}
+	c.startReader()
+	waiter := make(chan ipcEnvelope, 1)
+	c.pendingMu.Lock()
+	if c.readErr != nil {
+		err := c.readErr
+		c.pendingMu.Unlock()
+		return ipcEnvelope{}, err
+	}
+	if c.pending == nil {
+		c.pending = map[string]chan ipcEnvelope{}
+	}
+	c.pending[id] = waiter
+	c.pendingMu.Unlock()
+
+	request := ipcEnvelope{ID: id, Op: op, Payload: payload}
+	c.sendMu.Lock()
+	if len(files) > 0 {
+		unixConn, connErr := unixConnOf(c.conn)
+		if connErr != nil {
+			err = connErr
+		} else {
+			err = writeIPCMessageWithFDs(unixConn, request, files...)
+		}
+	} else {
+		err = writeIPCMessage(c.conn, request)
+	}
+	c.sendMu.Unlock()
+	if err != nil {
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+		return ipcEnvelope{}, err
+	}
+
+	select {
+	case reply, ok := <-waiter:
+		if !ok {
+			c.pendingMu.Lock()
+			err := c.readErr
+			c.pendingMu.Unlock()
+			if err == nil {
+				err = errors.New("privileged ipc closed")
+			}
+			return ipcEnvelope{}, err
+		}
+		if reply.Error != "" {
+			return ipcEnvelope{}, errors.New(reply.Error)
+		}
+		return reply, nil
+	case <-ctx.Done():
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+		return ipcEnvelope{}, ctx.Err()
+	}
+}
+
+func (c *ipcCoordinator) startReader() {
+	c.readerOnce.Do(func() {
+		c.pendingMu.Lock()
+		if c.pending == nil {
+			c.pending = map[string]chan ipcEnvelope{}
+		}
+		c.pendingMu.Unlock()
+		go c.readReplies()
+	})
+}
+
+func (c *ipcCoordinator) readReplies() {
+	for {
+		var reply ipcEnvelope
+		err := readIPCMessage(c.conn, &reply)
+		c.pendingMu.Lock()
+		if err != nil {
+			c.readErr = err
+			for _, waiter := range c.pending {
+				close(waiter)
+			}
+			c.pending = map[string]chan ipcEnvelope{}
+			c.pendingMu.Unlock()
+			return
+		}
+		waiter, ok := c.pending[reply.ID]
+		if ok {
+			delete(c.pending, reply.ID)
+		}
+		c.pendingMu.Unlock()
+		if ok {
+			waiter <- reply
+		}
+	}
+}
+
 func servePrivilegedParent(conn net.Conn, logger *slog.Logger, state *privilegedState) {
 	defer conn.Close()
 	unixConn, err := unixConnOf(conn)
 	if err != nil {
 		logger.Error("privileged ipc conn", "error", err)
 		return
+	}
+	var writeMu sync.Mutex
+	writeReply := func(reply ipcEnvelope) bool {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if err := writeIPCMessage(conn, reply); err != nil {
+			logger.Error("privileged ipc write", "error", err)
+			return false
+		}
+		return true
 	}
 	for {
 		var request ipcEnvelope
@@ -166,30 +259,34 @@ func servePrivilegedParent(conn net.Conn, logger *slog.Logger, state *privileged
 			}
 		case ipcOpWait:
 			closeFiles(fds)
-			var body waitRequest
-			if err := decodeExactJSON(request.Payload, &body); err != nil {
-				reply.Error = err.Error()
-			} else if state == nil {
-				reply.Error = "privileged spawn is not configured"
-			} else {
-				code, err := state.wait(body.PID)
-				if err != nil {
+			go func(request ipcEnvelope) {
+				reply := ipcEnvelope{ID: request.ID, Op: request.Op}
+				var body waitRequest
+				if err := decodeExactJSON(request.Payload, &body); err != nil {
 					reply.Error = err.Error()
+				} else if state == nil {
+					reply.Error = "privileged spawn is not configured"
 				} else {
-					payload, err := json.Marshal(waitReply{ExitCode: code})
+					code, err := state.wait(body.PID)
 					if err != nil {
 						reply.Error = err.Error()
 					} else {
-						reply.Payload = payload
+						payload, err := json.Marshal(waitReply{ExitCode: code})
+						if err != nil {
+							reply.Error = err.Error()
+						} else {
+							reply.Payload = payload
+						}
 					}
 				}
-			}
+				_ = writeReply(reply)
+			}(request)
+			continue
 		default:
 			closeFiles(fds)
 			reply.Error = fmt.Sprintf("unknown privileged op %q", request.Op)
 		}
-		if err := writeIPCMessage(conn, reply); err != nil {
-			logger.Error("privileged ipc write", "error", err)
+		if !writeReply(reply) {
 			return
 		}
 	}

@@ -31,6 +31,7 @@ type privilegedIntent struct {
 
 type privilegedPlan struct {
 	Intents []privilegedIntent `json:"intents"`
+	Agents  bool               `json:"agents,omitempty"`
 }
 
 type unsupportedChange struct {
@@ -48,7 +49,7 @@ type coordinateResult struct {
 
 func buildPlan(agents map[string]agentDefinition, includeAgents bool) privilegedPlan {
 	if !includeAgents {
-		return privilegedPlan{Intents: []privilegedIntent{}}
+		return privilegedPlan{Intents: []privilegedIntent{}, Agents: false}
 	}
 	ids := make([]string, 0, len(agents))
 	for id := range agents {
@@ -92,7 +93,7 @@ func buildPlan(agents map[string]agentDefinition, includeAgents bool) privileged
 			EnvKeys: keys,
 		})
 	}
-	return privilegedPlan{Intents: intents}
+	return privilegedPlan{Intents: intents, Agents: true}
 }
 
 func evaluatePlan(plan privilegedPlan) (coordinateResult, error) {

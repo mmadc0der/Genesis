@@ -122,9 +122,11 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 		Unsupported:  []unsupportedChange{},
 	}
 	seenUsers := map[string]struct{}{}
+	sawAgentLayer := false
 	for _, intent := range plan.Intents {
 		switch intent.Kind {
 		case intentEnsureAgentUser:
+			sawAgentLayer = true
 			if s.listenerUser != "" && intent.User == s.listenerUser {
 				return coordinateResult{}, fmt.Errorf("agent %s: OS user %q is the listener user", intent.Agent, intent.User)
 			}
@@ -140,12 +142,14 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 			result.HostMutation = hostMutationApplied
 			seenUsers[identity.Username] = struct{}{}
 		case intentEnsureAgentPaths:
+			sawAgentLayer = true
 			result.Unsupported = append(result.Unsupported, unsupportedChange{
 				Kind:   intent.Kind,
 				Agent:  intent.Agent,
 				Reason: "agent has no OS user; Genesis does not create, chown, or mkdir cwd/home as root",
 			})
 		case intentProvisionDeclaredEnv:
+			sawAgentLayer = true
 			result.Unsupported = append(result.Unsupported, unsupportedChange{
 				Kind:   intent.Kind,
 				Agent:  intent.Agent,
@@ -155,7 +159,9 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 			return coordinateResult{}, fmt.Errorf("unknown privileged intent kind %q", intent.Kind)
 		}
 	}
-	result.Retained = s.retained(seenUsers)
+	if sawAgentLayer || plan.Agents {
+		result.Retained = s.retained(seenUsers)
+	}
 	return result, nil
 }
 
@@ -189,6 +195,10 @@ func (s *privilegedState) retained(active map[string]struct{}) []string {
 	return out
 }
 
+func agentHomeDir(username string) string {
+	return filepath.Join("/home", username)
+}
+
 func applyAgentUserIntent(host hostAPI, intent privilegedIntent) error {
 	if host == nil {
 		return errors.New("privileged host is not configured")
@@ -205,31 +215,42 @@ func applyAgentUserIntent(host hostAPI, intent privilegedIntent) error {
 	if err := validateAbsolutePath("cwd", intent.Cwd); err != nil {
 		return fmt.Errorf("agent %s: %w", intent.Agent, err)
 	}
-	homeKind, err := classifyHostPath(intent.Home)
+	specHome := filepath.Clean(intent.Home)
+	specCwd := filepath.Clean(intent.Cwd)
+	if specHome != agentHomeDir(intent.User) {
+		return fmt.Errorf("agent %s home must be %s", intent.Agent, agentHomeDir(intent.User))
+	}
+	homeKind, err := classifyHostPath(specHome)
 	if err != nil {
 		return fmt.Errorf("agent %s home: %w", intent.Agent, err)
 	}
 	if homeKind != pathManaged {
-		return fmt.Errorf("agent %s home %q cannot be an OS user home", intent.Agent, intent.Home)
+		return fmt.Errorf("agent %s home %q cannot be an OS user home", intent.Agent, specHome)
 	}
-	cwdKind, err := classifyHostPath(intent.Cwd)
+	cwdKind, err := classifyHostPath(specCwd)
 	if err != nil {
 		return fmt.Errorf("agent %s cwd: %w", intent.Agent, err)
 	}
 	if cwdKind == pathForbidden {
-		return fmt.Errorf("agent %s cwd %q is not a permitted workspace", intent.Agent, intent.Cwd)
+		return fmt.Errorf("agent %s cwd %q is not a permitted workspace", intent.Agent, specCwd)
+	}
+	if cwdKind == pathManaged && !pathHasPrefix(specCwd, specHome) {
+		return fmt.Errorf("agent %s cwd %q must be inside %s", intent.Agent, specCwd, specHome)
 	}
 
 	spec := agentUserSpec{
 		Agent:     intent.Agent,
 		Name:      intent.User,
-		Home:      filepath.Clean(intent.Home),
-		Cwd:       filepath.Clean(intent.Cwd),
+		Home:      specHome,
+		Cwd:       specCwd,
 		Groups:    append([]string(nil), intent.Groups...),
 		Workspace: intent.Workspace,
 	}
 	if spec.Workspace == "" {
 		spec.Workspace = workspacePrivate
+	}
+	if err := validateSupplementaryGroups(host, spec); err != nil {
+		return fmt.Errorf("agent %s: %w", intent.Agent, err)
 	}
 
 	existing, err := host.LookupUser(spec.Name)
@@ -241,8 +262,11 @@ func applyAgentUserIntent(host hostAPI, intent privilegedIntent) error {
 			return fmt.Errorf("agent %s: create user %q: %w", intent.Agent, spec.Name, err)
 		}
 	} else {
-		if existing.UID < minRegularUID || existing.UID == 0 {
+		if existing.UID < minRegularUID {
 			return fmt.Errorf("agent %s: refusing to hijack system user %q (uid %d)", intent.Agent, spec.Name, existing.UID)
+		}
+		if filepath.Clean(existing.Home) != spec.Home {
+			return fmt.Errorf("agent %s: refusing to hijack user %q with home %q", intent.Agent, spec.Name, existing.Home)
 		}
 		if err := host.UpdateUser(spec); err != nil {
 			return fmt.Errorf("agent %s: update user %q: %w", intent.Agent, spec.Name, err)
@@ -252,6 +276,9 @@ func applyAgentUserIntent(host hostAPI, intent privilegedIntent) error {
 	account, err := host.LookupUser(spec.Name)
 	if err != nil {
 		return fmt.Errorf("agent %s: user %q missing after reconcile: %w", intent.Agent, spec.Name, err)
+	}
+	if account.UID < minRegularUID {
+		return fmt.Errorf("agent %s: refusing to use system user %q (uid %d)", intent.Agent, spec.Name, account.UID)
 	}
 	uid := int(account.UID)
 	gid := int(account.GID)
@@ -276,6 +303,27 @@ func applyAgentUserIntent(host hostAPI, intent privilegedIntent) error {
 	return nil
 }
 
+func validateSupplementaryGroups(host hostAPI, spec agentUserSpec) error {
+	seen := map[string]struct{}{}
+	for _, name := range spec.Groups {
+		if err := validateOSGroupName(name); err != nil {
+			return err
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("duplicate group %q", name)
+		}
+		seen[name] = struct{}{}
+		gid, err := host.LookupGroup(name)
+		if err != nil {
+			return fmt.Errorf("group %q: %w", name, err)
+		}
+		if gid == 0 {
+			return fmt.Errorf("group %q has reserved gid 0", name)
+		}
+	}
+	return nil
+}
+
 func lookupReconciledIdentity(host hostAPI, intent privilegedIntent) (reconciledIdentity, error) {
 	account, err := host.LookupUser(intent.User)
 	if err != nil {
@@ -293,6 +341,9 @@ func lookupReconciledIdentity(host hostAPI, intent privilegedIntent) (reconciled
 		}
 		seen[gid] = struct{}{}
 		groups = append(groups, gid)
+	}
+	if account.UID < minRegularUID {
+		return reconciledIdentity{}, fmt.Errorf("agent %s: refusing to use system user %q (uid %d)", intent.Agent, account.Name, account.UID)
 	}
 	return reconciledIdentity{
 		Agent:    intent.Agent,
@@ -353,7 +404,13 @@ func classifyHostPath(value string) (pathKind, error) {
 	if path == "/tmp" || path == "/var/tmp" {
 		return pathStickyShared, nil
 	}
-	return pathManaged, nil
+	if pathHasPrefix(path, "/tmp") || pathHasPrefix(path, "/var/tmp") {
+		return pathForbidden, fmt.Errorf("%q is not a permitted agent path", path)
+	}
+	if pathHasPrefix(path, "/home") {
+		return pathManaged, nil
+	}
+	return pathForbidden, fmt.Errorf("%q is not a permitted agent path", path)
 }
 
 func pathHasPrefix(path, prefix string) bool {
@@ -363,6 +420,31 @@ func pathHasPrefix(path, prefix string) bool {
 		return true
 	}
 	return strings.HasPrefix(path, prefix+string(os.PathSeparator))
+}
+
+func rejectSymlinkPath(path string) error {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return errors.New("path must be absolute")
+	}
+	current := "/"
+	for _, part := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%q is a symlink", current)
+		}
+	}
+	return nil
 }
 
 func ensureStickyWritable(host hostAPI, path string) error {
@@ -435,9 +517,6 @@ func (unixHost) CreateUser(spec agentUserSpec) error {
 
 func (unixHost) UpdateUser(spec agentUserSpec) error {
 	args := []string{"--shell", agentShell, "--home", spec.Home}
-	if account, err := user.Lookup(spec.Name); err == nil && account.HomeDir != spec.Home {
-		args = append(args, "--move-home")
-	}
 	if len(spec.Groups) > 0 {
 		args = append(args, "--groups", strings.Join(spec.Groups, ","))
 	}
@@ -446,17 +525,39 @@ func (unixHost) UpdateUser(spec agentUserSpec) error {
 }
 
 func (unixHost) EnsureDir(path string, uid, gid int, mode os.FileMode) error {
+	path = filepath.Clean(path)
+	if err := rejectSymlinkPath(path); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return err
 	}
-	if err := os.Chown(path, uid, gid); err != nil {
+	if err := rejectSymlinkPath(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%q is not a directory", path)
+	}
+	if err := os.Lchown(path, uid, gid); err != nil {
 		return err
 	}
 	return os.Chmod(path, mode)
 }
 
 func (unixHost) Chown(path string, uid, gid int) error {
-	return os.Chown(path, uid, gid)
+	path = filepath.Clean(path)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%q is a symlink", path)
+	}
+	return os.Lchown(path, uid, gid)
 }
 
 func (unixHost) Chmod(path string, mode os.FileMode) error {

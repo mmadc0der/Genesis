@@ -73,7 +73,7 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, dataDir, syncTo
 	if identity != nil {
 		listenerName = identity.Username
 	}
-	state := newPrivilegedState(logger, pythonPath, embeddedPythonRunner, listenerName)
+	state := newPrivilegedState(logger, pythonPath, embeddedPythonRunner, listenerName, absoluteDataDir)
 	agents, err := loadAgents(absoluteAgentsDir)
 	if err != nil {
 		child.Close()
@@ -199,7 +199,7 @@ func applyListenerIdentity(command *exec.Cmd, identity *listenerIdentity) {
 	command.SysProcAttr.Credential = &syscall.Credential{
 		Uid:    identity.Uid,
 		Gid:    identity.Gid,
-		Groups: append([]uint32(nil), identity.Groups...),
+		Groups: append([]uint32{}, identity.Groups...),
 	}
 }
 
