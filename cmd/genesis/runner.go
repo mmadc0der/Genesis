@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ type processRunner struct {
 	source     string
 	logger     *slog.Logger
 	store      *runStore
+	spawner    privilegedSpawner
 }
 
 type runnerResult struct {
@@ -58,6 +60,7 @@ func (r processRunner) Run(document invocation) {
 		"genesis_run_id", document.RunID,
 		"rule", document.Rule,
 		"agent", document.Agent,
+		"user", document.User,
 	)
 
 	journal := (*runJournal)(nil)
@@ -72,6 +75,11 @@ func (r processRunner) Run(document invocation) {
 	input, err := json.Marshal(document)
 	if err != nil {
 		r.finish(logger, journal, document, streamState{}, err, nil, -1, "")
+		return
+	}
+
+	if document.User != "" {
+		r.runDedicated(logger, journal, document, input)
 		return
 	}
 
@@ -377,6 +385,7 @@ func (r processRunner) logResult(
 		"genesis_run_id", document.RunID,
 		"rule", document.Rule,
 		"agent", document.Agent,
+		"user", document.User,
 		"run_dir", document.RunDir,
 		"deepseek_session_id", optionalString(result.DeepSeekSessionID),
 		"finish_reason", optionalString(result.FinishReason),
@@ -417,6 +426,106 @@ func copyCappedThenDrain(dst io.Writer, src io.Reader, limit int64) {
 		_, _ = io.Copy(dst, io.LimitReader(src, limit))
 	}
 	_, _ = io.Copy(io.Discard, src)
+}
+
+func (r processRunner) runDedicated(logger *slog.Logger, journal *runJournal, document invocation, input []byte) {
+	if r.spawner == nil {
+		err := errors.New("dedicated OS user requires genesis launch privileged spawn")
+		r.finish(logger, journal, document, streamState{
+			failed:    true,
+			errorType: processErrorType,
+			errorMsg:  err.Error(),
+		}, err, nil, -1, "")
+		return
+	}
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		r.finish(logger, journal, document, streamState{}, err, nil, -1, "")
+		return
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		stdinR.Close()
+		stdinW.Close()
+		r.finish(logger, journal, document, streamState{}, err, nil, -1, "")
+		return
+	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		stdinR.Close()
+		stdinW.Close()
+		stdoutR.Close()
+		stdoutW.Close()
+		r.finish(logger, journal, document, streamState{}, err, nil, -1, "")
+		return
+	}
+	for _, file := range []*os.File{stdinR, stdinW, stdoutR, stdoutW, stderrR, stderrW} {
+		syscall.CloseOnExec(int(file.Fd()))
+	}
+
+	pid, err := r.spawner.Spawn(context.Background(), spawnRequest{
+		Agent:   document.Agent,
+		User:    document.User,
+		Cwd:     document.Cwd,
+		Home:    document.Home,
+		RunDir:  document.RunDir,
+		DshHome: document.DshHome,
+		Env:     document.Env,
+	}, stdinR, stdoutW, stderrW)
+	stdinR.Close()
+	stdoutW.Close()
+	stderrW.Close()
+	if err != nil {
+		stdinW.Close()
+		stdoutR.Close()
+		stderrR.Close()
+		r.finish(logger, journal, document, streamState{
+			failed:    true,
+			errorType: processErrorType,
+			errorMsg:  err.Error(),
+		}, err, err, -1, "")
+		return
+	}
+
+	if err := journal.Publish(lifecycleTypeStart, originGenesis, map[string]any{"pid": pid, "user": document.User}); err != nil {
+		logger.Error("persist start event", "genesis_run_id", document.RunID, "error", err)
+		r.recordStorageFailure(journal, nil, logger, document.RunID, err)
+	}
+
+	stderrPath := filepath.Join(document.RunDir, stderrFileName)
+	stderrFile, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, dataFileMode)
+	if err != nil {
+		logger.Error("create stderr log", "genesis_run_id", document.RunID, "error", err)
+		r.recordStorageFailure(journal, nil, logger, document.RunID, err)
+	}
+	var stderrBuf bytes.Buffer
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		defer stderrR.Close()
+		writer := io.Writer(&stderrBuf)
+		if stderrFile != nil {
+			defer stderrFile.Close()
+			writer = io.MultiWriter(journal.redactor.writer(stderrFile), &stderrBuf)
+		}
+		copyCappedThenDrain(writer, stderrR, maxFrameBytes)
+	}()
+
+	go func() {
+		_, _ = stdinW.Write(input)
+		stdinW.Close()
+	}()
+
+	state := r.consumeStdout(journal, document, stdoutR)
+	stdoutR.Close()
+	<-stderrDone
+	exitCode, waitErr := r.spawner.Wait(context.Background(), pid)
+	if waitErr == nil && exitCode != 0 {
+		waitErr = fmt.Errorf("process exited with status %d", exitCode)
+	}
+	stderrText := journal.redactor.text(strings.TrimSpace(stderrBuf.String()))
+	r.finish(logger, journal, document, state, nil, waitErr, exitCode, stderrText)
 }
 
 func sanitizedChildEnv() []string {

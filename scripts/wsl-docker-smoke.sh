@@ -88,6 +88,26 @@ if ! docker compose logs | grep -q '"listener_user":"genesis"'; then
   exit 1
 fi
 
+if ! docker compose exec -T genesis getent passwd workspace-janitor >/dev/null; then
+  docker compose logs >&2
+  echo "launch did not reconcile OS user workspace-janitor" >&2
+  exit 1
+fi
+janitor_shell="$(docker compose exec -T genesis getent passwd workspace-janitor | awk -F: '{print $7}' | tr -d '\r\n')"
+if [ "$janitor_shell" != "/bin/bash" ]; then
+  echo "workspace-janitor shell is ${janitor_shell}, expected /bin/bash" >&2
+  exit 1
+fi
+janitor_home_stat="$(docker compose exec -T genesis stat -c '%U %a' /home/workspace-janitor | tr -d '\r\n')"
+if [ "$janitor_home_stat" != "workspace-janitor 700" ]; then
+  echo "workspace-janitor home is ${janitor_home_stat}, expected workspace-janitor 700" >&2
+  exit 1
+fi
+if ! docker compose exec -T genesis test -d /home/workspace-janitor/workspace; then
+  echo "workspace-janitor workspace directory is missing" >&2
+  exit 1
+fi
+
 if docker compose exec -T -u genesis genesis sh -c 'touch /usr/local/bin/genesis' >/dev/null 2>&1; then
   echo "genesis was able to write the genesis binary" >&2
   exit 1
@@ -151,8 +171,26 @@ if ! grep -q '"attached":true' /tmp/genesis-wsl-sync.out; then
   exit 1
 fi
 if ! grep -q '"host_mutation":"none"' /tmp/genesis-wsl-sync.out; then
-  echo "POST /sync claimed a host mutation" >&2
+  echo "rules-only POST /sync claimed a host mutation" >&2
   cat /tmp/genesis-wsl-sync.out >&2
+  exit 1
+fi
+
+agents_sync="$(listener_request POST /sync application/json '{"scope":["agents"]}' "Bearer $token")"
+copy_listener_out /tmp/genesis-wsl-agents-sync.out
+if [ "$agents_sync" != "200" ]; then
+  echo "expected 200 from agents POST /sync, got $agents_sync" >&2
+  cat /tmp/genesis-wsl-agents-sync.out >&2 || true
+  exit 1
+fi
+if ! grep -q '"host_mutation":"applied"' /tmp/genesis-wsl-agents-sync.out; then
+  echo "agents POST /sync did not apply dedicated OS users" >&2
+  cat /tmp/genesis-wsl-agents-sync.out >&2
+  exit 1
+fi
+if ! grep -q 'ensure_agent_user:workspace-janitor' /tmp/genesis-wsl-agents-sync.out; then
+  echo "agents POST /sync did not report ensure_agent_user:workspace-janitor" >&2
+  cat /tmp/genesis-wsl-agents-sync.out >&2
   exit 1
 fi
 

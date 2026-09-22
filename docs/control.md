@@ -76,7 +76,8 @@ authoritative and the socket is not.
 
 `presence` is `active` (file matches the cache), `draft` (file differs or is
 new), `active_only` (cached, file gone), or `unknown` (listener not readable).
-Desired state remains the YAML files. The panel does not edit them. Invalid
+Desired state remains the YAML files. The panel does not edit them. Agent
+records include optional `user` and `setup` from those files. Invalid
 desired YAML does not hide the active cache or the journals: `/api/state`
 still returns the active generation when the listener can, `/api/agents` and
 `/api/rules` return that cache with `desired_error` and HTTP 200, and

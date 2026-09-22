@@ -76,9 +76,15 @@ func runListen(logger *slog.Logger, args []string) {
 	}
 
 	handler := &eventServer{
-		agentsDir:   absoluteAgentsDir,
-		rulesDir:    absoluteRulesDir,
-		runner:      processRunner{pythonPath: pythonPath, source: embeddedPythonRunner, logger: logger, store: store},
+		agentsDir: absoluteAgentsDir,
+		rulesDir:  absoluteRulesDir,
+		runner: processRunner{
+			pythonPath: pythonPath,
+			source:     embeddedPythonRunner,
+			logger:     logger,
+			store:      store,
+			spawner:    asSpawner(coordinator),
+		},
 		newRunID:    newGenesisRunID,
 		secrets:     inheritedEnvironment(),
 		logger:      logger,

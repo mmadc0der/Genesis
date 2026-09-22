@@ -3,6 +3,11 @@ export interface Agent {
   instructions: string;
   cwd: string;
   home: string;
+  user?: string;
+  setup?: {
+    groups?: string[];
+    workspace?: string;
+  };
   env: Record<string, string>;
   secrets: string[];
   presence: Presence;

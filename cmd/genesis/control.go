@@ -623,8 +623,17 @@ func sameAgent(left, right agentView) bool {
 		left.Instructions == right.Instructions &&
 		left.Cwd == right.Cwd &&
 		left.Home == right.Home &&
+		left.User == right.User &&
+		sameSetup(left.Setup, right.Setup) &&
 		maps.Equal(left.Env, right.Env) &&
 		slices.Equal(left.Secrets, right.Secrets)
+}
+
+func sameSetup(left, right *agentSetup) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Workspace == right.Workspace && slices.Equal(left.Groups, right.Groups)
 }
 
 func sameRule(left, right ruleView) bool {

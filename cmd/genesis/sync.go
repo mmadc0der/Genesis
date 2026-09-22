@@ -148,7 +148,9 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		"rules", len(next.rules),
 		"privileged_attached", attached,
 		"host_mutation", result.HostMutation,
+		"applied", len(result.Applied),
 		"unsupported", len(result.Unsupported),
+		"retained", len(result.Retained),
 	)
 
 	w.Header().Set("Content-Type", "application/json")

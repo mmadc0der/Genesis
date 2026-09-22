@@ -38,7 +38,8 @@ ENV PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 ENV GENESIS_LISTENER_USER=genesis
 ENV PYTHONDONTWRITEBYTECODE=1
 EXPOSE 8790
-# Orchestrator stays root so it can drop the listener to `genesis`.
+# Orchestrator stays root so it can drop the listener to `genesis`,
+# reconcile dedicated agent OS users, and exec those agents as their uid.
 # The listener port is internal to the Compose network. The published UI is
 # the control process; see compose.yaml.
 USER root

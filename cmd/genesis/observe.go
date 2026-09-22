@@ -14,6 +14,8 @@ type agentView struct {
 	Instructions string            `json:"instructions"`
 	Cwd          string            `json:"cwd"`
 	Home         string            `json:"home"`
+	User         string            `json:"user,omitempty"`
+	Setup        *agentSetup       `json:"setup,omitempty"`
 	Env          map[string]string `json:"env"`
 	Secrets      []string          `json:"secrets"`
 }
@@ -104,9 +106,22 @@ func agentViewFrom(definition agentDefinition) agentView {
 		Instructions: definition.Instructions,
 		Cwd:          definition.Cwd,
 		Home:         definition.Home,
+		User:         definition.User,
+		Setup:        cloneAgentSetup(definition.Setup),
 		Env:          env,
 		Secrets:      append([]string(nil), secrets...),
 	}
+}
+
+func cloneAgentSetup(setup *agentSetup) *agentSetup {
+	if setup == nil {
+		return nil
+	}
+	copied := *setup
+	if setup.Groups != nil {
+		copied.Groups = append([]string(nil), setup.Groups...)
+	}
+	return &copied
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

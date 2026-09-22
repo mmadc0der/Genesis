@@ -7,20 +7,31 @@ import (
 
 const (
 	intentEnsureAgentPaths     = "ensure_agent_paths"
+	intentEnsureAgentUser      = "ensure_agent_user"
 	intentProvisionDeclaredEnv = "provision_declared_env"
 	hostMutationNone           = "none"
+	hostMutationApplied        = "applied"
+	agentShell                 = "/bin/bash"
+	workspacePrivate           = "private"
+	workspaceSharedRead        = "shared-read"
+	workspaceSharedWrite       = "shared-write"
 )
 
 type privilegedIntent struct {
-	Kind    string   `json:"kind"`
-	Agent   string   `json:"agent,omitempty"`
-	Cwd     string   `json:"cwd,omitempty"`
-	Home    string   `json:"home,omitempty"`
-	EnvKeys []string `json:"env_keys,omitempty"`
+	Kind      string   `json:"kind"`
+	Agent     string   `json:"agent,omitempty"`
+	User      string   `json:"user,omitempty"`
+	Cwd       string   `json:"cwd,omitempty"`
+	Home      string   `json:"home,omitempty"`
+	Shell     string   `json:"shell,omitempty"`
+	Groups    []string `json:"groups,omitempty"`
+	Workspace string   `json:"workspace,omitempty"`
+	EnvKeys   []string `json:"env_keys,omitempty"`
 }
 
 type privilegedPlan struct {
 	Intents []privilegedIntent `json:"intents"`
+	Agents  bool               `json:"agents,omitempty"`
 }
 
 type unsupportedChange struct {
@@ -33,11 +44,12 @@ type coordinateResult struct {
 	HostMutation string              `json:"host_mutation"`
 	Applied      []string            `json:"applied"`
 	Unsupported  []unsupportedChange `json:"unsupported"`
+	Retained     []string            `json:"retained,omitempty"`
 }
 
 func buildPlan(agents map[string]agentDefinition, includeAgents bool) privilegedPlan {
 	if !includeAgents {
-		return privilegedPlan{Intents: []privilegedIntent{}}
+		return privilegedPlan{Intents: []privilegedIntent{}, Agents: false}
 	}
 	ids := make([]string, 0, len(agents))
 	for id := range agents {
@@ -47,12 +59,26 @@ func buildPlan(agents map[string]agentDefinition, includeAgents bool) privileged
 	intents := make([]privilegedIntent, 0, len(ids)*2)
 	for _, id := range ids {
 		definition := agents[id]
-		intents = append(intents, privilegedIntent{
-			Kind:  intentEnsureAgentPaths,
-			Agent: id,
-			Cwd:   definition.Cwd,
-			Home:  definition.Home,
-		})
+		if definition.User != "" {
+			setup := definition.setupContract()
+			intents = append(intents, privilegedIntent{
+				Kind:      intentEnsureAgentUser,
+				Agent:     id,
+				User:      definition.User,
+				Cwd:       definition.Cwd,
+				Home:      definition.Home,
+				Shell:     agentShell,
+				Groups:    append([]string(nil), setup.Groups...),
+				Workspace: setup.workspaceMode(),
+			})
+		} else {
+			intents = append(intents, privilegedIntent{
+				Kind:  intentEnsureAgentPaths,
+				Agent: id,
+				Cwd:   definition.Cwd,
+				Home:  definition.Home,
+			})
+		}
 		if len(definition.Env) == 0 {
 			continue
 		}
@@ -67,7 +93,7 @@ func buildPlan(agents map[string]agentDefinition, includeAgents bool) privileged
 			EnvKeys: keys,
 		})
 	}
-	return privilegedPlan{Intents: intents}
+	return privilegedPlan{Intents: intents, Agents: true}
 }
 
 func evaluatePlan(plan privilegedPlan) (coordinateResult, error) {
@@ -78,11 +104,13 @@ func evaluatePlan(plan privilegedPlan) (coordinateResult, error) {
 	}
 	for _, intent := range plan.Intents {
 		switch intent.Kind {
+		case intentEnsureAgentUser:
+			return coordinateResult{}, fmt.Errorf("dedicated OS user %q for agent %q requires root genesis launch to reconcile the account", intent.User, intent.Agent)
 		case intentEnsureAgentPaths:
 			result.Unsupported = append(result.Unsupported, unsupportedChange{
 				Kind:   intent.Kind,
 				Agent:  intent.Agent,
-				Reason: "agent schema has no OS user; Genesis does not create, chown, or mkdir cwd/home as root",
+				Reason: "agent has no OS user; Genesis does not create, chown, or mkdir cwd/home as root",
 			})
 		case intentProvisionDeclaredEnv:
 			result.Unsupported = append(result.Unsupported, unsupportedChange{
@@ -95,4 +123,11 @@ func evaluatePlan(plan privilegedPlan) (coordinateResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func executePlan(plan privilegedPlan, state *privilegedState) (coordinateResult, error) {
+	if state != nil && state.canMutate() {
+		return state.apply(plan)
+	}
+	return evaluatePlan(plan)
 }
