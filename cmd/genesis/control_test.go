@@ -412,6 +412,21 @@ func TestControlDesignerUserMessageRule(t *testing.T) {
 	if designer.Cwd != "/var/lib/genesis/config" {
 		t.Fatalf("designer cwd = %q", designer.Cwd)
 	}
+	listed := getJSON[struct {
+		Rules []listedRule `json:"rules"`
+	}](t, panel.URL+"/api/rules")
+	var designerRule listedRule
+	for _, candidate := range listed.Rules {
+		if candidate.Name == "designer.yaml" {
+			designerRule = candidate
+		}
+	}
+	if designerRule.Presence != presenceDraft || designerRule.Agent != "designer" ||
+		designerRule.Match["type"] != "dev.genesis.user.message" ||
+		designerRule.Match["source"] != "urn:genesis:control" ||
+		designerRule.Match["subject"] != "designer" {
+		t.Fatalf("draft designer rule = %#v", designerRule)
+	}
 
 	unsynced := postJSON(t, panel.URL+"/api/messages", `{"message":"add a lab agent","rule":"designer.yaml"}`, http.StatusNoContent)
 	if unsynced != "" && strings.Contains(unsynced, panelToken) {

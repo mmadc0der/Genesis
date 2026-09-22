@@ -133,12 +133,14 @@ Destructive clean-volume smoke (deletes both named volumes):
 EOF
 }
 
-if ! docker compose exec -T -u genesis genesis test -f /var/lib/genesis/config/agents.d/designer.yaml; then
-  echo "designer.yaml is missing from genesis-config after entrypoint seed" >&2
+if ! docker compose exec -T -u genesis genesis test -f /var/lib/genesis/config/agents.d/designer.yaml ||
+   docker compose exec -T -u genesis genesis test -L /var/lib/genesis/config/agents.d/designer.yaml; then
+  echo "designer.yaml is missing from genesis-config or is not a regular file" >&2
   exit 1
 fi
-if ! docker compose exec -T -u genesis genesis test -f /var/lib/genesis/config/rules.d/designer.yaml; then
-  echo "rules.d/designer.yaml is missing from genesis-config after entrypoint seed" >&2
+if ! docker compose exec -T -u genesis genesis test -f /var/lib/genesis/config/rules.d/designer.yaml ||
+   docker compose exec -T -u genesis genesis test -L /var/lib/genesis/config/rules.d/designer.yaml; then
+  echo "rules.d/designer.yaml is missing from genesis-config or is not a regular file" >&2
   exit 1
 fi
 if docker compose exec -T -u genesis genesis grep -E '^user:' /var/lib/genesis/config/agents.d/designer.yaml >/dev/null; then

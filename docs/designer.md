@@ -54,9 +54,13 @@ holds the token.
 Compose mounts named volume `genesis-config` at `/var/lib/genesis/config`.
 The image keeps shippable YAML in `/usr/share/genesis/defaults`.
 
-On every listener start the entrypoint copies **missing** default files into
-the volume. Existing files are never replaced. Operator-created files stay.
-A deleted default filename is treated as missing and is copied again.
+On every listener start the entrypoint copies **missing** default YAML files
+into the volume. Existing files are never replaced, including dest entries
+that are dangling or live symlinks. Only regular `*.yaml` / `*.yml` files
+whose stems match agent/rule IDs are copied; source and dest directories
+must not be symlinks. Operator-created files stay. A deleted default
+filename is treated as missing and is copied again. Volume `chown`/`chmod`
+applies only to real files and directories and does not follow symlinks.
 
 That is how an upgraded image can deliver `designer.yaml` onto a volume that
 already has a janitor and example rule, without silently clobbering desired

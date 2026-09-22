@@ -464,9 +464,12 @@ the named volume `genesis-config` at `/var/lib/genesis/config` and
 image `genesis` user (uid `65532`). On every listener start the entrypoint
 copies **missing** default YAML from `/usr/share/genesis/defaults` into the
 volume. Existing files are left unchanged, including operator-edited janitor
-or rule YAML on a reused volume. That is how an image upgrade can deliver
-`designer.yaml` without overwriting desired config. A deleted default
-filename is copied again; file contents are never replaced. The genesis
+or rule YAML on a reused volume, and dest symlinks are not written through.
+Only regular files with valid agent/rule names are copied. That is how an
+image upgrade can deliver `designer.yaml` without overwriting desired config.
+A deleted default filename is copied again; file contents are never replaced.
+Ownership passes skip non-regular files so a planted volume symlink cannot
+redirect root `chown`/`chmod`. The genesis
 binary and `/app/.venv` stay root-owned and are not writable by `genesis`.
 
 The listener is not published on the host. The control service is the UI,
