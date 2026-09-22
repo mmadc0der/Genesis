@@ -437,6 +437,7 @@ export function App() {
             <section>
               <h3>{agent.id}</h3>
               <p class="instructions">{agent.instructions}</p>
+              <p>{agent.user ? `OS user ${agent.user}` : "Shared listener UID"}</p>
               <p class="mono path">{agent.cwd}</p>
               <p class="mono path">{agent.home}</p>
               <p>Secrets: {agent.secrets.length ? agent.secrets.join(", ") : "none"}</p>

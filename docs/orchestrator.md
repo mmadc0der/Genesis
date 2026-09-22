@@ -12,20 +12,25 @@ with flags is still listen, so previous command lines keep working.
 `genesis launch` is the orchestrator. It:
 
 1. Creates a private `SOCK_STREAM` Unix `socketpair`.
-2. Starts `genesis listen` as a child, inheriting only the child end as file
+2. When the parent is root, reconciles dedicated agent OS users from `agents.d`
+   before the listener starts. Failure exits without serving. Non-root launch
+   evaluates the same plan locally and refuses dedicated `user` agents.
+3. Starts `genesis listen` as a child, inheriting only the child end as file
    descriptor `3` (`GENESIS_PRIVILEGED_FD=3`).
-3. When the parent is root, execs that child as `-listener-user` /
+4. When the parent is root, execs that child as `-listener-user` /
    `GENESIS_LISTENER_USER`. Missing or unknown target users fail closed
    before listen starts. Non-root launch leaves the listener at the current
    uid.
-4. Serves typed privileged coordination on the parent end.
-5. Forwards `SIGINT` / `SIGTERM` to the child and exits with the child's code.
+5. Serves typed privileged coordination on the parent end, including spawn
+   of dedicated-agent Python children.
+6. Forwards `SIGINT` / `SIGTERM` to the child, kills leftover spawned
+   agents, and exits with the child's code.
 
 The pair is never bound to a filesystem path. Nothing else can connect to it.
 The listener sets close-on-exec on the inherited descriptor so Python/`dsh`
-children do not receive it. Launch does not escalate. A root parent is only
-a supervisor that can drop the listener uid; it is not a Linux host
-provisioner.
+children do not receive it. Launch does not escalate. A root parent is a
+supervisor that can drop the listener uid, reconcile dedicated agent
+accounts, and exec those agents as their OS users.
 
 ## Cache
 
@@ -64,13 +69,15 @@ Successful sync:
    `rules are invalid`), cache unchanged, no IPC.
 2. Build a typed privileged plan from the would-be generation.
 3. If a coordinator is attached, send `{op:"coordinate", payload: plan}` over
-   the inherited socket and wait. IPC failure: `500` `privileged coordination
-   failed`, cache unchanged.
+   the inherited socket and wait. IPC failure **or a failed dedicated-user
+   reconcile**: `500` `privileged coordination failed`, cache unchanged.
 4. Swap the in-process generation pointer.
 5. Return `200` with digest, counts, and the privileged result.
 
-Standalone listen (no inherited fd) still reloads the cache. The JSON reports
-`privileged.attached: false` and classifies the same plan locally.
+Standalone listen (no inherited fd) still reloads the cache for shared-UID
+agents. Dedicated `user` agents fail closed there: the process cannot
+reconcile or exec as another uid. The JSON reports `privileged.attached`
+and the privileged result.
 
 ## Privileged protocol
 
@@ -78,17 +85,31 @@ Length-prefixed JSON (32-bit big-endian size, then one object). Unknown JSON
 fields and unknown `op` / intent `kind` values fail closed.
 
 The child sends a plan of intents. The parent answers with
-`host_mutation`, `applied`, and `unsupported`. Current schemas have no OS
-user, packages, repos, or profiles, so the only generated kinds are:
+`host_mutation`, `applied`, `unsupported`, and optional `retained`. Unknown
+JSON fields and unknown `op` / intent `kind` values fail closed. The parent
+never runs an agent-supplied shell snippet.
 
-| kind | meaning | current evaluation |
+| kind | meaning | evaluation |
 |---|---|---|
-| `ensure_agent_paths` | agent `cwd` / `home` strings | unsupported: no OS user; Genesis does not mkdir/chown as root |
+| `ensure_agent_user` | dedicated `user`, Bash, home, cwd, allowlisted `setup` | applied by root launch / agents `/sync`; otherwise a hard failure so the generation is not activated |
+| `ensure_agent_paths` | shared-UID agent `cwd` / `home` | unsupported: no OS user; Genesis does not mkdir/chown as root |
 | `provision_declared_env` | declared `env` keys (not values) | unsupported: `env` is a process map, not a package graph |
 
-`applied` is always empty. `host_mutation` is always `"none"`. No `useradd`,
-`chown`, `apt`, or toolchain install is attempted. That is deliberate, not a
-stub that reports success.
+`host_mutation` is `"applied"` when at least one dedicated user was
+reconciled, otherwise `"none"`. `applied` lists `ensure_agent_user:<id>`.
+Rules-only sync sends an empty plan. Removing an agent from YAML does not
+delete the Unix user or home; leftover names are listed in `retained`.
+
+Allowlisted setup today: `workspace` (`private` / `shared-read` /
+`shared-write`) and existing supplementary `groups` (not `root`/`sudo`/other
+reserved groups). The shell is always `/bin/bash`. Deliberately deferred:
+packages, file copies, git clone, extra shells, crontab, mounts, capabilities,
+sudo, and any `command` / script field.
+
+Dedicated runs are a second privileged op (`spawn` / `wait`) that passes
+stdio fds over the same socketpair. The parent execs the embedded Python
+runner with `syscall.Credential` for a username it has previously
+reconciled. Shared-UID agents still start in the listener process.
 
 ## Failure semantics
 
@@ -97,17 +118,19 @@ These guarantees are in-process only.
 | Event | Matcher cache | Host | In-flight runs |
 |---|---|---|---|
 | YAML load failure | unchanged | unchanged | keep their snapshot |
-| IPC error / timeout / parent death during coordinate | unchanged | unchanged (nothing was applied) | keep their snapshot |
-| Successful coordinate with unsupported diffs | swapped to the new generation | unchanged | keep their snapshot |
-| Crash during swap | one generation or the other; not a mix of agents from G and rules from G' | unchanged | keep their snapshot |
+| IPC error / timeout / parent death during coordinate | unchanged | host may be partially mutated; no rollback | keep their snapshot |
+| Dedicated-user reconcile failure | unchanged | host may be partially mutated; no rollback | keep their snapshot |
+| Successful coordinate with only unsupported diffs | swapped to the new generation | unchanged | keep their snapshot |
+| Successful dedicated-user reconcile | swapped after apply | users/homes/workspaces ensured | keep their snapshot |
+| Crash during swap | one generation or the other; not a mix of agents from G and rules from G' | already applied | keep their snapshot |
 | `503` during sync | previous generation | n/a | keep their snapshot |
 
 Not claimed, and not implemented:
 
 - Atomicity with another process, container, or host.
-- Atomicity between YAML files and Unix users, homes, or packages.
-- Rollback of host mutations (none are performed).
+- Rollback of host mutations.
 - A durable apply journal.
+- Deletion of Unix users or homes when YAML is removed.
 
 A rules-only sync can activate a new rule against a previously cached agent
 while a newly written agent file stays invisible. An agents-only sync can
@@ -123,7 +146,8 @@ reload `DEEPSEEK_API_KEY`. The runner strips `GENESIS_SYNC_TOKEN` and
 `GET /health` and `GET /generation` are read-only. They do not reload YAML,
 swap the cache, or accept a bearer. `/generation` returns the active agents,
 rules, digest, whether a sync token is configured, and whether a sync is in
-progress. It does not return the token. `POST /events` and `POST /sync` are
+progress. Agent objects include optional `user` and `setup`. It does not
+return the token. `POST /events` and `POST /sync` are
 unchanged.
 
 `genesis control` is a second process. It reads the config directories and
@@ -135,7 +159,8 @@ and serves the panel. The journal file remains the replay source. See
 
 Use the Linux engine through WSL. See the README for the exact smoke
 commands. Compose runs `genesis launch` as root, drops the listener to the
-image `genesis` user, and does not publish the listener port. The control
+image `genesis` user, reconciles dedicated agent users inside the container,
+and does not publish the listener port. The control
 process is the published UI at host `127.0.0.1:8790` and runs as uid
 65532. It mounts `genesis-config` read-write and `genesis-data` read-only,
 and starts only after the listener entrypoint has given those volumes to
@@ -147,5 +172,6 @@ on `genesis-config` at `/var/lib/genesis/config`, seeded from
 volumes; `docker compose down -v` deletes them so the next `up` reseeds
 config defaults and starts with empty run storage. The binary and
 `/app/.venv` are not writable by `genesis`. Supply `GENESIS_SYNC_TOKEN` in
-compose; the binary will not invent one. The privileged protocol still
-reports unsupported host diffs.
+compose; the binary will not invent one. Dedicated agent homes live under
+`/home/<user>` in the container writable layer and are recreated on the next
+launch if the container is replaced.

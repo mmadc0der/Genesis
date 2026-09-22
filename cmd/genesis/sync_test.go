@@ -256,6 +256,57 @@ func newSyncTestServer(t *testing.T, coordinator privilegedCoordinator) *eventSe
 	return server
 }
 
+func TestSyncDoesNotActivateDedicatedUserWithoutPrivilegedApply(t *testing.T) {
+	server := newSyncTestServer(t, nil)
+	writeAgent(t, filepath.Join(server.agentsDir, "ok.yaml"), agentDefinition{
+		Instructions: "stay",
+		Cwd:          "/home/workspace-janitor/workspace",
+		Home:         "/home/workspace-janitor",
+		User:         "workspace-janitor",
+		Env:          map[string]string{"PATH": "/usr/bin"},
+	})
+	response := sendSync(server, "sync-secret", map[string]any{"scope": []string{"agents"}})
+	if response.Code != http.StatusInternalServerError ||
+		!strings.Contains(response.Body.String(), "privileged coordination failed") {
+		t.Fatalf("dedicated sync status = %d body = %s", response.Code, response.Body.String())
+	}
+	event := map[string]any{
+		"specversion": "1.0",
+		"id":          "evt-stale-user",
+		"source":      "urn:test",
+		"type":        "com.example.run",
+	}
+	response = sendEvent(server, event)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("cache after dedicated evaluate failure status = %d body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestSyncRulesOnlySkipsUserReconcile(t *testing.T) {
+	server := newSyncTestServer(t, nil)
+	writeAgent(t, filepath.Join(server.agentsDir, "ok.yaml"), agentDefinition{
+		Instructions: "stay",
+		Cwd:          "/home/workspace-janitor/workspace",
+		Home:         "/home/workspace-janitor",
+		User:         "workspace-janitor",
+	})
+	writeRule(t, filepath.Join(server.rulesDir, "ok.yaml"), rule{
+		Match: map[string]string{"type": "com.example.updated"},
+		Agent: "ok",
+	})
+	response := sendSync(server, "sync-secret", map[string]any{"scope": []string{"rules"}})
+	if response.Code != http.StatusOK {
+		t.Fatalf("rules-only with pending dedicated agent status = %d body = %s", response.Code, response.Body.String())
+	}
+	var body syncResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Privileged.HostMutation != hostMutationNone || len(body.Privileged.Applied) != 0 {
+		t.Fatalf("rules-only privileged = %#v", body.Privileged)
+	}
+}
+
 func TestSanitizedChildEnvOmitsSyncSecrets(t *testing.T) {
 	t.Setenv(syncTokenEnv, "must-not-leak")
 	t.Setenv(privilegedFDEnv, "3")

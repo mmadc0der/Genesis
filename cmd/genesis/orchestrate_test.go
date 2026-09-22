@@ -398,6 +398,49 @@ func TestLaunchBinaryDisablesSyncWithoutToken(t *testing.T) {
 	}
 }
 
+func TestLaunchBinaryRefusesDedicatedUserWhenNotRoot(t *testing.T) {
+	skipLaunchBinaryIfRoot(t)
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "genesis")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+	agentsDir := filepath.Join(dir, "agents")
+	rulesDir := filepath.Join(dir, "rules")
+	if err := os.Mkdir(agentsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(rulesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeAgent(t, filepath.Join(agentsDir, "ok.yaml"), agentDefinition{
+		Instructions: "stay",
+		Cwd:          "/home/workspace-janitor/workspace",
+		Home:         "/home/workspace-janitor",
+		User:         "workspace-janitor",
+	})
+	writeRule(t, filepath.Join(rulesDir, "ok.yaml"), rule{
+		Match: map[string]string{"type": "com.example.run"},
+		Agent: "ok",
+	})
+	command := exec.Command(bin, "launch",
+		"-listen", "127.0.0.1:0",
+		"-agents", agentsDir,
+		"-rules", rulesDir,
+		"-data", filepath.Join(dir, "data"),
+	)
+	command.Env = launchTestEnv(filepath.Join(dir, "bin"))
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("launch succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "reconcile dedicated agent users") &&
+		!strings.Contains(string(output), "requires root genesis launch") {
+		t.Fatalf("launch output = %s", output)
+	}
+}
+
 func skipLaunchBinaryIfRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() == 0 {

@@ -8,7 +8,10 @@ Harness session for every matching YAML rule. It builds one executable:
 `genesis launch` starts that listener as a child and supervises it over a
 private inherited Unix socketpair used only for typed privileged
 coordination. See [docs/orchestrator.md](docs/orchestrator.md) for the exact
-cache, `/sync`, and failure semantics.
+cache, `/sync`, and failure semantics. The committed `workspace-janitor`
+example declares a dedicated OS user, so non-root `listen` / `launch` refuse
+it. Use Docker Compose for that identity, or drop `user` and `setup` for a
+shared-UID local process.
 
 Each session runs through the official Python SDK with the standalone
 `sdk-minimal` profile. `pyproject.toml` and the committed `uv.lock` pin the
@@ -18,9 +21,12 @@ executable is looked up in `PATH`.
 
 Who runs is a file-backed agent in `agents.d/`. A rule only selects that
 identity. `cwd` is the SDK workspace and `home` is the child process Unix
-`HOME`. They are a workspace/environment split under the shared Genesis UID,
-not a security sandbox. Genesis does not switch OS users and does not apply
-root host diffs; current YAML cannot name OS users or packages.
+`HOME`. When `user` is set, `genesis launch` as root and `POST /sync` of
+agents reconcile a dedicated OS account (Bash shell, home, ownership, and
+workspace access) and the runner executes as that account. Without `user`,
+cwd/home remain a workspace/environment split under the listener UID and are
+not a security sandbox. YAML still cannot name packages or arbitrary root
+commands.
 
 ## Install and run
 
@@ -45,7 +51,9 @@ journal root; an invalid path refuses to listen. An empty `-sync-token` /
 `GENESIS_SYNC_TOKEN` disables `POST /sync` (`401` `sync is disabled`); set a
 token to activate filesystem edits. When `launch` runs as root it requires
 `-listener-user` / `GENESIS_LISTENER_USER` and execs the listener as that
-user. Non-root launch keeps the current user and does not need that flag.
+user. It also reconciles dedicated agent OS users from `agents.d` before the
+listener starts. Non-root launch keeps the current user, does not need that
+flag, and refuses to start if any agent declares `user`.
 
 `uv run` places the managed `.venv` first in `PATH`. Equivalently, activate it
 with `. .venv/bin/activate` before running `./bin/genesis`. Genesis resolves
@@ -82,22 +90,31 @@ ID (`workspace-janitor.yaml` → `workspace-janitor`):
 instructions: |
   You are the workspace janitor for this lab.
   Read the CloudEvent, do only the work it asks, write results in the workspace, then stop.
-cwd: /tmp
-home: /tmp/genesis-home
+user: workspace-janitor
+cwd: /home/workspace-janitor/workspace
+home: /home/workspace-janitor
+setup:
+  workspace: private
 env:
   PATH: /usr/local/bin:/usr/bin:/bin
   LANG: C.UTF-8
 ```
 
 `instructions`, `cwd`, and `home` are required. `cwd` and `home` must be
-absolute and distinct. `env` is the complete non-secret environment given to
-that agent's Harness runtime; omitted, it is empty. Genesis then adds named
+absolute and distinct. `user` is optional. When set, it is a dedicated Linux
+account name (lowercase, not `root`/`genesis`/other reserved names). Two
+agents cannot share an OS user. `setup` is allowed only with `user` and is a
+closed contract: `workspace` (`private`, `shared-read`, `shared-write`) and
+optional existing `groups`. There is no command, script, package, or shell
+field; the account always gets `/bin/bash`. `env` is the complete non-secret
+environment given to that agent's Harness runtime; omitted, it is empty. Genesis then adds named
 secrets from its own startup environment (default `DEEPSEEK_API_KEY` when the
 value is non-empty), sets `HOME` from `home`, and sets `DSH_SYSTEM_PROMPT`
 from `instructions` for the pinned `sdk-minimal` persona hook. Declaring
 `HOME`, `DSH_SYSTEM_PROMPT`, or any listed secret in `env` is rejected.
-Secret values never appear in YAML. Duplicate IDs, duplicate secret names,
-unknown fields, and invalid filename stems are rejected.
+Dedicated agents also reserve `USER`, `LOGNAME`, and `SHELL`. Secret values
+never appear in YAML. Duplicate IDs, duplicate secret names, duplicate OS
+users, unknown fields, and invalid filename stems are rejected.
 
 Several rules may point at the same agent. Concurrent matches share `cwd` and
 `home` and may race; Genesis does not queue them.
@@ -404,17 +421,18 @@ curl -i http://127.0.0.1:8787/sync \
 That is not host/matcher atomicity: a rules-only sync can activate new rules
 against previously cached agents while a newly written agent file stays
 invisible. Invalid YAML or a broken privileged socket leaves the previous
-cache in place. The JSON `privileged` object reports `attached`,
-`host_mutation: "none"`, empty `applied`, and explicit `unsupported` diffs
-for cwd/home and declared env keys. Genesis does not useradd, chown, or
-install packages.
+cache in place. Dedicated `user` accounts are reconciled only on a full or
+agents sync, and only when `genesis launch` is root. If that recon fails, the
+matcher cache is not swapped. Removing an agent file does not `userdel` or
+delete homes. Shared-UID agents still report `unsupported` cwd/home and env
+diffs; Genesis still does not install packages.
 
 While sync runs, `POST /events` returns `503` with `Retry-After: 1`. A second
 sync returns `409`. In-flight runs keep the snapshot they were accepted with.
 
-Bearer auth is a local operator token, not a sandbox. Agents share the
-Genesis UID. Leaving the token empty disables `/sync`; Genesis does not
-invent one.
+Bearer auth is a local operator token, not a sandbox. Dedicated agents run
+as their reconciled OS user. Shared-UID agents still share the listener UID.
+Leaving the token empty disables `/sync`; Genesis does not invent one.
 
 ## Docker Desktop on Windows with the repo in WSL
 
@@ -472,7 +490,8 @@ Docker Desktop publishes that port on localhost only.
    edit stays inactive until `/sync`.
 
 Compose runs `genesis launch` as root and drops the listener to `genesis`.
-The control process runs as uid 65532 (`genesis`). It waits until the
+Dedicated agent users are created in the container at launch and on agents
+`/sync`. The control process runs as uid 65532 (`genesis`). It waits until the
 entrypoint has chowned config and data to that user, so it can write config
 and read the listener's `0700` journals through the read-only data mount
 without starting as root. Supply `GENESIS_SYNC_TOKEN`;

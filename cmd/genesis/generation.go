@@ -81,6 +81,8 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule) string {
 		Instructions string            `json:"instructions"`
 		Cwd          string            `json:"cwd"`
 		Home         string            `json:"home"`
+		User         string            `json:"user"`
+		Setup        *agentSetup       `json:"setup"`
 		Env          map[string]string `json:"env"`
 		Secrets      []string          `json:"secrets"`
 	}
@@ -103,6 +105,8 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule) string {
 			Instructions: definition.Instructions,
 			Cwd:          definition.Cwd,
 			Home:         definition.Home,
+			User:         definition.User,
+			Setup:        definition.Setup,
 			Env:          definition.Env,
 			Secrets:      definition.Secrets,
 		})

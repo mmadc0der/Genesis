@@ -30,6 +30,15 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, dataDir, syncTo
 		fail(logger, "resolve listener user", err)
 	}
 
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		fail(logger, "find python3 in PATH", err)
+	}
+	pythonPath, err = filepath.Abs(pythonPath)
+	if err != nil {
+		fail(logger, "resolve python3 path", err)
+	}
+
 	parent, child, err := privilegedSocketpair()
 	if err != nil {
 		fail(logger, "create privileged socketpair", err)
@@ -58,6 +67,23 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, dataDir, syncTo
 		child.Close()
 		parent.Close()
 		fail(logger, "resolve data directory", err)
+	}
+
+	listenerName := ""
+	if identity != nil {
+		listenerName = identity.Username
+	}
+	state := newPrivilegedState(logger, pythonPath, embeddedPythonRunner, listenerName)
+	agents, err := loadAgents(absoluteAgentsDir)
+	if err != nil {
+		child.Close()
+		parent.Close()
+		fail(logger, "load agents for privileged reconcile", err)
+	}
+	if _, err := executePlan(buildPlan(agents, true), state); err != nil {
+		child.Close()
+		parent.Close()
+		fail(logger, "reconcile dedicated agent users", err)
 	}
 
 	command := exec.Command(executable, "listen",
@@ -96,8 +122,9 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, dataDir, syncTo
 	}
 	logger.Info("genesis orchestrator started", attrs...)
 
-	go servePrivilegedParent(parent, logger)
+	go servePrivilegedParent(parent, logger, state)
 	code := superviseListener(command, logger)
+	state.killAll()
 	_ = parent.Close()
 	os.Exit(code)
 }

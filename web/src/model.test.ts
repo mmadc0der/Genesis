@@ -92,6 +92,7 @@ describe("control panel model", () => {
       instructions: "keep",
       cwd: "/work",
       home: "/home",
+      user: "workspace-janitor",
       env: {},
       secrets: [],
       presence: "active",

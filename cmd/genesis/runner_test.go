@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -565,6 +567,81 @@ printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-ce","finish
 			t.Fatalf("source = %q", event.Source)
 		}
 	}
+}
+
+func TestProcessRunnerDedicatedUsesSpawner(t *testing.T) {
+	fakePython := writeExecutable(t, `
+#!/bin/sh
+input=$(cat)
+printf '%s' "$input" >"$GENESIS_CAPTURE"
+printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_user","session_id":"session-user"}'
+printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-user","finish_reason":"completed","final_response":"ok","error":null,"diagnostics":null}'
+`)
+	capture := filepath.Join(t.TempDir(), "invocation.json")
+	t.Setenv("GENESIS_CAPTURE", capture)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	store := newRunStore(t.TempDir(), newEventBus(), logger)
+	spawner := &pipeSpawner{pythonPath: fakePython, source: "src"}
+	document := sampleRunInvocation("gen_user")
+	document.User = "workspace-janitor"
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	processRunner{pythonPath: "/should-not-run", source: "src", logger: logger, store: store, spawner: spawner}.Run(document)
+	if spawner.req.User != "workspace-janitor" || spawner.req.Agent != document.Agent {
+		t.Fatalf("spawn request = %#v", spawner.req)
+	}
+	captured, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(captured, []byte(`"user":"workspace-janitor"`)) {
+		t.Fatalf("invocation missing user: %s", captured)
+	}
+	events := readRunEvents(t, store, document.RunID)
+	if !hasType(events, lifecycleTypeEnd) {
+		t.Fatalf("events = %v", typesOf(events))
+	}
+}
+
+func TestProcessRunnerDedicatedWithoutSpawnerFails(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	store := newRunStore(t.TempDir(), newEventBus(), logger)
+	document := sampleRunInvocation("gen_nouser")
+	document.User = "workspace-janitor"
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	processRunner{pythonPath: "/should-not-run", source: "src", logger: logger, store: store}.Run(document)
+	events := readRunEvents(t, store, document.RunID)
+	if !hasType(events, lifecycleTypeError) {
+		t.Fatalf("events = %v", typesOf(events))
+	}
+}
+
+type pipeSpawner struct {
+	pythonPath string
+	source     string
+	req        spawnRequest
+	cmd        *exec.Cmd
+}
+
+func (p *pipeSpawner) Spawn(_ context.Context, req spawnRequest, stdin, stdout, stderr *os.File) (int, error) {
+	p.req = req
+	p.cmd = exec.Command(p.pythonPath, "-c", p.source)
+	p.cmd.Stdin = stdin
+	p.cmd.Stdout = stdout
+	p.cmd.Stderr = stderr
+	p.cmd.Env = append(os.Environ(), "GENESIS_CAPTURE="+os.Getenv("GENESIS_CAPTURE"))
+	if err := p.cmd.Start(); err != nil {
+		return 0, err
+	}
+	return p.cmd.Process.Pid, nil
+}
+
+func (p *pipeSpawner) Wait(_ context.Context, pid int) (int, error) {
+	err := p.cmd.Wait()
+	return exitStatus(err, p.cmd), err
 }
 
 func sampleRunInvocation(runID string) invocation {

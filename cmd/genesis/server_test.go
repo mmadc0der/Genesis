@@ -380,12 +380,13 @@ instructions: stay
 cwd: /tmp/work
 home: /tmp/home
 user: alice
+packages: [nmap]
 `
 	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "user") {
-		t.Fatalf("loadAgents error = %v, want unknown user field", err)
+	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "packages") {
+		t.Fatalf("loadAgents error = %v, want unknown packages field", err)
 	}
 }
 
@@ -502,6 +503,94 @@ home: /tmp/work/
 	}
 }
 
+func TestLoadAgentsDedicatedUserContract(t *testing.T) {
+	agentsDir := t.TempDir()
+	valid := `
+instructions: stay
+cwd: /home/workspace-janitor/workspace
+home: /home/workspace-janitor
+user: workspace-janitor
+setup:
+  workspace: private
+`
+	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := loadAgents(agentsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agents["janitor"].User != "workspace-janitor" || agents["janitor"].setupContract().workspaceMode() != workspacePrivate {
+		t.Fatalf("agent = %#v", agents["janitor"])
+	}
+
+	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(valid+"\n  command: id\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "command") {
+		t.Fatalf("setup.command error = %v", err)
+	}
+
+	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(`
+instructions: stay
+cwd: /tmp/work
+home: /tmp/home
+setup:
+  workspace: private
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "setup requires user") {
+		t.Fatalf("setup without user error = %v", err)
+	}
+
+	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(`
+instructions: stay
+cwd: /tmp/work
+home: /tmp/home
+user: genesis
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("reserved user error = %v", err)
+	}
+
+	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentsDir+"/other.yaml", []byte(`
+instructions: stay
+cwd: /home/other/workspace
+home: /home/other
+user: workspace-janitor
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "share OS user") {
+		t.Fatalf("duplicate user error = %v", err)
+	}
+}
+
+func TestLoadInitialGenerationRejectsDedicatedUserWithoutCoordinator(t *testing.T) {
+	agentsDir := t.TempDir()
+	rulesDir := t.TempDir()
+	writeAgent(t, filepath.Join(agentsDir, "janitor.yaml"), agentDefinition{
+		Instructions: "stay",
+		Cwd:          "/home/workspace-janitor/workspace",
+		Home:         "/home/workspace-janitor",
+		User:         "workspace-janitor",
+	})
+	writeRule(t, filepath.Join(rulesDir, "ok.yaml"), rule{
+		Match: map[string]string{"type": "com.example.run"},
+		Agent: "janitor",
+	})
+	server := &eventServer{agentsDir: agentsDir, rulesDir: rulesDir, logger: slog.New(slog.NewJSONHandler(io.Discard, nil))}
+	if err := server.loadInitialGeneration(); err == nil || !strings.Contains(err.Error(), "requires root genesis launch") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRuntimeEnvironmentUsesNamedSecretsAndStaysIsolated(t *testing.T) {
 	declared := map[string]string{"PATH": "/agent/bin"}
 	definition := agentDefinition{
@@ -537,6 +626,16 @@ func TestRuntimeEnvironmentUsesNamedSecretsAndStaysIsolated(t *testing.T) {
 	}
 	if credentialFree[homeEnvKey] != "/tmp/home" {
 		t.Fatalf("credential-free HOME = %#v", credentialFree)
+	}
+	if _, present := environment["USER"]; present {
+		t.Fatalf("shared-uid USER leaked: %#v", environment)
+	}
+
+	dedicated := definition
+	dedicated.User = "workspace-janitor"
+	withUser := runtimeEnvironment(dedicated, map[string]string{})
+	if withUser["USER"] != "workspace-janitor" || withUser["LOGNAME"] != "workspace-janitor" || withUser["SHELL"] != agentShell {
+		t.Fatalf("dedicated identity env = %#v", withUser)
 	}
 }
 

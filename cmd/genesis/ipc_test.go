@@ -21,7 +21,7 @@ func TestPrivilegedSocketpairCoordinateRoundTrip(t *testing.T) {
 	})
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	go servePrivilegedParent(parent, logger)
+	go servePrivilegedParent(parent, logger, nil)
 
 	conn, err := fileConnForTest(childFile)
 	if err != nil {

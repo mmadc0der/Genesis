@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -33,15 +34,26 @@ var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 type cloudEvent map[string]json.RawMessage
 
 // agentDefinition is a file-backed identity. cwd is the SDK workspace; home is
-// the child process Unix HOME. They separate workspace from environment under
-// the shared Genesis UID and are not a security sandbox.
+// the child process Unix HOME. When user is set, launch / POST /sync reconcile
+// a dedicated OS account and the runner executes as that account. Without
+// user, cwd/home remain a workspace split under the listener UID and are not
+// a security sandbox.
 type agentDefinition struct {
 	Instructions string            `yaml:"instructions"`
 	Cwd          string            `yaml:"cwd"`
 	Home         string            `yaml:"home"`
+	User         string            `yaml:"user,omitempty"`
+	Setup        *agentSetup       `yaml:"setup,omitempty"`
 	Env          map[string]string `yaml:"env,omitempty"`
 	Secrets      []string          `yaml:"secrets,omitempty"`
 	id           string
+}
+
+// agentSetup is the allowlisted host contract for a dedicated OS user.
+// Unknown keys fail closed. There is no command, script, or package field.
+type agentSetup struct {
+	Groups    []string `yaml:"groups,omitempty" json:"groups,omitempty"`
+	Workspace string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
 }
 
 type rule struct {
@@ -55,6 +67,7 @@ type invocation struct {
 	Rule         string            `json:"rule"`
 	Agent        string            `json:"agent"`
 	RunID        string            `json:"run_id"`
+	User         string            `json:"user,omitempty"`
 	Cwd          string            `json:"cwd"`
 	Home         string            `json:"home"`
 	Instructions string            `json:"instructions"`
@@ -108,6 +121,11 @@ func (s *eventServer) loadInitialGeneration() error {
 	generation, err := loadGeneration(s.agentsDir, s.rulesDir)
 	if err != nil {
 		return err
+	}
+	if s.coordinator == nil {
+		if _, err := evaluatePlan(buildPlan(generation.agents, true)); err != nil {
+			return err
+		}
 	}
 	s.generation = generation
 	return nil
@@ -232,6 +250,7 @@ func snapshotInvocation(
 		Rule:         matched.name,
 		Agent:        definition.id,
 		RunID:        runID,
+		User:         definition.User,
 		Cwd:          definition.Cwd,
 		Home:         definition.Home,
 		Instructions: definition.Instructions,
@@ -260,7 +279,7 @@ func inheritedEnvironment() map[string]string {
 }
 
 func runtimeEnvironment(definition agentDefinition, secrets map[string]string) map[string]string {
-	environment := make(map[string]string, len(definition.Env)+len(definition.Secrets)+2)
+	environment := make(map[string]string, len(definition.Env)+len(definition.Secrets)+5)
 	for key, value := range definition.Env {
 		environment[key] = value
 	}
@@ -271,6 +290,11 @@ func runtimeEnvironment(definition agentDefinition, secrets map[string]string) m
 	}
 	environment[homeEnvKey] = definition.Home
 	environment[systemPromptEnvKey] = definition.Instructions
+	if definition.User != "" {
+		environment["USER"] = definition.User
+		environment["LOGNAME"] = definition.User
+		environment["SHELL"] = agentShell
+	}
 	return environment
 }
 
@@ -397,6 +421,9 @@ func loadAgents(directory string) (map[string]agentDefinition, error) {
 		}
 		agents[id] = loaded
 	}
+	if err := validateUniqueAgentUsers(agents); err != nil {
+		return nil, err
+	}
 	return agents, nil
 }
 
@@ -449,6 +476,14 @@ func (a agentDefinition) validate() error {
 	if filepath.Clean(a.Cwd) == filepath.Clean(a.Home) {
 		return errors.New("cwd and home must be distinct paths")
 	}
+	if a.User != "" {
+		if err := validateOSUsername(a.User); err != nil {
+			return fmt.Errorf("user: %w", err)
+		}
+	}
+	if err := a.setupContract().validate(a.User != ""); err != nil {
+		return err
+	}
 
 	seenSecrets := make(map[string]struct{}, len(a.Secrets))
 	for _, name := range a.Secrets {
@@ -458,7 +493,7 @@ func (a agentDefinition) validate() error {
 		if _, duplicate := seenSecrets[name]; duplicate {
 			return fmt.Errorf("duplicate secret %q", name)
 		}
-		if source, reserved := reservedEnvKey(name); reserved {
+		if source, reserved := reservedEnvKey(name, a.User != ""); reserved {
 			return fmt.Errorf("secrets must not declare %s; Genesis sets it from %s", name, source)
 		}
 		seenSecrets[name] = struct{}{}
@@ -477,7 +512,7 @@ func (a agentDefinition) validate() error {
 		if _, secret := seenSecrets[key]; secret {
 			return fmt.Errorf("env must not declare %s; it is listed in secrets", key)
 		}
-		if source, reserved := reservedEnvKey(key); reserved {
+		if source, reserved := reservedEnvKey(key, a.User != ""); reserved {
 			return fmt.Errorf("env must not declare %s; Genesis sets it from %s", key, source)
 		}
 	}
@@ -502,15 +537,79 @@ func (r rule) validate(agents map[string]agentDefinition) error {
 	return nil
 }
 
-func reservedEnvKey(name string) (string, bool) {
+func reservedEnvKey(name string, dedicated bool) (string, bool) {
 	switch name {
 	case homeEnvKey:
 		return "home", true
 	case systemPromptEnvKey:
 		return "instructions", true
+	case "USER", "LOGNAME", "SHELL":
+		if dedicated {
+			return "user", true
+		}
+		return "", false
 	default:
 		return "", false
 	}
+}
+
+func (a agentDefinition) setupContract() agentSetup {
+	if a.Setup == nil {
+		return agentSetup{}
+	}
+	return *a.Setup
+}
+
+func (s agentSetup) validate(dedicated bool) error {
+	if !dedicated {
+		if len(s.Groups) > 0 || s.Workspace != "" {
+			return errors.New("setup requires user")
+		}
+		return nil
+	}
+	switch s.Workspace {
+	case "", workspacePrivate, workspaceSharedRead, workspaceSharedWrite:
+	default:
+		return fmt.Errorf("setup.workspace must be %s, %s, or %s", workspacePrivate, workspaceSharedRead, workspaceSharedWrite)
+	}
+	seen := make(map[string]struct{}, len(s.Groups))
+	for _, name := range s.Groups {
+		if err := validateOSGroupName(name); err != nil {
+			return fmt.Errorf("setup.groups: %w", err)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("setup.groups: duplicate group %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
+func (s agentSetup) workspaceMode() string {
+	if s.Workspace == "" {
+		return workspacePrivate
+	}
+	return s.Workspace
+}
+
+func validateUniqueAgentUsers(agents map[string]agentDefinition) error {
+	seen := map[string]string{}
+	ids := make([]string, 0, len(agents))
+	for id := range agents {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		name := agents[id].User
+		if name == "" {
+			continue
+		}
+		if other, exists := seen[name]; exists {
+			return fmt.Errorf("agents %q and %q share OS user %q", other, id, name)
+		}
+		seen[name] = id
+	}
+	return nil
 }
 
 func validateAbsolutePath(field, value string) error {
