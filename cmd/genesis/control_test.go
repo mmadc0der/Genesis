@@ -388,6 +388,105 @@ func TestControlInvalidDesiredKeepsActiveAndRuns(t *testing.T) {
 	}
 }
 
+func TestControlDesignerUserMessageRule(t *testing.T) {
+	control, listener := newPanelFixture(t)
+	root := repoRoot(t)
+	copyFile(t, filepath.Join(root, "agents.d", "designer.yaml"), filepath.Join(listener.agentsDir, "designer.yaml"))
+	copyFile(t, filepath.Join(root, "rules.d", "designer.yaml"), filepath.Join(listener.rulesDir, "designer.yaml"))
+
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	agents := getJSON[struct {
+		Agents []listedAgent `json:"agents"`
+	}](t, panel.URL+"/api/agents")
+	var designer listedAgent
+	for _, candidate := range agents.Agents {
+		if candidate.ID == "designer" {
+			designer = candidate
+		}
+	}
+	if designer.ID != "designer" || designer.Presence != presenceDraft || designer.User != "" {
+		t.Fatalf("draft designer = %#v", designer)
+	}
+	if designer.Cwd != "/var/lib/genesis/config" {
+		t.Fatalf("designer cwd = %q", designer.Cwd)
+	}
+	listed := getJSON[struct {
+		Rules []listedRule `json:"rules"`
+	}](t, panel.URL+"/api/rules")
+	var designerRule listedRule
+	for _, candidate := range listed.Rules {
+		if candidate.Name == "designer.yaml" {
+			designerRule = candidate
+		}
+	}
+	if designerRule.Presence != presenceDraft || designerRule.Agent != "designer" ||
+		designerRule.Match["type"] != "dev.genesis.user.message" ||
+		designerRule.Match["source"] != "urn:genesis:control" ||
+		designerRule.Match["subject"] != "designer" {
+		t.Fatalf("draft designer rule = %#v", designerRule)
+	}
+
+	unsynced := postJSON(t, panel.URL+"/api/messages", `{"message":"add a lab agent","rule":"designer.yaml"}`, http.StatusNoContent)
+	if unsynced != "" && strings.Contains(unsynced, panelToken) {
+		t.Fatalf("unsynced response exposed token: %s", unsynced)
+	}
+
+	syncResponse := postJSON(t, panel.URL+"/api/sync", `{"scope":["agents","rules"]}`, http.StatusOK)
+	if !strings.Contains(syncResponse, `"host_mutation":"none"`) {
+		t.Fatalf("designer sync mutated host: %s", syncResponse)
+	}
+
+	accepted := postJSON(t, panel.URL+"/api/messages", `{"message":"add a lab agent","rule":"designer.yaml"}`, http.StatusAccepted)
+	var body struct {
+		Runs []acceptedRun `json:"runs"`
+	}
+	if err := json.Unmarshal([]byte(accepted), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Runs) != 1 || body.Runs[0].Agent != "designer" || body.Runs[0].Rule != "designer.yaml" {
+		t.Fatalf("accepted = %s", accepted)
+	}
+
+	fake, ok := listener.runner.(*fakeRunner)
+	if !ok {
+		t.Fatal("expected fake runner")
+	}
+	select {
+	case inv := <-fake.invocations:
+		if inv.Agent != "designer" || inv.User != "" {
+			t.Fatalf("invocation identity = agent %q user %q", inv.Agent, inv.User)
+		}
+		if inv.Cwd != "/var/lib/genesis/config" {
+			t.Fatalf("invocation cwd = %q", inv.Cwd)
+		}
+		if string(inv.Event["type"]) != `"dev.genesis.user.message"` {
+			t.Fatalf("event type = %s", inv.Event["type"])
+		}
+		if string(inv.Event["source"]) != `"urn:genesis:control"` {
+			t.Fatalf("event source = %s", inv.Event["source"])
+		}
+		if string(inv.Event["subject"]) != `"designer"` {
+			t.Fatalf("event subject = %s", inv.Event["subject"])
+		}
+		if !bytes.Contains(inv.Event["data"], []byte(`"message":"add a lab agent"`)) {
+			t.Fatalf("event data = %s", inv.Event["data"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("designer invocation was not started")
+	}
+
+	active := getJSON[struct {
+		Agents []listedAgent `json:"agents"`
+	}](t, panel.URL+"/api/agents")
+	for _, candidate := range active.Agents {
+		if candidate.ID == "designer" && (candidate.User != "" || candidate.Presence != presenceActive) {
+			t.Fatalf("active designer = %#v", candidate)
+		}
+	}
+}
+
 func TestControlMessageCopiesMatchAttributes(t *testing.T) {
 	minted, err := buildMessageEvent(map[string]string{
 		"specversion": "1.0",

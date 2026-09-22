@@ -58,6 +58,24 @@ describe("control panel model", () => {
     expect(JSON.stringify(body)).not.toContain("sync-token");
   });
 
+  it("builds the dedicated designer user-message event from the selected rule", () => {
+    const body = buildMessage({
+      message: "add a shared-uid lab agent",
+      rule: "designer.yaml",
+      type: "dev.genesis.user.message",
+      source: "urn:genesis:control",
+      subject: "designer",
+    });
+    expect(body).toEqual({
+      message: "add a shared-uid lab agent",
+      rule: "designer.yaml",
+      type: "dev.genesis.user.message",
+      source: "urn:genesis:control",
+      subject: "designer",
+    });
+    expect(JSON.stringify(body)).not.toContain("GENESIS_SYNC_TOKEN");
+  });
+
   it("renders state and runs when the agent and rule catalogs fail", () => {
     const state = {
       drift: "desired_invalid",
