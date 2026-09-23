@@ -10,7 +10,9 @@ import {
   mergeRuns,
   presenceLabel,
   githubGrantSummary,
+  driftLine,
   repositoryLabel,
+  repositoryObservationSummary,
   repositoryPolicy,
   repositorySyncNotice,
   secretNames,
@@ -481,7 +483,7 @@ export function App() {
           {repository ? (
             <section>
               <h3>{repositoryLabel(repository)}</h3>
-              <p>Not applied. Genesis did not call {repository.provider}.</p>
+              <p>{repositoryObservationSummary(repository)}</p>
               <dl>
                 <dt>Id</dt>
                 <dd class="mono">{repository.id}</dd>
@@ -507,6 +509,38 @@ export function App() {
                 </dd>
               </dl>
               {repository.settings.description ? <p>{repository.settings.description}</p> : null}
+              {repository.observed ? (
+                <>
+                  <h3>Observed</h3>
+                  <dl>
+                    <dt>Repo id</dt>
+                    <dd class="mono">{repository.observed.repository_id}</dd>
+                    <dt>Node</dt>
+                    <dd class="mono">{repository.observed.node_id}</dd>
+                    <dt>Visibility</dt>
+                    <dd>{repository.observed.visibility}</dd>
+                    <dt>Branch</dt>
+                    <dd class="mono">{repository.observed.default_branch || "none"}</dd>
+                    <dt>Archived</dt>
+                    <dd>{repository.observed.archived ? "yes" : "no"}</dd>
+                    <dt>Actions</dt>
+                    <dd>{repository.observed.actions_status === "observed" ? repository.observed.actions_allowed || "observed" : repository.observed.actions_status}</dd>
+                    <dt>Rulesets</dt>
+                    <dd>{repository.observed.ruleset_status}</dd>
+                  </dl>
+                  {repository.observed.description ? <p>{repository.observed.description}</p> : null}
+                </>
+              ) : null}
+              {repository.drift && repository.drift.length > 0 ? (
+                <>
+                  <h3>Drift</h3>
+                  <ul class="drift-list">
+                    {repository.drift.map((item) => (
+                      <li key={`${item.field}-${item.status}`} class={`drift-${item.status}`}>{driftLine(item)}</li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
             </section>
           ) : null}
           {agent ? (

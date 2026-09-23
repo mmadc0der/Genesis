@@ -116,8 +116,9 @@ or provider identity names. See [providers.md](providers.md).
 Repository intents (`ensure_repository`, `ensure_actions`,
 `ensure_bootstrap`, `ensure_secrets`, `ensure_protection`,
 `ensure_identities`, `retain_on_remove`) are not host intents. See
-[repositories.md](repositories.md). They are returned on the sync response
-and are not applied.
+[repositories.md](repositories.md). A repos sync may ask root to observe an
+adopted repository with GET requests only. Drift is planned on the sync
+response and is not applied.
 
 `host_mutation` is `"applied"` when at least one dedicated user was
 reconciled, otherwise `"none"`. `applied` lists `ensure_agent_user:<id>`.

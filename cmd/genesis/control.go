@@ -656,7 +656,10 @@ func (c *controlServer) listRules(r *http.Request) ([]listedRule, string) {
 
 type listedRepository struct {
 	repositoryDefinition
-	Presence string `json:"presence"`
+	Presence    string              `json:"presence"`
+	Observation string              `json:"observation,omitempty"`
+	Observed    *repositoryObserved `json:"observed,omitempty"`
+	Drift       []repositoryDrift   `json:"drift,omitempty"`
 }
 
 func (c *controlServer) handleRepositories(w http.ResponseWriter, r *http.Request) {
@@ -725,6 +728,7 @@ func (c *controlServer) listRepositories(r *http.Request) ([]listedRepository, b
 	for _, id := range ids {
 		out = append(out, byID[id])
 	}
+	out = c.annotateRepositoryObservation(out, state.Active)
 	active := false
 	switch {
 	case state.Desired != nil:
@@ -736,6 +740,50 @@ func (c *controlServer) listRepositories(r *http.Request) ([]listedRepository, b
 		active = err == nil && usable
 	}
 	return out, active, state.DesiredError
+}
+
+func (c *controlServer) annotateRepositoryObservation(listed []listedRepository, active *generationView) []listedRepository {
+	if c == nil || active == nil || strings.TrimSpace(c.dataDir) == "" {
+		return listed
+	}
+	journal, err := readRepositoryJournal(c.dataDir)
+	if err != nil || journal.Digest == "" {
+		return listed
+	}
+	digest, err := repositoryListDigest(active.Repositories)
+	if err != nil || digest != journal.Digest {
+		return listed
+	}
+	byID := observedByID(journal.Observed)
+	activeByID := map[string]repositoryDefinition{}
+	for _, repository := range active.Repositories {
+		activeByID[repository.ID] = repository
+	}
+	drift, _ := classifyRepositories(active.Repositories, byID)
+	driftByID := map[string][]repositoryDrift{}
+	for _, item := range drift {
+		driftByID[item.ID] = append(driftByID[item.ID], item)
+	}
+	for i := range listed {
+		definition, ok := activeByID[listed[i].ID]
+		if !ok {
+			continue
+		}
+		if observed, found := byID[definition.ID]; found {
+			copied := observed
+			listed[i].Observed = &copied
+			listed[i].Observation = observationObserved
+		} else if definition.Lifecycle.Existing != lifecycleExistingAdopt {
+			listed[i].Observation = observationObserved
+		} else {
+			continue
+		}
+		listed[i].Drift = driftByID[definition.ID]
+		if listed[i].Drift == nil {
+			listed[i].Drift = []repositoryDrift{}
+		}
+	}
+	return listed
 }
 
 func sameRepository(left, right repositoryDefinition) bool {

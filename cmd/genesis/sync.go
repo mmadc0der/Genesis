@@ -144,6 +144,16 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plan := buildPlan(next.agents, scope.Agents)
+	if scope.Repos && next.reposActive {
+		digest, digestErr := repositoryDigest(next.repos)
+		if digestErr != nil {
+			s.log().Error("sync repository digest", "error", digestErr, "digest", next.digest)
+			http.Error(w, "repository plan is invalid", http.StatusInternalServerError)
+			return
+		}
+		plan.ObserveRepositories = true
+		plan.RepositoryDigest = digest
+	}
 	grants, err := buildGrantPlan(plan, scope.Agents)
 	if err != nil {
 		s.log().Error("sync grant plan", "error", err, "digest", next.digest)
@@ -157,6 +167,36 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		s.log().Error("sync privileged coordinate", "error", err, "digest", next.digest)
 		http.Error(w, "privileged coordination failed", http.StatusInternalServerError)
 		return
+	}
+	if plan.ObserveRepositories {
+		again, againActive, againErr := loadRepositories(s.reposDir)
+		againDigest := ""
+		if againErr == nil && againActive {
+			againDigest, againErr = repositoryDigest(again)
+		}
+		if againErr != nil || !againActive || againDigest != plan.RepositoryDigest {
+			s.log().Error("sync repository observation", "error", errDesiredChanged, "digest", next.digest)
+			http.Error(w, "repository desired state changed during observation", http.StatusInternalServerError)
+			return
+		}
+		annotated, journal, applyErr := applyRepositoryObservation(repositoryPlan, result.RepositoryObservation, plan.RepositoryDigest)
+		if applyErr != nil {
+			s.log().Error("sync repository observation", "error", applyErr, "digest", next.digest)
+			http.Error(w, "repository plan is invalid", http.StatusInternalServerError)
+			return
+		}
+		if journal != nil {
+			dataDir := ""
+			if s.store != nil {
+				dataDir = s.store.dataDir
+			}
+			if writeErr := writeRepositoryJournal(dataDir, *journal); writeErr != nil {
+				s.log().Error("sync repository observation", "error", writeErr, "digest", next.digest)
+				http.Error(w, "repository observation journal failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		repositoryPlan = annotated
 	}
 	grants = attachGrantMaterial(grants, result)
 	if err := grantPlanIsInactive(grants); err != nil {
@@ -182,6 +222,8 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		"unsupported", len(result.Unsupported),
 		"retained", len(result.Retained),
 		"repository_remote_mutation", repositoryPlan.RemoteMutation,
+		"repository_observation", repositoryPlan.Observation,
+		"repository_drift", len(repositoryPlan.Drift),
 		"repository_unsupported", len(repositoryPlan.Unsupported),
 		"providers", len(next.providers),
 		"providers_active", next.providersActive,

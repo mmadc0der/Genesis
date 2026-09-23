@@ -41,8 +41,11 @@ type repositoryPlan struct {
 	Requested      bool                    `json:"requested"`
 	Active         bool                    `json:"active"`
 	RemoteMutation string                  `json:"remote_mutation"`
+	Observation    string                  `json:"observation,omitempty"`
 	Applied        []string                `json:"applied"`
 	Intents        []repositoryIntent      `json:"intents"`
+	Observed       []repositoryObserved    `json:"observed,omitempty"`
+	Drift          []repositoryDrift       `json:"drift,omitempty"`
 	Unsupported    []repositoryUnsupported `json:"unsupported"`
 }
 
@@ -134,6 +137,32 @@ func knownRepositoryIntent(kind string) bool {
 	default:
 		return false
 	}
+}
+
+func repositoryPlanIsReadOnly(plan repositoryPlan) error {
+	if plan.RemoteMutation != remoteMutationNone {
+		return fmt.Errorf("repository plan remote_mutation = %q", plan.RemoteMutation)
+	}
+	if len(plan.Applied) != 0 {
+		return fmt.Errorf("repository plan applied %d intents", len(plan.Applied))
+	}
+	if plan.Observation != observationObserved {
+		return repositoryPlanIsNotApplied(plan)
+	}
+	if plan.Observed == nil || plan.Drift == nil || plan.Unsupported == nil {
+		return fmt.Errorf("observed repository plan is incomplete")
+	}
+	for _, item := range plan.Drift {
+		switch item.Status {
+		case driftDrift, driftUnobservable, driftUnsupported:
+			if item.ID == "" || item.Field == "" {
+				return fmt.Errorf("repository drift entry is incomplete")
+			}
+		default:
+			return fmt.Errorf("repository drift status %q", item.Status)
+		}
+	}
+	return nil
 }
 
 func repositoryPlanIsNotApplied(plan repositoryPlan) error {

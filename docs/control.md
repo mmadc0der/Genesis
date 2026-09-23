@@ -84,9 +84,13 @@ desired YAML does not hide the active cache or the journals: `/api/state`
 still returns the active generation when the listener can, `/api/agents`, `/api/rules`, and `/api/repositories` return that cache with
 `desired_error` and HTTP 200, and `/api/runs` is read from disk either way.
 The UI keeps state, repositories, and runs when an agent, rule, or repository
-request fails. Repository records contain secret names only. The panel shows
-that a repository plan was not applied; Sync does not pretend a provider
-changed. Provider identity files are not served. Agent grants, when
+request fails. Repository records contain secret names only. When the
+observation journal digest matches the active repository list, each record
+also includes `observation`, the redacted `observed` GitHub view, and
+`drift` of that active declaration against the last read. A stale or
+missing journal omits those fields. The panel shows the observed id and
+the drift list. Sync does not apply drift: `remote_mutation` stays `none`.
+Provider identity files are not served. Agent grants, when
 present, show repository, git access, allowlisted permissions, and whether
 a credential is pending or unnecessary. They do not show provider identity
 records, secret references, or SSH private keys. Run stderr and result

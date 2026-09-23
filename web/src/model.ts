@@ -58,7 +58,7 @@ export function repositoryPolicy(repository: Pick<Repository, "lifecycle">): str
 export function repositorySyncNotice(status: number, body: string): string {
   if (status !== 200) return body.trim() || `Sync returned ${status}`;
   let parsed: {
-    repository_plan?: { remote_mutation?: string; applied?: unknown };
+    repository_plan?: { remote_mutation?: string; applied?: unknown; observation?: string };
     grant_plan?: {
       credential_active?: boolean;
       key_material?: string;
@@ -68,7 +68,7 @@ export function repositorySyncNotice(status: number, body: string): string {
   };
   try {
     parsed = JSON.parse(body) as {
-      repository_plan?: { remote_mutation?: string; applied?: unknown };
+      repository_plan?: { remote_mutation?: string; applied?: unknown; observation?: string };
       grant_plan?: {
         credential_active?: boolean;
         key_material?: string;
@@ -81,7 +81,9 @@ export function repositorySyncNotice(status: number, body: string): string {
   }
   const applied = parsed.repository_plan?.applied;
   if (parsed.repository_plan?.remote_mutation === "none" && Array.isArray(applied) && applied.length === 0) {
-    const base = "Synced agents, rules, and repositories. Repository plans were not applied to a provider.";
+    const base = parsed.repository_plan.observation === "observed"
+      ? "Synced agents, rules, and repositories. GitHub was read. Repository drift was planned and was not applied."
+      : "Synced agents, rules, and repositories. Repository plans were not applied to a provider.";
     const grant = parsed.grant_plan;
     if (!grant) return base;
     if (grant.credential_active) return "Sync completed, but a GitHub credential was reported active.";
@@ -117,6 +119,20 @@ export function githubGrantSummary(agent: Pick<Agent, "github">): string {
   if (grant.credential === "pending") credential = "credential pending";
   const detail = permissions ? `, ${permissions}` : "";
   return `GitHub ${grant.repository}, git ${grant.git}, ${credential}${detail}. Not activated.`;
+}
+
+export function repositoryObservationSummary(repository: Pick<Repository, "provider" | "observation" | "observed" | "drift">): string {
+  if (repository.observation === "observed" && repository.observed) {
+    const drifting = (repository.drift ?? []).filter((item) => item.status === "drift").length;
+    const fields = drifting === 1 ? "field" : "fields";
+    return `Observed GitHub repository ${repository.observed.repository_id}. ${drifting} drifting ${fields}. Nothing was changed.`;
+  }
+  return `Not observed. Genesis did not call ${repository.provider}.`;
+}
+
+export function driftLine(item: { field: string; status: string; desired?: string; observed?: string; reason?: string }): string {
+  const change = item.desired || item.observed ? `${item.desired || "—"} → ${item.observed || "—"}` : "";
+  return [item.field, item.status, change, item.reason].filter(Boolean).join(" · ");
 }
 
 export function secretNames(repository: Pick<Repository, "secrets">): string[] {

@@ -1,4 +1,7 @@
-# Example declaration only. Genesis does not call GitHub for this file.
+# Example declaration for octo-org/lab-widget. Genesis does not create it.
+# Without a reconciler key, observation stays unavailable and this file
+# is not applied. A configured reconciler that cannot see the repository
+# fails the sync and keeps the previous generation.
 # Secret names are references; values never belong in repos.d.
 provider: github
 org: octo-org

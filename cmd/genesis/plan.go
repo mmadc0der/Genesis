@@ -35,8 +35,10 @@ type privilegedIntent struct {
 }
 
 type privilegedPlan struct {
-	Intents []privilegedIntent `json:"intents"`
-	Agents  bool               `json:"agents,omitempty"`
+	Intents             []privilegedIntent `json:"intents"`
+	Agents              bool               `json:"agents,omitempty"`
+	ObserveRepositories bool               `json:"observe_repositories,omitempty"`
+	RepositoryDigest    string             `json:"repository_digest,omitempty"`
 }
 
 type unsupportedChange struct {
@@ -46,12 +48,13 @@ type unsupportedChange struct {
 }
 
 type coordinateResult struct {
-	HostMutation   string              `json:"host_mutation"`
-	Applied        []string            `json:"applied"`
-	Unsupported    []unsupportedChange `json:"unsupported"`
-	Retained       []string            `json:"retained,omitempty"`
-	Grants         []grantObservation  `json:"grants,omitempty"`
-	RetainedGrants []string            `json:"retained_grants,omitempty"`
+	HostMutation          string                       `json:"host_mutation"`
+	Applied               []string                     `json:"applied"`
+	Unsupported           []unsupportedChange          `json:"unsupported"`
+	Retained              []string                     `json:"retained,omitempty"`
+	Grants                []grantObservation           `json:"grants,omitempty"`
+	RetainedGrants        []string                     `json:"retained_grants,omitempty"`
+	RepositoryObservation *repositoryObservationResult `json:"repository_observation,omitempty"`
 }
 
 func buildPlan(agents map[string]agentDefinition, includeAgents bool) privilegedPlan {
@@ -108,6 +111,9 @@ func evaluatePlan(plan privilegedPlan) (coordinateResult, error) {
 		HostMutation: hostMutationNone,
 		Applied:      []string{},
 		Unsupported:  []unsupportedChange{},
+	}
+	if plan.ObserveRepositories {
+		result.RepositoryObservation = &repositoryObservationResult{Status: observationUnavailable}
 	}
 	for _, intent := range plan.Intents {
 		switch intent.Kind {

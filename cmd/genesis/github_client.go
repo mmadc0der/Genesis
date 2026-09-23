@@ -51,11 +51,12 @@ func githubKind(err error, kind string) bool {
 }
 
 type githubRegistrar struct {
-	baseURL   string
-	transport http.RoundTripper
-	now       func() time.Time
-	sleep     func(time.Duration)
-	resolve   func(context.Context, grantRegistration) (githubAppBinding, error)
+	baseURL     string
+	transport   http.RoundTripper
+	now         func() time.Time
+	sleep       func(time.Duration)
+	resolve     func(context.Context, grantRegistration) (githubAppBinding, error)
+	resolveRepo func(context.Context, repositoryDefinition) (githubAppBinding, error)
 }
 
 type githubAppBinding struct {
@@ -139,10 +140,11 @@ type githubClient struct {
 
 func newGitHubRegistrar(state *privilegedState) githubRegistrar {
 	return githubRegistrar{
-		baseURL:   defaultGitHubAPI,
-		transport: http.DefaultTransport,
-		now:       time.Now,
-		resolve:   state.resolveReconcilerApp,
+		baseURL:     defaultGitHubAPI,
+		transport:   http.DefaultTransport,
+		now:         time.Now,
+		resolve:     state.resolveReconcilerApp,
+		resolveRepo: state.resolveReconcilerRepository,
 	}
 }
 

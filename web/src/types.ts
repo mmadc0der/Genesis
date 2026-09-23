@@ -63,6 +63,43 @@ export interface Repository {
   };
   identities?: Array<{ name: string; role: string }>;
   presence: Presence;
+  observation?: string;
+  observed?: RepositoryObserved;
+  drift?: RepositoryDrift[];
+}
+
+export interface RepositoryObserved {
+  id: string;
+  org: string;
+  name: string;
+  repository_id: number;
+  node_id: string;
+  observed_at?: string;
+  visibility: string;
+  description: string;
+  default_branch: string;
+  archived: boolean;
+  features: { issues: boolean; wiki: boolean; projects: boolean };
+  merge: {
+    allow_squash: boolean;
+    allow_merge_commit: boolean;
+    allow_rebase: boolean;
+    delete_branch_on_merge: boolean;
+  };
+  actions_status: string;
+  actions_enabled?: boolean;
+  actions_allowed?: string;
+  ruleset_status: string;
+  branch_status: string;
+}
+
+export interface RepositoryDrift {
+  id: string;
+  field: string;
+  desired?: string;
+  observed?: string;
+  status: string;
+  reason?: string;
 }
 
 export type Presence = "active" | "draft" | "active_only" | "unknown";

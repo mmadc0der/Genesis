@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyPanelLoad, buildMessage, driftLabel, eventLine, githubGrantSummary, maxCursor, mergeEvents, repositoryLabel, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
+import { applyPanelLoad, buildMessage, driftLabel, driftLine, eventLine, githubGrantSummary, maxCursor, mergeEvents, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
 import type { Agent, ControlState, LifecycleEvent, Repository, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
@@ -155,6 +155,13 @@ describe("control panel model", () => {
     expect(secretNames(previousRepository)).toEqual(["DEEPSEEK_API_KEY", "ci:CI_BOT_TOKEN"]);
     expect(repositorySyncNotice(200, JSON.stringify({ repository_plan: { remote_mutation: "none", applied: [] } }))).toContain(
       "not applied",
+    );
+    expect(repositorySyncNotice(200, JSON.stringify({ repository_plan: { remote_mutation: "none", applied: [], observation: "observed" } }))).toContain(
+      "was not applied",
+    );
+    expect(repositoryObservationSummary(previousRepository)).toContain("did not call github");
+    expect(driftLine({ field: "settings.visibility", status: "drift", desired: "private", observed: "public" })).toContain(
+      "private → public",
     );
     expect(repositorySyncNotice(200, JSON.stringify({ repository_plan: { remote_mutation: "applied", applied: ["ensure_repository:lab"] } }))).toContain(
       "did not confirm",
