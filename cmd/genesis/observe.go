@@ -27,9 +27,11 @@ type ruleView struct {
 }
 
 type generationView struct {
-	Digest string      `json:"digest"`
-	Agents []agentView `json:"agents"`
-	Rules  []ruleView  `json:"rules"`
+	Digest             string                 `json:"digest"`
+	Agents             []agentView            `json:"agents"`
+	Rules              []ruleView             `json:"rules"`
+	Repositories       []repositoryDefinition `json:"repositories"`
+	RepositoriesActive bool                   `json:"repositories_active"`
 	// Listener flags. Omitted on a file snapshot, which is not a process.
 	SyncConfigured *bool `json:"sync_configured,omitempty"`
 	Syncing        *bool `json:"syncing,omitempty"`
@@ -64,11 +66,13 @@ func (s *eventServer) handleGeneration(w http.ResponseWriter, r *http.Request) {
 
 func generationSnapshot(current *generation, syncConfigured, syncing bool) generationView {
 	view := generationView{
-		Digest:         current.digest,
-		Agents:         make([]agentView, 0, len(current.agents)),
-		Rules:          make([]ruleView, 0, len(current.rules)),
-		SyncConfigured: boolPtr(syncConfigured),
-		Syncing:        boolPtr(syncing),
+		Digest:             current.digest,
+		Agents:             make([]agentView, 0, len(current.agents)),
+		Rules:              make([]ruleView, 0, len(current.rules)),
+		Repositories:       canonicalRepositories(current.repos),
+		RepositoriesActive: current.reposActive,
+		SyncConfigured:     boolPtr(syncConfigured),
+		Syncing:            boolPtr(syncing),
 	}
 	ids := make([]string, 0, len(current.agents))
 	for id := range current.agents {

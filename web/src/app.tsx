@@ -9,11 +9,15 @@ import {
   mergeEvents,
   mergeRuns,
   presenceLabel,
+  repositoryLabel,
+  repositoryPolicy,
+  repositorySyncNotice,
+  secretNames,
   shortDigest,
   type PanelSnapshot,
   type Settled,
 } from "./model";
-import type { Agent, ControlState, EventsPage, LifecycleEvent, LiveFrame, LiveOp, Rule, RunDetail, RunSummary } from "./types";
+import type { Agent, ControlState, EventsPage, LifecycleEvent, LiveFrame, LiveOp, Repository, Rule, RunDetail, RunSummary } from "./types";
 
 function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
   return promise.then(
@@ -29,10 +33,12 @@ export function App() {
   const [state, setState] = useState<ControlState | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
+  const [repositories, setRepositories] = useState<Repository[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selectedRun, setSelectedRun] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("");
   const [selectedRule, setSelectedRule] = useState("");
+  const [selectedRepository, setSelectedRepository] = useState("");
   const [events, setEvents] = useState<LifecycleEvent[]>([]);
   const [cursor, setCursor] = useState("0");
   const [detail, setDetail] = useState<RunDetail | null>(null);
@@ -45,7 +51,7 @@ export function App() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [connected, setConnected] = useState(false);
   const [problems, setProblems] = useState<string[]>([]);
-  const snapshotRef = useRef<PanelSnapshot>({ state: null, agents: [], rules: [], runs: [], problems: [] });
+  const snapshotRef = useRef<PanelSnapshot>({ state: null, agents: [], rules: [], repositories: [], runs: [], problems: [] });
   const selectedRunRef = useRef("");
   const cursorRef = useRef("0");
   const subsRef = useRef<LiveOp[]>([]);
@@ -56,22 +62,25 @@ export function App() {
   cursorRef.current = cursor;
 
   async function refreshCatalog() {
-    const [stateLoad, agentLoad, ruleLoad, runLoad] = await Promise.all([
+    const [stateLoad, agentLoad, ruleLoad, repositoryLoad, runLoad] = await Promise.all([
       settle(getJSON<ControlState>("/api/state")),
       settle(getJSON<{ agents: Agent[] }>("/api/agents")),
       settle(getJSON<{ rules: Rule[] }>("/api/rules")),
+      settle(getJSON<{ repositories: Repository[]; desired_error?: string }>("/api/repositories")),
       settle(getJSON<{ runs: RunSummary[] }>("/api/runs")),
     ]);
     const next = applyPanelLoad(snapshotRef.current, {
       state: stateLoad,
       agents: agentLoad,
       rules: ruleLoad,
+      repositories: repositoryLoad,
       runs: runLoad,
     });
     snapshotRef.current = next;
     setState(next.state);
     setAgents(next.agents);
     setRules(next.rules);
+    setRepositories(next.repositories);
     setRuns(next.runs);
     setProblems(next.problems);
   }
@@ -184,6 +193,8 @@ export function App() {
 
   const rule = rules.find((item) => item.name === selectedRule);
   const agent = agents.find((item) => item.id === (selectedAgent || detail?.agent || rule?.agent));
+  const repository = repositories.find((item) => item.id === selectedRepository);
+  const repositoryLayerActive = Boolean(state?.desired?.repositories_active || state?.active?.repositories_active);
   const visibleRuns = runs.filter((run) => {
     if (selectedRule && run.rule !== selectedRule) return false;
     if (selectedAgent && run.agent !== selectedAgent) return false;
@@ -194,12 +205,8 @@ export function App() {
     setBusy(true);
     setNotice("");
     try {
-      const result = await postText("/api/sync", "application/json", JSON.stringify({ scope: ["agents", "rules"] }));
-      if (result.status === 200) {
-        setNotice("Synced agents and rules into the active generation.");
-      } else {
-        setNotice(result.text.trim() || `Sync returned ${result.status}`);
-      }
+      const result = await postText("/api/sync", "application/json", JSON.stringify({ scope: ["agents", "rules", "repos"] }));
+      setNotice(repositorySyncNotice(result.status, result.text));
       await refreshCatalog();
     } catch (reason) {
       setNotice(reason instanceof Error ? reason.message : "Sync failed");
@@ -248,6 +255,7 @@ export function App() {
     const next = rules.find((item) => item.name === name);
     setSelectedRule(name);
     setSelectedAgent("");
+    setSelectedRepository("");
     setEventType(next?.match.type ?? "");
     setEventSource(next?.match.source ?? "");
     setEventSubject(next?.match.subject ?? "");
@@ -258,7 +266,7 @@ export function App() {
     <div class={`shell ${railOpen ? "show-rail" : ""} ${drawerOpen ? "show-drawer" : ""}`}>
       <header class="topbar">
         <button type="button" class="text" onClick={() => setRailOpen((open) => !open)} aria-expanded={railOpen}>
-          Agents
+          Config
         </button>
         <strong>Genesis</strong>
         <span class={`pill drift-${state?.drift ?? "unknown"}`}>{driftLabel(state?.drift)}</span>
@@ -308,6 +316,7 @@ export function App() {
                 onClick={() => {
                   setSelectedAgent(item.id);
                   setSelectedRule("");
+                  setSelectedRepository("");
                   setRailOpen(false);
                 }}
               >
@@ -335,6 +344,40 @@ export function App() {
                 <span>
                   <strong>{item.match.type || item.name}</strong>
                   <small>{item.name} → {item.agent}</small>
+                </span>
+                <em class={`presence presence-${item.presence}`}>{presenceLabel(item.presence)}</em>
+              </button>
+            ))}
+          </section>
+          <section>
+            <h2>Repositories</h2>
+            {repositories.length === 0 ? (
+              <p class="empty">
+                {problems.some((item) => item.toLowerCase().includes("repositor"))
+                  ? "Repositories could not be loaded."
+                  : state?.desired_error
+                    ? "Desired repositories could not be validated."
+                    : repositoryLayerActive
+                      ? "No repositories in repos.d."
+                      : "repos.d is absent. Declarations stay inactive until that directory exists."}
+              </p>
+            ) : null}
+            {repositories.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                class={item.id === selectedRepository ? "row selected" : "row"}
+                onClick={() => {
+                  setSelectedRepository(item.id);
+                  setSelectedAgent("");
+                  setSelectedRule("");
+                  setRailOpen(false);
+                  setDrawerOpen(true);
+                }}
+              >
+                <span>
+                  <strong>{repositoryLabel(item)}</strong>
+                  <small>{item.id} · {repositoryPolicy(item)}</small>
                 </span>
                 <em class={`presence presence-${item.presence}`}>{presenceLabel(item.presence)}</em>
               </button>
@@ -380,6 +423,7 @@ export function App() {
                     onClick={() => {
                       setSelectedRule("");
                       setSelectedAgent("");
+                      setSelectedRepository("");
                     }}
                   >
                     Clear filter
@@ -433,6 +477,37 @@ export function App() {
           ) : (
             <p class="empty">Select a run to see its journal summary.</p>
           )}
+          {repository ? (
+            <section>
+              <h3>{repositoryLabel(repository)}</h3>
+              <p>Not applied. Genesis did not call {repository.provider}.</p>
+              <dl>
+                <dt>Id</dt>
+                <dd class="mono">{repository.id}</dd>
+                <dt>Provider</dt>
+                <dd>{repository.provider}</dd>
+                <dt>Policy</dt>
+                <dd>{repositoryPolicy(repository)}</dd>
+                <dt>Visibility</dt>
+                <dd>{repository.settings.visibility}</dd>
+                <dt>Branch</dt>
+                <dd class="mono">{repository.settings.default_branch}</dd>
+                <dt>Actions</dt>
+                <dd>{repository.actions.enabled ? repository.actions.allowed : "disabled"}</dd>
+                <dt>Bootstrap</dt>
+                <dd class="mono">{repository.bootstrap?.template || "none"}</dd>
+                <dt>Secrets</dt>
+                <dd>{secretNames(repository).join(", ") || "none"}</dd>
+                <dt>Ruleset</dt>
+                <dd>{repository.protection?.ruleset.name || "none"}</dd>
+                <dt>Identities</dt>
+                <dd>
+                  {repository.identities?.map((identity) => `${identity.name} (${identity.role})`).join(", ") || "none"}
+                </dd>
+              </dl>
+              {repository.settings.description ? <p>{repository.settings.description}</p> : null}
+            </section>
+          ) : null}
           {agent ? (
             <section>
               <h3>{agent.id}</h3>

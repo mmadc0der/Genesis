@@ -1,0 +1,48 @@
+# Example declaration only. Genesis does not call GitHub for this file.
+# Secret names are references; values never belong in repos.d.
+provider: github
+org: octo-org
+name: lab-widget
+lifecycle:
+  remove: retain
+  existing: adopt
+settings:
+  visibility: private
+  description: Lab widget service. This declaration is not applied.
+  default_branch: main
+  features:
+    issues: true
+    wiki: false
+    projects: false
+  merge:
+    allow_squash: true
+    allow_merge_commit: false
+    allow_rebase: false
+    delete_branch_on_merge: true
+bootstrap:
+  template: lab-widget
+actions:
+  enabled: true
+  allowed: selected
+  selected:
+    - actions/checkout@v4
+secrets:
+  repository:
+    - DEEPSEEK_API_KEY
+  environments:
+    - name: ci
+      secrets:
+        - CI_BOT_TOKEN
+protection:
+  ruleset:
+    name: protect-main
+    required_approving_reviews: 1
+    dismiss_stale_reviews: true
+    required_checks:
+      - ci
+    strict_checks: true
+identities:
+  - name: reviewer
+    role: reviewer
+  - name: programmer
+    role: programmer

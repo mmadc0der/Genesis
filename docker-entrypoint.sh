@@ -1,7 +1,9 @@
 #!/bin/sh
 # Seed /var/lib/genesis/config from image defaults.
 # Missing default YAML files are copied onto an existing named volume so image
-# upgrades can deliver newly shipped agents and rules. Existing files, including
+# upgrades can deliver newly shipped agents and rules. repos.d is created when
+# missing; image defaults are copied only if that directory exists in the image.
+# Existing files, including
 # dangling or live dest symlinks, are left unchanged. Only regular files with
 # valid agent/rule names are copied; source and dest directories must not be
 # symlinks. Run as root before launch.
@@ -12,6 +14,7 @@ data="${GENESIS_DATA_DIR:-/var/lib/genesis/data}"
 defaults="${GENESIS_DEFAULTS_DIR:-/usr/share/genesis/defaults}"
 agents="$config/agents.d"
 rules="$config/rules.d"
+repos="$config/repos.d"
 
 require_real_dir() {
 	path=$1
@@ -113,11 +116,12 @@ fi
 if [ -e "$data" ] || [ -L "$data" ]; then
 	require_real_dir "$data" "data root"
 fi
-mkdir -p "$agents" "$rules" "$data/runs"
+mkdir -p "$agents" "$rules" "$repos" "$data/runs"
 require_real_dir "$config" "config root"
 require_real_dir "$data" "data root"
 copy_missing "$defaults/agents.d" "$agents"
 copy_missing "$defaults/rules.d" "$rules"
+copy_missing "$defaults/repos.d" "$repos"
 
 if [ "${1:-}" = "seed-config" ]; then
 	exit 0

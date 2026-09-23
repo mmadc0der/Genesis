@@ -43,7 +43,7 @@ export GENESIS_SYNC_TOKEN='replace-with-a-local-sync-token'
 mkdir -p bin
 go build -o bin/genesis ./cmd/genesis
 uv run --locked ./bin/genesis launch \
-  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d -data genesis-data
+  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d -repos repos.d -data genesis-data
 ```
 
 `genesis -listen ...` still runs the listener in this process. `launch` is
@@ -76,7 +76,7 @@ npm run build --prefix web
 ./bin/genesis control \
   -listen 127.0.0.1:8790 \
   -listener http://127.0.0.1:8787 \
-  -agents agents.d -rules rules.d -data genesis-data \
+  -agents agents.d -rules rules.d -repos repos.d -data genesis-data \
   -web web/dist
 ```
 
@@ -159,6 +159,29 @@ urn:genesis:control`, `subject: designer`) and puts the composer text in
 
 The rule name is its filename. Rules have no `cwd`, environment, arguments,
 prompt, model, executable, or other run configuration.
+
+## Repositories
+
+`repos.d` is optional desired GitHub state. A missing directory leaves the
+layer inactive and does not change the agent/rule digest. The committed
+`repos.d/example.yaml` is a declaration for `octo-org/lab-widget`; Genesis
+does not call GitHub, mint credentials, or mutate a remote. Sync returns a
+repository plan with `remote_mutation: none` and every intent unsupported.
+Schema, closed paths, and the next slice are in
+[docs/repositories.md](docs/repositories.md).
+
+The policy header looks like this. The complete file, including settings,
+bootstrap, Actions, secret names, ruleset intent, and runtime identities, is
+`repos.d/example.yaml`.
+
+```yaml
+provider: github
+org: octo-org
+name: lab-widget
+lifecycle:
+  remove: retain
+  existing: adopt
+```
 
 Genesis itself can start without a key, which keeps configuration checks and
 credential-free tests usable. A matching real SDK run without a key fails
@@ -433,14 +456,19 @@ one) to evaluate a typed host plan. It does not scan the filesystem on
 curl -i http://127.0.0.1:8787/sync \
   -H "Authorization: Bearer $GENESIS_SYNC_TOKEN" \
   -H 'Content-Type: application/json' \
-  --data '{"scope":["agents","rules"]}'
+  --data '{"scope":["agents","rules","repos"]}'
 ```
 
-`scope` is optional. `["rules"]` or `["agents"]` rereads only that directory.
+`scope` is optional. Omitted, it rereads agents, rules, and repositories.
+`["rules"]`, `["agents"]`, or `["repos"]` rereads only that directory.
 That is not host/matcher atomicity: a rules-only sync can activate new rules
 against previously cached agents while a newly written agent file stays
 invisible. Invalid YAML or a broken privileged socket leaves the previous
-cache in place. Dedicated `user` accounts are reconciled only on a full or
+cache in place. A repository sync validates `repos.d` and records a plan; it
+does not create, adopt, or edit a GitHub repository. Invalid repository YAML
+returns `repositories are invalid` and keeps the previous cache.
+
+Dedicated `user` accounts are reconciled only on a full or
 agents sync, and only when `genesis launch` is root. If that recon fails, the
 matcher cache is not swapped. Removing an agent file does not `userdel` or
 delete homes. Shared-UID agents still report `unsupported` cwd/home and env
@@ -467,6 +495,8 @@ volume. Existing files are left unchanged, including operator-edited janitor
 or rule YAML on a reused volume, and dest symlinks are not written through.
 Only regular files with valid agent/rule names are copied. That is how an
 image upgrade can deliver `designer.yaml` without overwriting desired config.
+The entrypoint also creates `repos.d` when it is missing. This image does not
+seed a repository declaration; an empty `repos.d` is an active, empty layer.
 A deleted default filename is copied again; file contents are never replaced.
 Ownership passes skip non-regular files so a planted volume symlink cannot
 redirect root `chown`/`chmod`. The genesis

@@ -23,12 +23,12 @@ Start the listener first, then the panel. Both default to loopback.
 ```sh
 export GENESIS_SYNC_TOKEN='replace-with-a-local-sync-token'
 uv run --locked ./bin/genesis launch \
-  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d -data genesis-data
+  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d -repos repos.d -data genesis-data
 
 ./bin/genesis control \
   -listen 127.0.0.1:8790 \
   -listener http://127.0.0.1:8787 \
-  -agents agents.d -rules rules.d -data genesis-data \
+  -agents agents.d -rules rules.d -repos repos.d -data genesis-data \
   -web web/dist
 ```
 
@@ -48,7 +48,7 @@ YAML or swap the cache.
 | Method | Path | Body |
 |---|---|---|
 | `GET` | `/health` | `{"ok":true}` |
-| `GET` | `/generation` | active agents, rules, digest, `sync_configured`, `syncing` |
+| `GET` | `/generation` | active agents, rules, repositories, digest, `repositories_active`, `sync_configured`, `syncing` |
 
 `sync_configured` is a boolean. The token is not in the payload.
 
@@ -67,6 +67,8 @@ authoritative and the socket is not.
 | `GET` | `/api/agents/{id}` | one agent |
 | `GET` | `/api/rules` | rules, same presence rules |
 | `GET` | `/api/rules/{file}` | one rule |
+| `GET` | `/api/repositories` | repositories from disk union the active cache, with `presence` and `repositories_active` |
+| `GET` | `/api/repositories/{id}` | one repository |
 | `GET` | `/api/runs?limit=` | recent run summaries from `events.jsonl` |
 | `GET` | `/api/runs/{id}` | summary, event count, redacted `result.json`, stderr tail |
 | `GET` | `/api/runs/{id}/events?after=&limit=` | journal lines with `sequence` greater than `after` |
@@ -79,10 +81,12 @@ new), `active_only` (cached, file gone), or `unknown` (listener not readable).
 Desired state remains the YAML files. The panel does not edit them. Agent
 records include optional `user` and `setup` from those files. Invalid
 desired YAML does not hide the active cache or the journals: `/api/state`
-still returns the active generation when the listener can, `/api/agents` and
-`/api/rules` return that cache with `desired_error` and HTTP 200, and
-`/api/runs` is read from disk either way. The UI keeps state and runs when an
-agent or rule request fails.
+still returns the active generation when the listener can, `/api/agents`, `/api/rules`, and `/api/repositories` return that cache with
+`desired_error` and HTTP 200, and `/api/runs` is read from disk either way.
+The UI keeps state, repositories, and runs when an agent, rule, or repository
+request fails. Repository records contain secret names only. The panel shows
+that a repository plan was not applied; Sync does not pretend a provider
+changed.
 `sync_configured` and `syncing` are listener facts on `active` and
 `listener`; a file snapshot omits them.
 
@@ -101,9 +105,10 @@ Shared listener UID. After it writes YAML, click Sync. See
 [designer.md](designer.md).
 
 `POST /api/sync` always requires `Content-Type: application/json` and one JSON
-object (`{}` selects both scopes). A missing media type is 415. Arrays, null,
-strings, empty bodies, unknown fields, trailing values, and unknown scope
-names are 400 and are not forwarded.
+object (`{}` selects agents, rules, and repos). A missing media type is 415.
+Arrays, null, strings, empty bodies, unknown fields, trailing values, and
+unknown scope names are 400 and are not forwarded. `repos` is a scope name.
+See [repositories.md](repositories.md).
 
 `GET /generation` is read up to 32 MiB. A larger body is
 `generation_too_large` with the listener still marked reachable. A connection
