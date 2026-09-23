@@ -22,17 +22,21 @@ RUN uv sync --locked --no-dev --compile-bytecode
 
 FROM python:3.12-bookworm
 RUN useradd --create-home --uid 65532 --shell /usr/sbin/nologin genesis \
-	&& mkdir -p /var/lib/genesis/config /var/lib/genesis/data /usr/share/genesis/defaults /usr/share/genesis/web
+	&& mkdir -p /var/lib/genesis/config /var/lib/genesis/data /usr/share/genesis/defaults /usr/share/genesis/web /etc/genesis/providers.d
 WORKDIR /app
 COPY --from=build /out/genesis /usr/local/bin/genesis
 COPY --from=python-deps /app/.venv /app/.venv
 COPY --from=web /src/dist /usr/share/genesis/web
 COPY agents.d /usr/share/genesis/defaults/agents.d
 COPY rules.d /usr/share/genesis/defaults/rules.d
+COPY providers.d /etc/genesis/providers.d
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/genesis /usr/local/bin/docker-entrypoint.sh \
-	&& chmod -R a+rX /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web \
+	&& chmod -R a+rX /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web /etc/genesis/providers.d \
 	&& chmod -R go-w /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web \
+	&& chown -R root:root /etc/genesis \
+	&& chmod 0755 /etc/genesis /etc/genesis/providers.d \
+	&& chmod 0644 /etc/genesis/providers.d/* \
 	&& chown -R genesis:genesis /var/lib/genesis
 ENV PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 ENV GENESIS_LISTENER_USER=genesis
@@ -44,4 +48,4 @@ EXPOSE 8790
 # the control process; see compose.yaml.
 USER root
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["launch", "-listen", "0.0.0.0:8787", "-agents", "/var/lib/genesis/config/agents.d", "-rules", "/var/lib/genesis/config/rules.d", "-repos", "/var/lib/genesis/config/repos.d", "-data", "/var/lib/genesis/data", "-listener-user", "genesis"]
+CMD ["launch", "-listen", "0.0.0.0:8787", "-agents", "/var/lib/genesis/config/agents.d", "-rules", "/var/lib/genesis/config/rules.d", "-repos", "/var/lib/genesis/config/repos.d", "-providers", "/etc/genesis/providers.d", "-data", "/var/lib/genesis/data", "-listener-user", "genesis"]

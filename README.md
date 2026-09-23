@@ -43,7 +43,7 @@ export GENESIS_SYNC_TOKEN='replace-with-a-local-sync-token'
 mkdir -p bin
 go build -o bin/genesis ./cmd/genesis
 uv run --locked ./bin/genesis launch \
-  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d -repos repos.d -data genesis-data
+  -listen 127.0.0.1:8787 -agents agents.d -rules rules.d -repos repos.d -providers providers.d -data genesis-data
 ```
 
 `genesis -listen ...` still runs the listener in this process. `launch` is
@@ -76,7 +76,7 @@ npm run build --prefix web
 ./bin/genesis control \
   -listen 127.0.0.1:8790 \
   -listener http://127.0.0.1:8787 \
-  -agents agents.d -rules rules.d -repos repos.d -data genesis-data \
+  -agents agents.d -rules rules.d -repos repos.d -providers providers.d -data genesis-data \
   -web web/dist
 ```
 
@@ -169,6 +169,28 @@ does not call GitHub, mint credentials, or mutate a remote. Sync returns a
 repository plan with `remote_mutation: none` and every intent unsupported.
 Schema, closed paths, and the next slice are in
 [docs/repositories.md](docs/repositories.md).
+
+## Providers
+
+`providers.d` is optional root-owned GitHub identity state. A missing
+directory leaves the layer inactive and does not change the agent/rule
+digest. Files name one GitHub organization, named identities, and secret
+references. They never contain secret values. The directory must sit
+outside the designer-writable config volume. Docker reads it from
+`/etc/genesis/providers.d` and does not copy it into `genesis-config`.
+
+An agent may declare an optional `github` capability: a `repos.d`
+repository, a non-reconciler identity, git access `none`/`read`/`write`,
+and allowlisted API permissions. The designer agent cannot. Reconciler
+identities, administration, secrets, and unsafe role combinations fail
+closed. Public read can use a reader identity with `credential: none`.
+
+Sync returns a `grant_plan` whose `credential_active` is false. Key
+material stays `pending` or `none`, and remote registration stays
+`unsupported`. Genesis does not mint an App JWT, an installation token, or
+an SSH key, and it does not inject a GitHub credential. Control APIs do
+not return provider secret references or identity records. Schema and the
+stage 2B seam are in [docs/providers.md](docs/providers.md).
 
 The policy header looks like this. The complete file, including settings,
 bootstrap, Actions, secret names, ruleset intent, and runtime identities, is

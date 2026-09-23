@@ -156,6 +156,10 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 				Reason: "env is a process map, not a package graph; Genesis does not install runtimes or packages",
 			})
 		default:
+			if change, ok := classifyGrantIntent(intent); ok {
+				result.Unsupported = append(result.Unsupported, change)
+				continue
+			}
 			return coordinateResult{}, fmt.Errorf("unknown privileged intent kind %q", intent.Kind)
 		}
 	}

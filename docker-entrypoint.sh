@@ -3,6 +3,8 @@
 # Missing default YAML files are copied onto an existing named volume so image
 # upgrades can deliver newly shipped agents and rules. repos.d is created when
 # missing; image defaults are copied only if that directory exists in the image.
+# providers.d is not seeded. It stays outside this volume, root-owned, at the
+# path passed as -providers.
 # Existing files, including
 # dangling or live dest symlinks, are left unchanged. Only regular files with
 # valid agent/rule names are copied; source and dest directories must not be

@@ -280,7 +280,7 @@ func TestRepositorySchemaAndClosedPaths(t *testing.T) {
 	}
 	if _, err := digestGeneration(map[string]agentDefinition{
 		"ok": {Instructions: "bad\xff", Cwd: "/tmp/a", Home: "/tmp/b"},
-	}, nil, nil, false); err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
+	}, nil, nil, false, nil, false); err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
 		t.Fatalf("digest utf-8 = %v", err)
 	}
 	agentsDir := t.TempDir()
@@ -292,14 +292,14 @@ func TestRepositorySchemaAndClosedPaths(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), linkRepos); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadGeneration(agentsDir, rulesDir, linkRepos); err == nil || !strings.Contains(err.Error(), "symlink") {
+	if _, err := loadGeneration(agentsDir, rulesDir, linkRepos, ""); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("symlink generation = %v", err)
 	}
 	usable, err := repositoryDirectoryUsable(linkRepos)
 	if err == nil || usable || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("usable symlink = %v %v", usable, err)
 	}
-	inactive, err := loadGeneration(agentsDir, rulesDir, filepath.Join(t.TempDir(), "missing"))
+	inactive, err := loadGeneration(agentsDir, rulesDir, filepath.Join(t.TempDir(), "missing"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestAbsentRepositoryDirectoryPreservesDigest(t *testing.T) {
 		Match: map[string]string{"type": "dev.genesis.run"},
 		Agent: "ok",
 	})
-	inactive, err := loadGeneration(agentsDir, rulesDir, filepath.Join(t.TempDir(), "missing-repos"))
+	inactive, err := loadGeneration(agentsDir, rulesDir, filepath.Join(t.TempDir(), "missing-repos"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestAbsentRepositoryDirectoryPreservesDigest(t *testing.T) {
 	if inactive.digest != want {
 		t.Fatalf("absent repos.d digest = %s, want %s", inactive.digest, want)
 	}
-	present, err := loadGeneration(agentsDir, rulesDir, t.TempDir())
+	present, err := loadGeneration(agentsDir, rulesDir, t.TempDir(), "")
 	if err != nil {
 		t.Fatal(err)
 	}

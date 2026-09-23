@@ -36,6 +36,7 @@ services:
           -agents /var/lib/genesis/config/agents.d \
           -rules /var/lib/genesis/config/rules.d \
           -repos /var/lib/genesis/config/repos.d \
+          -providers /etc/genesis/providers.d \
           -data /var/lib/genesis/data \
           -web /usr/share/genesis/web
     ports:

@@ -138,7 +138,10 @@ desired YAML still returns the active cache and `desired_error`.
 
 ## Next slice
 
-Add a fake provider driver and an observed-status record that accepts this
-plan and returns per-intent results without a network call, credential, or
-remote id. Live installation-token resolve and create stays behind that
-seam.
+Repository apply is still not implemented. Provider identity files and
+agent-to-repository grants are specified in [providers.md](providers.md).
+That stage plans local grant and credential intents and leaves key material
+pending. Stage 2B is the seam that may mint an App JWT or installation
+token and register a remote key. It must not run as part of repository
+apply, and `credential_active` stays false until a child actually receives
+a usable credential.

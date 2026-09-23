@@ -17,9 +17,11 @@ panel Details row is **Shared listener UID**. Output files it creates under
 the config volume are owned by `genesis`. That is expected, not a dedicated-user
 proof.
 
-The designer may create or update agent and rule YAML. It must not run
-privileged host setup, `useradd`, package installs, or arbitrary root
-actions. YAML still cannot name packages or commands. After it writes files,
+The designer may create or update agent, rule, and repository YAML. It must
+not add a `github` block to itself, and it must not create `providers.d`
+inside the config volume. Provider identities live outside that volume;
+see [providers.md](providers.md). It must not run privileged host setup,
+`useradd`, package installs, or arbitrary root actions. YAML still cannot name packages or commands. After it writes files,
 an operator must **Sync** (`POST /sync` with both `agents` and `rules`).
 Disk edits stay inactive until then. Matching active/draft digests only
 mean the cache equals the files currently on the volume.

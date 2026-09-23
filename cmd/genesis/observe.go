@@ -18,6 +18,7 @@ type agentView struct {
 	Setup        *agentSetup       `json:"setup,omitempty"`
 	Env          map[string]string `json:"env"`
 	Secrets      []string          `json:"secrets"`
+	GitHub       *agentGitHubView  `json:"github,omitempty"`
 }
 
 type ruleView struct {
@@ -114,6 +115,7 @@ func agentViewFrom(definition agentDefinition) agentView {
 		Setup:        cloneAgentSetup(definition.Setup),
 		Env:          env,
 		Secrets:      append([]string(nil), secrets...),
+		GitHub:       gitHubViewFrom(definition),
 	}
 }
 

@@ -1,0 +1,20 @@
+# Root-owned GitHub provider identities. This file is not applied.
+# Secret fields are references. Values, PEMs, and tokens do not belong here.
+provider: github
+org: octo-org
+identities:
+  - name: reconciler
+    role: reconciler
+    credential: app
+    secret: GITHUB_APP_RECONCILER_PEM
+  - name: programmer
+    role: programmer
+    credential: app
+    secret: GITHUB_APP_PROGRAMMER_PEM
+  - name: reviewer
+    role: reviewer
+    credential: app
+    secret: GITHUB_APP_REVIEWER_PEM
+  - name: public
+    role: reader
+    credential: none

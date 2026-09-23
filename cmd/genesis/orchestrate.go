@@ -24,7 +24,7 @@ type listenerIdentity struct {
 	Groups   []uint32
 }
 
-func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, dataDir, syncToken, listenerUser string) {
+func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken, listenerUser string) {
 	identity, err := resolveListenerIdentity(os.Geteuid(), listenerUser)
 	if err != nil {
 		fail(logger, "resolve listener user", err)
@@ -68,6 +68,12 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, dataD
 		parent.Close()
 		fail(logger, "resolve repos directory", err)
 	}
+	absoluteProvidersDir, err := resolveOptionalDir(providersDir)
+	if err != nil {
+		child.Close()
+		parent.Close()
+		fail(logger, "resolve providers directory", err)
+	}
 	absoluteDataDir, err := filepath.Abs(dataDir)
 	if err != nil {
 		child.Close()
@@ -80,13 +86,13 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, dataD
 		listenerName = identity.Username
 	}
 	state := newPrivilegedState(logger, pythonPath, embeddedPythonRunner, listenerName, absoluteDataDir)
-	agents, err := loadAgents(absoluteAgentsDir)
+	loaded, err := loadGeneration(absoluteAgentsDir, absoluteRulesDir, absoluteReposDir, absoluteProvidersDir)
 	if err != nil {
 		child.Close()
 		parent.Close()
 		fail(logger, "load agents for privileged reconcile", err)
 	}
-	if _, err := executePlan(buildPlan(agents, true), state); err != nil {
+	if _, err := executePlan(buildPlan(loaded.agents, true), state); err != nil {
 		child.Close()
 		parent.Close()
 		fail(logger, "reconcile dedicated agent users", err)
@@ -97,6 +103,7 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, dataD
 		"-agents", absoluteAgentsDir,
 		"-rules", absoluteRulesDir,
 		"-repos", absoluteReposDir,
+		"-providers", absoluteProvidersDir,
 		"-data", absoluteDataDir,
 	)
 	command.Env = launchChildEnv(syncToken, identity)
@@ -120,6 +127,7 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, dataD
 		"agents", absoluteAgentsDir,
 		"rules", absoluteRulesDir,
 		"repos", absoluteReposDir,
+		"providers", absoluteProvidersDir,
 		"data", absoluteDataDir,
 		"sync_configured", syncToken != "",
 	}

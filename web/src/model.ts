@@ -57,17 +57,45 @@ export function repositoryPolicy(repository: Pick<Repository, "lifecycle">): str
 
 export function repositorySyncNotice(status: number, body: string): string {
   if (status !== 200) return body.trim() || `Sync returned ${status}`;
-  let parsed: { repository_plan?: { remote_mutation?: string; applied?: unknown } };
+  let parsed: {
+    repository_plan?: { remote_mutation?: string; applied?: unknown };
+    grant_plan?: { credential_active?: boolean; key_material?: string; remote_registration?: string };
+  };
   try {
-    parsed = JSON.parse(body) as { repository_plan?: { remote_mutation?: string; applied?: unknown } };
+    parsed = JSON.parse(body) as {
+      repository_plan?: { remote_mutation?: string; applied?: unknown };
+      grant_plan?: { credential_active?: boolean; key_material?: string; remote_registration?: string };
+    };
   } catch {
     return "Sync returned a response that is not JSON. The provider result was not confirmed.";
   }
   const applied = parsed.repository_plan?.applied;
   if (parsed.repository_plan?.remote_mutation === "none" && Array.isArray(applied) && applied.length === 0) {
-    return "Synced agents, rules, and repositories. Repository plans were not applied to a provider.";
+    const base = "Synced agents, rules, and repositories. Repository plans were not applied to a provider.";
+    const grant = parsed.grant_plan;
+    if (!grant) return base;
+    if (grant.credential_active) return "Sync completed, but a GitHub credential was reported active.";
+    if (grant.key_material !== "pending" && grant.key_material !== "none") {
+      return "Sync completed, but GitHub key material was not left pending.";
+    }
+    if (grant.remote_registration !== "unsupported" && grant.remote_registration !== "none") {
+      return "Sync completed, but GitHub remote registration was not left unsupported.";
+    }
+    return `${base} GitHub credentials were not activated.`;
   }
   return "Sync completed, but the repository plan did not confirm that the provider was left untouched.";
+}
+
+export function githubGrantSummary(agent: Pick<Agent, "github">): string {
+  const grant = agent.github;
+  if (!grant) return "";
+  const permissions = Object.entries(grant.permissions ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, level]) => `${name} ${level}`)
+    .join(", ");
+  const credential = grant.credential === "none" ? "no credential" : "credential pending";
+  const detail = permissions ? `, ${permissions}` : "";
+  return `GitHub ${grant.repository}, git ${grant.git}, ${credential}${detail}. Not activated.`;
 }
 
 export function secretNames(repository: Pick<Repository, "secrets">): string[] {

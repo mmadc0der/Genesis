@@ -10,7 +10,15 @@ export interface Agent {
   };
   env: Record<string, string>;
   secrets: string[];
+  github?: GitHubGrant;
   presence: Presence;
+}
+
+export interface GitHubGrant {
+  repository: string;
+  git: string;
+  permissions?: Record<string, string>;
+  credential: string;
 }
 
 export interface Rule {

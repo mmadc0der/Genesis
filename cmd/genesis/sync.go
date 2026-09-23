@@ -49,6 +49,7 @@ type syncResponse struct {
 	Repositories   int              `json:"repositories"`
 	Privileged     privilegedStatus `json:"privileged"`
 	RepositoryPlan repositoryPlan   `json:"repository_plan"`
+	GrantPlan      grantPlan        `json:"grant_plan"`
 }
 
 func parseScope(values []string) (syncScope, error) {
@@ -129,7 +130,7 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
-	next, err := loadScopedGeneration(s.agentsDir, s.rulesDir, s.reposDir, scope, current)
+	next, err := loadScopedGeneration(s.agentsDir, s.rulesDir, s.reposDir, s.providersDir, scope, current)
 	if err != nil {
 		s.log().Error("sync load", "error", err, "scope", scope.list())
 		http.Error(w, syncLoadMessage(err), http.StatusInternalServerError)
@@ -143,6 +144,12 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plan := buildPlan(next.agents, scope.Agents)
+	grants, err := buildGrantPlan(plan, scope.Agents)
+	if err != nil {
+		s.log().Error("sync grant plan", "error", err, "digest", next.digest)
+		http.Error(w, "grant plan is invalid", http.StatusInternalServerError)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), syncIPCTimeout)
 	defer cancel()
 	result, attached, err := s.coordinate(ctx, plan)
@@ -170,6 +177,12 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		"retained", len(result.Retained),
 		"repository_remote_mutation", repositoryPlan.RemoteMutation,
 		"repository_unsupported", len(repositoryPlan.Unsupported),
+		"providers", len(next.providers),
+		"providers_active", next.providersActive,
+		"grant_intents", len(grants.Intents),
+		"credential_active", grants.CredentialActive,
+		"key_material", grants.KeyMaterial,
+		"remote_registration", grants.RemoteRegistration,
 	)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -186,6 +199,7 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 			Unsupported:  result.Unsupported,
 		},
 		RepositoryPlan: repositoryPlan,
+		GrantPlan:      grants,
 	})
 }
 
@@ -251,6 +265,8 @@ func syncLoadMessage(err error) string {
 			return "rules are invalid"
 		case "repos":
 			return "repositories are invalid"
+		case "providers":
+			return "providers are invalid"
 		}
 	}
 	return "agents are invalid"
