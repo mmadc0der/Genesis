@@ -34,10 +34,13 @@ accounts, and exec those agents as their OS users.
 
 ## Cache
 
-The listener loads `agents.d` and `rules.d` once at start and keeps an
-immutable in-memory generation (agent map, rule list, content digest).
-`POST /events` matches only that snapshot. Editing YAML on disk does nothing
-until `POST /sync`. In-flight runs already hold the accept-time agent copy.
+The listener loads `agents.d`, `rules.d`, and, when the directory exists,
+`repos.d` once at start and keeps an immutable in-memory generation (agent
+map, rule list, repository map, content digest). A missing `repos.d` is
+inactive and is omitted from the digest, so agent/rule digests stay
+compatible. `POST /events` matches only that snapshot. Editing YAML on disk
+does nothing until `POST /sync`. In-flight runs already hold the accept-time
+agent copy. Repository declarations do not start runs.
 
 There is no event queue. While a sync is running, `POST /events` returns
 `503` with `Retry-After: 1`. A second `POST /sync` returns `409`.
@@ -54,25 +57,30 @@ the control path.
 Optional JSON body:
 
 ```json
-{"scope": ["agents", "rules"]}
+{"scope": ["agents", "rules", "repos"]}
 ```
 
-Omitted or empty `scope` means both layers. `["rules"]` rereads rules against
-the cached agents. `["agents"]` rereads agents and revalidates cached rules.
-Unknown scope values are `400`. Scope is which directories to reread. It is
-not independent activation of host vs matcher state, and it is not an mtime
-"only new files" filter.
+Omitted or empty `scope` means all three layers. `["rules"]` rereads rules
+against the cached agents. `["agents"]` rereads agents and revalidates cached
+rules. `["repos"]` rereads repository declarations and leaves agents and rules
+cached. Unknown scope values are `400`. Scope is which directories to
+reread. It is not independent activation of host vs matcher state, and it is
+not an mtime "only new files" filter. A missing `repos.d` stays inactive.
 
 Successful sync:
 
 1. Load the requested YAML. On failure: `500` (`agents are invalid` /
-   `rules are invalid`), cache unchanged, no IPC.
-2. Build a typed privileged plan from the would-be generation.
+   `rules are invalid` / `repositories are invalid`), cache unchanged, no IPC.
+2. Build a typed privileged plan from the would-be agents, and a separate
+   repository plan when `repos` is in scope. The repository plan is not an
+   IPC payload. Its `remote_mutation` is `none`; every intent is
+   `unsupported`. Genesis does not call a provider.
 3. If a coordinator is attached, send `{op:"coordinate", payload: plan}` over
    the inherited socket and wait. IPC failure **or a failed dedicated-user
    reconcile**: `500` `privileged coordination failed`, cache unchanged.
 4. Swap the in-process generation pointer.
-5. Return `200` with digest, counts, and the privileged result.
+5. Return `200` with digest, counts, the privileged result, and
+   `repository_plan`.
 
 Standalone listen (no inherited fd) still reloads the cache for shared-UID
 agents. Dedicated `user` agents fail closed there: the process cannot
@@ -94,6 +102,12 @@ never runs an agent-supplied shell snippet.
 | `ensure_agent_user` | dedicated `user`, Bash, home, cwd, allowlisted `setup` | applied by root launch / agents `/sync`; otherwise a hard failure so the generation is not activated |
 | `ensure_agent_paths` | shared-UID agent `cwd` / `home` | unsupported: no OS user; Genesis does not mkdir/chown as root |
 | `provision_declared_env` | declared `env` keys (not values) | unsupported: `env` is a process map, not a package graph |
+
+Repository intents (`ensure_repository`, `ensure_actions`,
+`ensure_bootstrap`, `ensure_secrets`, `ensure_protection`,
+`ensure_identities`, `retain_on_remove`) are not host intents. See
+[repositories.md](repositories.md). They are returned on the sync response
+and are not applied.
 
 `host_mutation` is `"applied"` when at least one dedicated user was
 reconciled, otherwise `"none"`. `applied` lists `ensure_agent_user:<id>`.
@@ -151,10 +165,10 @@ reload `DEEPSEEK_API_KEY`. The runner strips `GENESIS_SYNC_TOKEN` and
 
 `GET /health` and `GET /generation` are read-only. They do not reload YAML,
 swap the cache, or accept a bearer. `/generation` returns the active agents,
-rules, digest, whether a sync token is configured, and whether a sync is in
-progress. Agent objects include optional `user` and `setup`. It does not
-return the token. `POST /events` and `POST /sync` are
-unchanged.
+rules, repositories, digest, whether a sync token is configured, and whether
+a sync is in progress. `repositories_active` is false when `repos.d` is
+absent. Agent objects include optional `user` and `setup`. It does not
+return the token or any secret value. `POST /events` is unchanged.
 
 `genesis control` is a second process. It reads the config directories and
 the run journals, proxies CloudEvents and authorized sync to the listener,

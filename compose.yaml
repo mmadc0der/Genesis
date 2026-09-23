@@ -27,7 +27,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        until [ -O /var/lib/genesis/config/agents.d ] && [ -w /var/lib/genesis/config/agents.d ] && [ -x /var/lib/genesis/config/agents.d ] && [ -O /var/lib/genesis/config/rules.d ] && [ -w /var/lib/genesis/config/rules.d ] && [ -x /var/lib/genesis/config/rules.d ] && [ -O /var/lib/genesis/data/runs ] && [ -r /var/lib/genesis/data/runs ] && [ -x /var/lib/genesis/data/runs ]; do
+        until [ -O /var/lib/genesis/config/agents.d ] && [ -w /var/lib/genesis/config/agents.d ] && [ -x /var/lib/genesis/config/agents.d ] && [ -O /var/lib/genesis/config/rules.d ] && [ -w /var/lib/genesis/config/rules.d ] && [ -x /var/lib/genesis/config/rules.d ] && [ -O /var/lib/genesis/config/repos.d ] && [ -w /var/lib/genesis/config/repos.d ] && [ -x /var/lib/genesis/config/repos.d ] && [ -O /var/lib/genesis/data/runs ] && [ -r /var/lib/genesis/data/runs ] && [ -x /var/lib/genesis/data/runs ]; do
           sleep 0.2
         done
         exec /usr/local/bin/genesis control \
@@ -35,6 +35,7 @@ services:
           -listener http://genesis:8787 \
           -agents /var/lib/genesis/config/agents.d \
           -rules /var/lib/genesis/config/rules.d \
+          -repos /var/lib/genesis/config/repos.d \
           -data /var/lib/genesis/data \
           -web /usr/share/genesis/web
     ports:

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyPanelLoad, buildMessage, driftLabel, eventLine, maxCursor, mergeEvents, shortDigest } from "./model";
-import type { Agent, ControlState, LifecycleEvent, RunSummary } from "./types";
+import { applyPanelLoad, buildMessage, driftLabel, eventLine, maxCursor, mergeEvents, repositoryLabel, repositoryPolicy, secretNames, shortDigest } from "./model";
+import type { Agent, ControlState, LifecycleEvent, Repository, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
   return { sequence, type, data };
@@ -92,11 +92,12 @@ describe("control panel model", () => {
       last_seq: "1",
     } satisfies RunSummary;
     const view = applyPanelLoad(
-      { state: null, agents: [], rules: [], runs: [], problems: [] },
+      { state: null, agents: [], rules: [], repositories: [], runs: [], problems: [] },
       {
         state: { ok: true, value: state },
         agents: { ok: false, error: "agents are invalid" },
         rules: { ok: false, error: "rules are invalid" },
+        repositories: { ok: false, error: "repositories are invalid" },
         runs: { ok: true, value: { runs: [run] } },
       },
     );
@@ -104,6 +105,7 @@ describe("control panel model", () => {
     expect(view.runs.map((item) => item.run_id)).toEqual(["gen_1"]);
     expect(view.problems.join(" ")).toContain("agents are invalid");
     expect(view.problems.join(" ")).toContain("rules are invalid");
+    expect(view.problems.join(" ")).toContain("repositories are invalid");
 
     const previousAgent: Agent = {
       id: "workspace-janitor",
@@ -115,16 +117,43 @@ describe("control panel model", () => {
       secrets: [],
       presence: "active",
     };
+    const previousRepository: Repository = {
+      id: "lab",
+      provider: "github",
+      org: "octo-org",
+      name: "lab-widget",
+      lifecycle: { remove: "retain", existing: "adopt" },
+      settings: {
+        visibility: "private",
+        default_branch: "main",
+        features: { issues: true, wiki: false, projects: false },
+        merge: {
+          allow_squash: true,
+          allow_merge_commit: false,
+          allow_rebase: false,
+          delete_branch_on_merge: true,
+        },
+      },
+      actions: { enabled: true, allowed: "selected", selected: ["actions/checkout@v4"] },
+      secrets: { repository: ["DEEPSEEK_API_KEY"], environments: [{ name: "ci", secrets: ["CI_BOT_TOKEN"] }] },
+      presence: "active",
+    };
     const kept = applyPanelLoad(
-      { state: null, agents: [previousAgent], rules: [], runs: [], problems: [] },
+      { state: null, agents: [previousAgent], rules: [], repositories: [previousRepository], runs: [], problems: [] },
       {
         state: { ok: true, value: state },
         agents: { ok: false, error: "agents are invalid" },
         rules: { ok: true, value: { rules: [] } },
+        repositories: { ok: false, error: "repositories are invalid" },
         runs: { ok: true, value: { runs: [run] } },
       },
     );
     expect(kept.agents.map((item) => item.id)).toEqual(["workspace-janitor"]);
+    expect(kept.repositories.map((item) => item.id)).toEqual(["lab"]);
+    expect(repositoryLabel(previousRepository)).toBe("octo-org/lab-widget");
+    expect(repositoryPolicy(previousRepository)).toBe("adopt, remove retain");
+    expect(secretNames(previousRepository)).toEqual(["DEEPSEEK_API_KEY", "ci:CI_BOT_TOKEN"]);
+    expect(JSON.stringify(secretNames(previousRepository))).not.toContain("ghp_");
     expect(kept.state?.drift).toBe("desired_invalid");
     expect(kept.runs.map((item) => item.run_id)).toEqual(["gen_1"]);
   });

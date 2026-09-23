@@ -58,6 +58,7 @@ type controlConfig struct {
 	listenerURL string
 	agentsDir   string
 	rulesDir    string
+	reposDir    string
 	dataDir     string
 	syncToken   string
 	webDir      string
@@ -66,6 +67,7 @@ type controlConfig struct {
 type controlServer struct {
 	agentsDir       string
 	rulesDir        string
+	reposDir        string
 	dataDir         string
 	listenerURL     string
 	syncToken       string
@@ -159,6 +161,7 @@ func runControl(logger *slog.Logger, args []string) {
 		"listener", cfg.listenerURL,
 		"agents", cfg.agentsDir,
 		"rules", cfg.rulesDir,
+		"repos", cfg.reposDir,
 		"data", cfg.dataDir,
 		"web", cfg.webDir,
 		"sync_configured", cfg.syncToken != "",
@@ -174,6 +177,7 @@ func parseControlConfig(args []string, logger *slog.Logger) (controlConfig, erro
 	listenerFlag := flags.String("listener", controlDefaultListener, "internal Genesis listener base URL")
 	agentsFlag := flags.String("agents", "agents.d", "directory containing YAML agent definitions")
 	rulesFlag := flags.String("rules", "rules.d", "directory containing YAML rules")
+	reposFlag := flags.String("repos", "repos.d", "directory containing YAML repository declarations; missing directory leaves the layer inactive")
 	dataFlag := flags.String("data", "genesis-data", "read-only per-run journal directory")
 	tokenFlag := flags.String("sync-token", os.Getenv(syncTokenEnv), "bearer token sent only to the listener POST /sync")
 	webFlag := flags.String("web", controlDefaultWeb, "directory of built control panel files; missing directory serves the API only")
@@ -190,6 +194,13 @@ func parseControlConfig(args []string, logger *slog.Logger) (controlConfig, erro
 	rulesDir, err := existingDir(*rulesFlag, "rules")
 	if err != nil {
 		return controlConfig{}, err
+	}
+	reposDir := strings.TrimSpace(*reposFlag)
+	if reposDir != "" {
+		reposDir, err = filepath.Abs(reposDir)
+		if err != nil {
+			return controlConfig{}, fmt.Errorf("resolve repos directory: %w", err)
+		}
 	}
 	dataDir, err := existingDir(*dataFlag, "data")
 	if err != nil {
@@ -214,6 +225,7 @@ func parseControlConfig(args []string, logger *slog.Logger) (controlConfig, erro
 		listenerURL: listenerURL,
 		agentsDir:   agentsDir,
 		rulesDir:    rulesDir,
+		reposDir:    reposDir,
 		dataDir:     dataDir,
 		syncToken:   *tokenFlag,
 		webDir:      webDir,
@@ -267,6 +279,7 @@ func newControlServer(cfg controlConfig, logger *slog.Logger) *controlServer {
 	return &controlServer{
 		agentsDir:       cfg.agentsDir,
 		rulesDir:        cfg.rulesDir,
+		reposDir:        cfg.reposDir,
 		dataDir:         cfg.dataDir,
 		listenerURL:     cfg.listenerURL,
 		syncToken:       cfg.syncToken,
@@ -318,6 +331,11 @@ func (c *controlServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.handleRules(w, r)
+	case "/api/repositories":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		c.handleRepositories(w, r)
 	case "/api/runs":
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -350,6 +368,11 @@ func (c *controlServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			c.handleRule(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/repositories/"):
+			if !requireMethod(w, r, http.MethodGet) {
+				return
+			}
+			c.handleRepository(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/runs/"):
 			if !requireMethod(w, r, http.MethodGet) {
 				return
@@ -420,7 +443,7 @@ func (c *controlServer) currentState(r *http.Request) controlState {
 }
 
 func (c *controlServer) loadDesired() (*generationView, error) {
-	loaded, err := loadGeneration(c.agentsDir, c.rulesDir)
+	loaded, err := loadGeneration(c.agentsDir, c.rulesDir, c.reposDir)
 	if err != nil {
 		return nil, err
 	}
@@ -616,6 +639,96 @@ func (c *controlServer) listRules(r *http.Request) ([]listedRule, string) {
 		out = append(out, byName[name])
 	}
 	return out, state.DesiredError
+}
+
+type listedRepository struct {
+	repositoryDefinition
+	Presence string `json:"presence"`
+}
+
+func (c *controlServer) handleRepositories(w http.ResponseWriter, r *http.Request) {
+	repositories, active, desiredErr := c.listRepositories(r)
+	payload := map[string]any{
+		"repositories":        repositories,
+		"repositories_active": active,
+	}
+	if desiredErr != "" {
+		payload["desired_error"] = desiredErr
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (c *controlServer) handleRepository(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/repositories/")
+	if strings.Contains(id, "/") || agentIDPattern.FindString(id) != id {
+		http.Error(w, "invalid repository id", http.StatusBadRequest)
+		return
+	}
+	repositories, _, _ := c.listRepositories(r)
+	for _, repository := range repositories {
+		if repository.ID == id {
+			writeJSON(w, http.StatusOK, repository)
+			return
+		}
+	}
+	http.NotFound(w, r)
+}
+
+func (c *controlServer) listRepositories(r *http.Request) ([]listedRepository, bool, string) {
+	state := c.currentState(r)
+	byID := map[string]listedRepository{}
+	if state.Desired != nil {
+		for _, repository := range state.Desired.Repositories {
+			byID[repository.ID] = listedRepository{repositoryDefinition: repository, Presence: presenceUnknown}
+		}
+	}
+	if state.Active != nil {
+		activeByID := map[string]repositoryDefinition{}
+		for _, repository := range state.Active.Repositories {
+			activeByID[repository.ID] = repository
+			if _, ok := byID[repository.ID]; !ok {
+				byID[repository.ID] = listedRepository{repositoryDefinition: repository, Presence: presenceActiveOnly}
+			}
+		}
+		for id, listed := range byID {
+			if listed.Presence == presenceActiveOnly {
+				continue
+			}
+			active, ok := activeByID[id]
+			if ok && sameRepository(listed.repositoryDefinition, active) {
+				listed.Presence = presenceActive
+			} else {
+				listed.Presence = presenceDraft
+			}
+			byID[id] = listed
+		}
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	out := make([]listedRepository, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, byID[id])
+	}
+	active := false
+	switch {
+	case state.Desired != nil:
+		active = state.Desired.RepositoriesActive
+	case state.Active != nil:
+		active = state.Active.RepositoriesActive
+	default:
+		usable, err := repositoryDirectoryUsable(c.reposDir)
+		active = err == nil && usable
+	}
+	return out, active, state.DesiredError
+}
+
+func sameRepository(left, right repositoryDefinition) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 func sameAgent(left, right agentView) bool {

@@ -9,18 +9,20 @@ import (
 )
 
 type generation struct {
-	agents map[string]agentDefinition
-	rules  []rule
-	digest string
+	agents      map[string]agentDefinition
+	rules       []rule
+	repos       map[string]repositoryDefinition
+	reposActive bool
+	digest      string
 }
 
-func loadGeneration(agentsDir, rulesDir string) (*generation, error) {
-	return loadScopedGeneration(agentsDir, rulesDir, syncScope{Agents: true, Rules: true}, nil)
+func loadGeneration(agentsDir, rulesDir, reposDir string) (*generation, error) {
+	return loadScopedGeneration(agentsDir, rulesDir, reposDir, syncScope{Agents: true, Rules: true, Repos: true}, nil)
 }
 
-func loadScopedGeneration(agentsDir, rulesDir string, scope syncScope, current *generation) (*generation, error) {
-	if !scope.Agents && !scope.Rules {
-		return nil, fmt.Errorf("sync scope must include agents and/or rules")
+func loadScopedGeneration(agentsDir, rulesDir, reposDir string, scope syncScope, current *generation) (*generation, error) {
+	if !scope.Agents && !scope.Rules && !scope.Repos {
+		return nil, fmt.Errorf("sync scope must include agents, rules, and/or repos")
 	}
 	if current == nil && (!scope.Agents || !scope.Rules) {
 		return nil, fmt.Errorf("initial generation must load agents and rules")
@@ -28,9 +30,13 @@ func loadScopedGeneration(agentsDir, rulesDir string, scope syncScope, current *
 
 	agents := map[string]agentDefinition{}
 	var rules []rule
+	repos := map[string]repositoryDefinition{}
+	reposActive := false
 	if current != nil {
 		agents = current.agents
 		rules = current.rules
+		repos = current.repos
+		reposActive = current.reposActive
 	}
 
 	if scope.Agents {
@@ -54,11 +60,21 @@ func loadScopedGeneration(agentsDir, rulesDir string, scope syncScope, current *
 		}
 		rules = loaded
 	}
+	if scope.Repos {
+		loaded, active, err := loadRepositories(reposDir)
+		if err != nil {
+			return nil, &generationLoadError{kind: "repos", err: err}
+		}
+		repos = loaded
+		reposActive = active
+	}
 
 	return &generation{
-		agents: agents,
-		rules:  rules,
-		digest: digestGeneration(agents, rules),
+		agents:      agents,
+		rules:       rules,
+		repos:       repos,
+		reposActive: reposActive,
+		digest:      digestGeneration(agents, rules, repos, reposActive),
 	}, nil
 }
 
@@ -75,7 +91,7 @@ func (e *generationLoadError) Unwrap() error {
 	return e.err
 }
 
-func digestGeneration(agents map[string]agentDefinition, rules []rule) string {
+func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map[string]repositoryDefinition, reposActive bool) string {
 	type agentDigest struct {
 		ID           string            `json:"id"`
 		Instructions string            `json:"instructions"`
@@ -119,10 +135,22 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule) string {
 			Agent: candidate.Agent,
 		})
 	}
+	if !reposActive {
+		payload, err := json.Marshal(struct {
+			Agents []agentDigest `json:"agents"`
+			Rules  []ruleDigest  `json:"rules"`
+		}{Agents: agentDigests, Rules: ruleDigests})
+		if err != nil {
+			return ""
+		}
+		sum := sha256.Sum256(payload)
+		return "sha256:" + hex.EncodeToString(sum[:])
+	}
 	payload, err := json.Marshal(struct {
-		Agents []agentDigest `json:"agents"`
-		Rules  []ruleDigest  `json:"rules"`
-	}{Agents: agentDigests, Rules: ruleDigests})
+		Agents       []agentDigest          `json:"agents"`
+		Rules        []ruleDigest           `json:"rules"`
+		Repositories []repositoryDefinition `json:"repositories"`
+	}{Agents: agentDigests, Rules: ruleDigests, Repositories: canonicalRepositories(repos)})
 	if err != nil {
 		return ""
 	}

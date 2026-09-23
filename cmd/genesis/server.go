@@ -89,6 +89,7 @@ type invocationRunner interface {
 type eventServer struct {
 	agentsDir   string
 	rulesDir    string
+	reposDir    string
 	runner      invocationRunner
 	newRunID    func() (string, error)
 	secrets     map[string]string
@@ -118,7 +119,7 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *eventServer) loadInitialGeneration() error {
-	generation, err := loadGeneration(s.agentsDir, s.rulesDir)
+	generation, err := loadGeneration(s.agentsDir, s.rulesDir, s.reposDir)
 	if err != nil {
 		return err
 	}

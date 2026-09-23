@@ -44,4 +44,4 @@ EXPOSE 8790
 # the control process; see compose.yaml.
 USER root
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["launch", "-listen", "0.0.0.0:8787", "-agents", "/var/lib/genesis/config/agents.d", "-rules", "/var/lib/genesis/config/rules.d", "-data", "/var/lib/genesis/data", "-listener-user", "genesis"]
+CMD ["launch", "-listen", "0.0.0.0:8787", "-agents", "/var/lib/genesis/config/agents.d", "-rules", "/var/lib/genesis/config/rules.d", "-repos", "/var/lib/genesis/config/repos.d", "-data", "/var/lib/genesis/data", "-listener-user", "genesis"]

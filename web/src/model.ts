@@ -1,4 +1,4 @@
-import type { Agent, ControlState, LifecycleEvent, Rule, RunSummary } from "./types";
+import type { Agent, ControlState, LifecycleEvent, Repository, Rule, RunSummary } from "./types";
 
 export interface Settled<T> {
   ok: boolean;
@@ -10,6 +10,7 @@ export interface PanelSnapshot {
   state: ControlState | null;
   agents: Agent[];
   rules: Rule[];
+  repositories: Repository[];
   runs: RunSummary[];
   problems: string[];
 }
@@ -20,6 +21,7 @@ export function applyPanelLoad(
     state: Settled<ControlState>;
     agents: Settled<{ agents: Agent[] }>;
     rules: Settled<{ rules: Rule[] }>;
+    repositories: Settled<{ repositories: Repository[]; desired_error?: string }>;
     runs: Settled<{ runs: RunSummary[] }>;
   },
 ): PanelSnapshot {
@@ -28,6 +30,7 @@ export function applyPanelLoad(
     state: previous.state,
     agents: previous.agents,
     rules: previous.rules,
+    repositories: previous.repositories,
     runs: previous.runs,
     problems,
   };
@@ -37,9 +40,27 @@ export function applyPanelLoad(
   else problems.push(load.agents.error || "Agents are unavailable");
   if (load.rules.ok && load.rules.value) next.rules = load.rules.value.rules;
   else problems.push(load.rules.error || "Rules are unavailable");
+  if (load.repositories.ok && load.repositories.value) next.repositories = load.repositories.value.repositories;
+  else problems.push(load.repositories.error || "Repositories are unavailable");
   if (load.runs.ok && load.runs.value) next.runs = load.runs.value.runs;
   else problems.push(load.runs.error || "Runs are unavailable");
   return next;
+}
+
+export function repositoryLabel(repository: Pick<Repository, "org" | "name">): string {
+  return `${repository.org}/${repository.name}`;
+}
+
+export function repositoryPolicy(repository: Pick<Repository, "lifecycle">): string {
+  return `${repository.lifecycle.existing}, remove ${repository.lifecycle.remove}`;
+}
+
+export function secretNames(repository: Pick<Repository, "secrets">): string[] {
+  const names = [...(repository.secrets?.repository ?? [])];
+  for (const environment of repository.secrets?.environments ?? []) {
+    for (const name of environment.secrets ?? []) names.push(`${environment.name}:${name}`);
+  }
+  return names;
 }
 
 export function shortDigest(digest: string | undefined): string {

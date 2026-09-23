@@ -148,7 +148,7 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		t.Fatal("example.yaml must not match the designer user-message event")
 	}
 
-	generation, err := loadGeneration(filepath.Join(root, "agents.d"), filepath.Join(root, "rules.d"))
+	generation, err := loadGeneration(filepath.Join(root, "agents.d"), filepath.Join(root, "rules.d"), filepath.Join(root, "repos.d"))
 	if err != nil {
 		t.Fatal(err)
 	}

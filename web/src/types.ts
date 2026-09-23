@@ -20,12 +20,51 @@ export interface Rule {
   presence: Presence;
 }
 
+export interface Repository {
+  id: string;
+  provider: string;
+  org: string;
+  name: string;
+  lifecycle: { remove: string; existing: string };
+  settings: {
+    visibility: string;
+    description?: string;
+    default_branch: string;
+    features: { issues: boolean; wiki: boolean; projects: boolean };
+    merge: {
+      allow_squash: boolean;
+      allow_merge_commit: boolean;
+      allow_rebase: boolean;
+      delete_branch_on_merge: boolean;
+    };
+  };
+  bootstrap?: { template: string };
+  actions: { enabled: boolean; allowed: string; selected?: string[] };
+  secrets?: {
+    repository?: string[];
+    environments?: Array<{ name: string; secrets?: string[] }>;
+  };
+  protection?: {
+    ruleset: {
+      name: string;
+      required_approving_reviews: number;
+      dismiss_stale_reviews: boolean;
+      required_checks?: string[];
+      strict_checks: boolean;
+    };
+  };
+  identities?: Array<{ name: string; role: string }>;
+  presence: Presence;
+}
+
 export type Presence = "active" | "draft" | "active_only" | "unknown";
 
 export interface Generation {
   digest: string;
   agents: Array<Omit<Agent, "presence">>;
   rules: Array<Omit<Rule, "presence">>;
+  repositories?: Array<Omit<Repository, "presence">>;
+  repositories_active?: boolean;
   sync_configured?: boolean;
   syncing?: boolean;
 }
