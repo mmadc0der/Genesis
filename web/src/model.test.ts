@@ -171,6 +171,20 @@ describe("control panel model", () => {
         200,
         JSON.stringify({
           repository_plan: { remote_mutation: "none", applied: [] },
+          grant_plan: {
+            credential_active: false,
+            key_material: "pending",
+            remote_registration: "unsupported",
+            material: [{ grant_id: "gabc", fingerprint: "SHA256:abc" }],
+          },
+        }),
+      ),
+    ).toContain("Live GitHub registration remains pending.");
+    expect(
+      repositorySyncNotice(
+        200,
+        JSON.stringify({
+          repository_plan: { remote_mutation: "none", applied: [] },
           grant_plan: { credential_active: true, key_material: "pending", remote_registration: "unsupported" },
         }),
       ),

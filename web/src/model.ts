@@ -59,12 +59,22 @@ export function repositorySyncNotice(status: number, body: string): string {
   if (status !== 200) return body.trim() || `Sync returned ${status}`;
   let parsed: {
     repository_plan?: { remote_mutation?: string; applied?: unknown };
-    grant_plan?: { credential_active?: boolean; key_material?: string; remote_registration?: string };
+    grant_plan?: {
+      credential_active?: boolean;
+      key_material?: string;
+      remote_registration?: string;
+      material?: unknown[];
+    };
   };
   try {
     parsed = JSON.parse(body) as {
       repository_plan?: { remote_mutation?: string; applied?: unknown };
-      grant_plan?: { credential_active?: boolean; key_material?: string; remote_registration?: string };
+      grant_plan?: {
+        credential_active?: boolean;
+        key_material?: string;
+        remote_registration?: string;
+        material?: unknown[];
+      };
     };
   } catch {
     return "Sync returned a response that is not JSON. The provider result was not confirmed.";
@@ -80,6 +90,9 @@ export function repositorySyncNotice(status: number, body: string): string {
     }
     if (grant.remote_registration !== "unsupported" && grant.remote_registration !== "none") {
       return "Sync completed, but GitHub remote registration was not left unsupported.";
+    }
+    if (Array.isArray(grant.material) && grant.material.length > 0) {
+      return `${base} Root holds local SSH material. Live GitHub registration remains pending.`;
     }
     return `${base} GitHub credentials were not activated.`;
   }

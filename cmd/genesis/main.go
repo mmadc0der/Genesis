@@ -35,8 +35,8 @@ func parseCommand(args []string) (string, []string) {
 }
 
 func runLaunchFromArgs(logger *slog.Logger, args []string) {
-	listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken, listenerUser := parseLaunchFlags(args, logger)
-	runLaunch(logger, listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken, listenerUser)
+	listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, credentialsDir, syncToken, listenerUser := parseLaunchFlags(args, logger)
+	runLaunch(logger, listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, credentialsDir, syncToken, listenerUser)
 }
 
 func runListen(logger *slog.Logger, args []string) {
@@ -143,7 +143,7 @@ func parseListenFlags(command string, args []string, logger *slog.Logger) (liste
 	return *listenFlag, *agentsFlag, *rulesFlag, *reposFlag, *providersFlag, *dataFlag, *tokenFlag
 }
 
-func parseLaunchFlags(args []string, logger *slog.Logger) (listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken, listenerUser string) {
+func parseLaunchFlags(args []string, logger *slog.Logger) (listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, credentialsDir, syncToken, listenerUser string) {
 	flags := flag.NewFlagSet("launch", flag.ExitOnError)
 	listenFlag := flags.String("listen", "127.0.0.1:8787", "HTTP listen address")
 	agentsFlag := flags.String("agents", "agents.d", "directory containing YAML agent definitions")
@@ -151,10 +151,11 @@ func parseLaunchFlags(args []string, logger *slog.Logger) (listen, agentsDir, ru
 	reposFlag := flags.String("repos", "repos.d", "directory containing YAML repository declarations; missing directory leaves the layer inactive")
 	providersFlag := flags.String("providers", defaultProvidersDir, "root-owned directory of provider identity files; missing directory leaves the layer inactive")
 	dataFlag := flags.String("data", "genesis-data", "directory for per-run journals, stderr, results, and retained DeepSeek homes")
+	credentialsFlag := flags.String("credentials", defaultCredentialsDir, "root-only directory for SSH grant material; used when launch runs as root")
 	tokenFlag := flags.String("sync-token", os.Getenv(syncTokenEnv), "bearer token required for POST /sync; empty disables /sync")
 	listenerUserFlag := flags.String("listener-user", os.Getenv(listenerUserEnv), "OS user for the unprivileged listener; required when launch runs as root")
 	parseFlagSet(flags, args, logger)
-	return *listenFlag, *agentsFlag, *rulesFlag, *reposFlag, *providersFlag, *dataFlag, *tokenFlag, *listenerUserFlag
+	return *listenFlag, *agentsFlag, *rulesFlag, *reposFlag, *providersFlag, *dataFlag, *credentialsFlag, *tokenFlag, *listenerUserFlag
 }
 
 func resolveOptionalDir(path string) (string, error) {

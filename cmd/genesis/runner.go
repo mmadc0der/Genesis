@@ -533,7 +533,7 @@ func sanitizedChildEnv() []string {
 	filtered := make([]string, 0, len(environment))
 	for _, item := range environment {
 		key, _, _ := strings.Cut(item, "=")
-		if key == privilegedFDEnv || key == syncTokenEnv {
+		if key == privilegedFDEnv || key == syncTokenEnv || droppedChildEnv(key) || containsPrivateKey(item) {
 			continue
 		}
 		filtered = append(filtered, item)

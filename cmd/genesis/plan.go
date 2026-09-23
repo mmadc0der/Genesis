@@ -46,10 +46,12 @@ type unsupportedChange struct {
 }
 
 type coordinateResult struct {
-	HostMutation string              `json:"host_mutation"`
-	Applied      []string            `json:"applied"`
-	Unsupported  []unsupportedChange `json:"unsupported"`
-	Retained     []string            `json:"retained,omitempty"`
+	HostMutation   string              `json:"host_mutation"`
+	Applied        []string            `json:"applied"`
+	Unsupported    []unsupportedChange `json:"unsupported"`
+	Retained       []string            `json:"retained,omitempty"`
+	Grants         []grantObservation  `json:"grants,omitempty"`
+	RetainedGrants []string            `json:"retained_grants,omitempty"`
 }
 
 func buildPlan(agents map[string]agentDefinition, includeAgents bool) privilegedPlan {

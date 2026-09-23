@@ -4,9 +4,51 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"regexp"
 	"slices"
 	"strings"
 )
+
+const (
+	sshAuthSockEnv = "SSH_AUTH_SOCK"
+	sshAgentPIDEnv = "SSH_AGENT_PID"
+	gitSSHEnv      = "GIT_SSH"
+	gitSSHCommand  = "GIT_SSH_COMMAND"
+)
+
+var privateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+
+func sanitizeIPCReply(reply *ipcEnvelope) {
+	if reply == nil {
+		return
+	}
+	if reply.Error != "" {
+		reply.Error = string(redactPrivateKeys([]byte(reply.Error)))
+	}
+	if len(reply.Payload) != 0 {
+		reply.Payload = redactPrivateKeys(reply.Payload)
+	}
+}
+
+func redactPrivateKeys(input []byte) []byte {
+	if len(input) == 0 || !bytes.Contains(input, []byte("PRIVATE KEY")) {
+		return input
+	}
+	return privateKeyPattern.ReplaceAll(input, []byte(redactedSecret))
+}
+
+func containsPrivateKey(value string) bool {
+	return strings.Contains(value, "PRIVATE KEY") || strings.Contains(value, "OPENSSH PRIVATE KEY")
+}
+
+func droppedChildEnv(key string) bool {
+	switch key {
+	case sshAuthSockEnv, sshAgentPIDEnv, gitSSHEnv, gitSSHCommand:
+		return true
+	default:
+		return false
+	}
+}
 
 const redactedSecret = "[redacted]"
 
@@ -37,6 +79,7 @@ func newRedactor(values []string) *redactor {
 }
 
 func (r *redactor) bytes(input []byte) []byte {
+	input = redactPrivateKeys(input)
 	if r == nil || len(r.values) == 0 || len(input) == 0 {
 		return input
 	}

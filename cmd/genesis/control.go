@@ -880,7 +880,7 @@ func (c *controlServer) readRunDetail(runID string) (runDetail, error) {
 	detail := runDetail{runSummary: summarizeRun(events), EventCount: len(events)}
 	runDir := filepath.Join(c.dataDir, runsDirName, runID)
 	if result, err := os.ReadFile(filepath.Join(runDir, resultFileName)); err == nil && json.Valid(result) {
-		detail.Result = json.RawMessage(result)
+		detail.Result = json.RawMessage(redactPrivateKeys(result))
 	}
 	if tail, err := readFileTail(filepath.Join(runDir, stderrFileName), stderrTailBytes); err == nil && tail != "" {
 		detail.StderrTail = tail
@@ -926,7 +926,14 @@ func (c *controlServer) readRunEvents(runID string) ([]lifecycleEvent, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
-	return readJournalPrefix(path)
+	events, err := readJournalPrefix(path)
+	if err != nil {
+		return nil, err
+	}
+	for index := range events {
+		events[index].Data = redactPrivateKeys(events[index].Data)
+	}
+	return events, nil
 }
 
 func summarizeRun(events []lifecycleEvent) runSummary {
@@ -1036,7 +1043,7 @@ func readFileTail(path string, max int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(buf), nil
+	return string(redactPrivateKeys(buf)), nil
 }
 
 func (c *controlServer) handlePostEvents(w http.ResponseWriter, r *http.Request) {

@@ -211,6 +211,7 @@ func servePrivilegedParent(conn net.Conn, logger *slog.Logger, state *privileged
 	}
 	var writeMu sync.Mutex
 	writeReply := func(reply ipcEnvelope) bool {
+		sanitizeIPCReply(&reply)
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		if err := writeIPCMessage(conn, reply); err != nil {

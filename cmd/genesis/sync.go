@@ -158,6 +158,12 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "privileged coordination failed", http.StatusInternalServerError)
 		return
 	}
+	grants = attachGrantMaterial(grants, result)
+	if err := grantPlanIsInactive(grants); err != nil {
+		s.log().Error("sync grant plan", "error", err, "digest", next.digest)
+		http.Error(w, "grant plan is invalid", http.StatusInternalServerError)
+		return
+	}
 
 	s.mu.Lock()
 	s.generation = next

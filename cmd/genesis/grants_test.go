@@ -271,32 +271,72 @@ func TestGrantPlanIsLocalAndDoesNotExposeProviderMaterial(t *testing.T) {
 		t.Fatalf("public plan = %#v", publicPlan)
 	}
 
+	var applyLogs bytes.Buffer
 	host := newMemoryHost()
-	state := &privilegedState{logger: discardLogger(), host: host, mutate: true, dataDir: t.TempDir()}
+	store := openTestCredentialStore(t)
+	state := &privilegedState{
+		logger:      slog.New(slog.NewJSONHandler(&applyLogs, nil)),
+		host:        host,
+		mutate:      true,
+		dataDir:     t.TempDir(),
+		credentials: store,
+	}
 	applied, err := state.apply(plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied.HostMutation != hostMutationNone || len(applied.Applied) != 0 || len(host.users) != 0 {
+	if applied.HostMutation != hostMutationNone || len(host.users) != 0 {
 		t.Fatalf("apply activated host state: %#v users=%d", applied, len(host.users))
 	}
-	sawKey := false
+	if !slicesContainsAll(applied.Applied, intentEnsureRepositoryGrant+":reader", intentEnsureCredential+":reader", intentEnsureRepositoryGrant+":worker", intentEnsureCredential+":worker") {
+		t.Fatalf("applied = %#v", applied.Applied)
+	}
 	sawRemote := false
 	for _, change := range applied.Unsupported {
-		if strings.Contains(change.Reason, "App JWT") {
-			sawKey = true
+		if change.Kind == intentEnsureCredential {
+			t.Fatalf("credential intent stayed unsupported: %#v", change)
 		}
-		if strings.Contains(change.Reason, "remote registration") {
+		if strings.Contains(change.Reason, "remote registration") || strings.Contains(change.Reason, "no SSH identity") {
 			sawRemote = true
 		}
-		for _, forbidden := range []string{programmerSecret, programmerIdentity} {
+		for _, forbidden := range []string{programmerSecret, programmerIdentity, "PRIVATE KEY"} {
 			if strings.Contains(change.Reason, forbidden) {
 				t.Fatalf("unsupported reason exposed %q", forbidden)
 			}
 		}
 	}
-	if !sawKey || !sawRemote {
+	if !sawRemote {
 		t.Fatalf("unsupported = %#v", applied.Unsupported)
+	}
+	workerKey, readerKey := grantKeyPaths(t, store)
+	if workerKey == "" || readerKey != "" {
+		t.Fatalf("worker key %q reader key %q", workerKey, readerKey)
+	}
+	keyBytes, err := os.ReadFile(workerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(workerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("key mode = %o", info.Mode())
+	}
+	again, err := state.apply(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := os.ReadFile(workerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(keyBytes, retry) || len(again.RetainedGrants) != 0 {
+		t.Fatalf("retry rotated material or retained grants: retained=%v", again.RetainedGrants)
+	}
+	encodedApply, _ := json.Marshal(applied)
+	if bytes.Contains(encodedApply, keyBytes) || bytes.Contains(applyLogs.Bytes(), keyBytes) || bytes.Contains(encodedApply, []byte(programmerIdentity)) {
+		t.Fatal("apply result exposed grant material")
 	}
 
 	var logs bytes.Buffer
@@ -508,7 +548,8 @@ func TestScopedSyncDoesNotPlanUsersOrGrants(t *testing.T) {
 	}
 	agentPlan := buildPlan(loaded.agents, true)
 	host := newMemoryHost()
-	state := &privilegedState{logger: discardLogger(), host: host, mutate: true, dataDir: t.TempDir()}
+	store := openTestCredentialStore(t)
+	state := &privilegedState{logger: discardLogger(), host: host, mutate: true, dataDir: t.TempDir(), credentials: store}
 	applied, err := state.apply(agentPlan)
 	if err != nil {
 		t.Fatal(err)
@@ -516,20 +557,27 @@ func TestScopedSyncDoesNotPlanUsersOrGrants(t *testing.T) {
 	if applied.HostMutation != hostMutationApplied || len(host.users) != 1 || host.users["worker"] == nil {
 		t.Fatalf("apply users=%#v result=%#v", host.users, applied)
 	}
-	if len(applied.Applied) != 1 || applied.Applied[0] != intentEnsureAgentUser+":worker" {
+	if !slicesContainsAll(applied.Applied, intentEnsureAgentUser+":worker", intentEnsureRepositoryGrant+":worker", intentEnsureCredential+":worker") {
 		t.Fatalf("applied = %#v", applied.Applied)
 	}
-	sawGrant := map[string]bool{}
+	sawRemote := false
 	for _, change := range applied.Unsupported {
-		sawGrant[change.Kind] = true
-		if strings.Contains(change.Reason, programmerSecret) || strings.Contains(change.Reason, programmerIdentity) {
+		if change.Kind == intentEnsureRemoteRegistration {
+			sawRemote = true
+		}
+		if change.Kind == intentEnsureCredential || change.Kind == intentEnsureRepositoryGrant {
+			t.Fatalf("grant intent stayed unsupported: %#v", change)
+		}
+		if strings.Contains(change.Reason, programmerSecret) || strings.Contains(change.Reason, programmerIdentity) || strings.Contains(change.Reason, "PRIVATE KEY") {
 			t.Fatalf("unsupported exposed provider material: %s", change.Reason)
 		}
 	}
-	for _, kind := range []string{intentEnsureRepositoryGrant, intentEnsureCredential, intentEnsureRemoteRegistration} {
-		if !sawGrant[kind] {
-			t.Fatalf("missing unsupported %s in %#v", kind, applied.Unsupported)
-		}
+	if !sawRemote {
+		t.Fatalf("missing unsupported remote registration in %#v", applied.Unsupported)
+	}
+	workerKey, readerKey := grantKeyPaths(t, store)
+	if workerKey == "" || readerKey != "" {
+		t.Fatalf("worker key %q reader key %q", workerKey, readerKey)
 	}
 }
 
@@ -656,6 +704,23 @@ func TestDockerImageDoesNotInstallExampleProviders(t *testing.T) {
 	if strings.Contains(text, "COPY providers.d") {
 		t.Fatal("image copies providers.d into the live directory")
 	}
+	if strings.Contains(strings.ToLower(text), "openssh") {
+		t.Fatal("image installs OpenSSH; the agent protocol is in-process")
+	}
+	compose, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(compose), "target: /var/lib/genesis/credentials") != 1 {
+		t.Fatal("credential store must be mounted on the root service only")
+	}
+	entrypoint, err := os.ReadFile(filepath.Join(root, "docker-entrypoint.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(entrypoint), credentialsDockerPath) || !strings.Contains(text, credentialsDockerPath) || !strings.Contains(string(compose), credentialsDockerPath) {
+		t.Fatal("image credential path is not wired to /var/lib/genesis/credentials")
+	}
 	for _, line := range strings.Split(text, "\n") {
 		if strings.Contains(line, "/etc/genesis/providers.d") && (strings.Contains(line, "a+rX") || strings.Contains(line, "0644")) {
 			t.Fatalf("provider path is world-readable: %s", line)
@@ -666,6 +731,10 @@ func TestDockerImageDoesNotInstallExampleProviders(t *testing.T) {
 		"useradd --create-home --uid 65532 --gid 65532",
 		"chown root:genesis /etc/genesis/providers.d",
 		"chmod 0750 /etc/genesis/providers.d",
+		"chown root:root /var/lib/genesis /var/lib/genesis/credentials",
+		"chmod 0755 /var/lib/genesis",
+		"chmod 0700 /var/lib/genesis/credentials",
+		"-credentials", "/var/lib/genesis/credentials",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("Dockerfile missing %q", want)

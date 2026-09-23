@@ -24,7 +24,7 @@ type listenerIdentity struct {
 	Groups   []uint32
 }
 
-func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken, listenerUser string) {
+func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, credentialsDir, syncToken, listenerUser string) {
 	identity, err := resolveListenerIdentity(os.Geteuid(), listenerUser)
 	if err != nil {
 		fail(logger, "resolve listener user", err)
@@ -80,12 +80,34 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, provi
 		parent.Close()
 		fail(logger, "resolve data directory", err)
 	}
+	absoluteCredentialsDir, err := filepath.Abs(credentialsDir)
+	if err != nil {
+		child.Close()
+		parent.Close()
+		fail(logger, "resolve credentials directory", err)
+	}
 
 	listenerName := ""
 	if identity != nil {
 		listenerName = identity.Username
 	}
 	state := newPrivilegedState(logger, pythonPath, embeddedPythonRunner, listenerName, absoluteDataDir)
+	if os.Geteuid() == 0 {
+		store, err := openCredentialStore(absoluteCredentialsDir, credentialBounds{
+			AgentsDir:    absoluteAgentsDir,
+			RulesDir:     absoluteRulesDir,
+			ReposDir:     absoluteReposDir,
+			ProvidersDir: absoluteProvidersDir,
+			DataDir:      absoluteDataDir,
+			ConfigRoot:   designerWritableConfigRoot,
+		})
+		if err != nil {
+			child.Close()
+			parent.Close()
+			fail(logger, "prepare credential store", err)
+		}
+		state.credentials = store
+	}
 	loaded, err := loadGeneration(absoluteAgentsDir, absoluteRulesDir, absoluteReposDir, absoluteProvidersDir)
 	if err != nil {
 		child.Close()
@@ -129,6 +151,7 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, provi
 		"repos", absoluteReposDir,
 		"providers", absoluteProvidersDir,
 		"data", absoluteDataDir,
+		"credentials", absoluteCredentialsDir,
 		"sync_configured", syncToken != "",
 	}
 	if identity != nil {
@@ -223,6 +246,10 @@ func launchChildEnv(syncToken string, identity *listenerIdentity) []string {
 	skip := map[string]struct{}{
 		privilegedFDEnv: {},
 		syncTokenEnv:    {},
+		sshAuthSockEnv:  {},
+		sshAgentPIDEnv:  {},
+		gitSSHEnv:       {},
+		gitSSHCommand:   {},
 	}
 	if identity != nil {
 		skip["HOME"] = struct{}{}
@@ -233,7 +260,7 @@ func launchChildEnv(syncToken string, identity *listenerIdentity) []string {
 	env := make([]string, 0, len(os.Environ())+5)
 	for _, item := range os.Environ() {
 		key, _, _ := strings.Cut(item, "=")
-		if _, drop := skip[key]; drop {
+		if _, drop := skip[key]; drop || containsPrivateKey(item) {
 			continue
 		}
 		env = append(env, item)

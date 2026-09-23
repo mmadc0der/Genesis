@@ -104,9 +104,9 @@ never runs an agent-supplied shell snippet.
 | `ensure_agent_user` | dedicated `user`, Bash, home, cwd, allowlisted `setup` | applied by root launch / agents `/sync`; otherwise a hard failure so the generation is not activated |
 | `ensure_agent_paths` | shared-UID agent `cwd` / `home` | unsupported: no OS user; Genesis does not mkdir/chown as root |
 | `provision_declared_env` | declared `env` keys (not values) | unsupported: `env` is a process map, not a package graph |
-| `ensure_repository_grant` | local agent-to-repository grant | unsupported: not activated and not sent to GitHub |
-| `ensure_credential` | credential material for that grant | unsupported: key material stays `pending` or `none`; no App JWT, installation token, or SSH key |
-| `ensure_remote_registration` | remote key or App registration | unsupported: Genesis does not call GitHub |
+| `ensure_repository_grant` | local agent-to-repository grant | applied by root as a local record; not sent to GitHub. Without a root credential store the intent stays unsupported |
+| `ensure_credential` | SSH material for that grant | root stores one Ed25519 key for a non-public git read/write grant. Public read stores no key. No App JWT or installation token |
+| `ensure_remote_registration` | remote key registration | unsupported until stage 3. The production driver does not call GitHub. A ready test driver may later open a per-run `SSH_AUTH_SOCK` |
 
 `providers.d` is reloaded with agents or repos, not as its own scope name.
 A missing providers directory stays inactive. Grant intents are omitted from
@@ -153,6 +153,7 @@ These guarantees are in-process only.
 | Successful coordinate with only unsupported diffs | swapped to the new generation | unchanged | keep their snapshot |
 | Successful dedicated-user reconcile | swapped after apply | users/homes/workspaces ensured | keep their snapshot |
 | Crash during swap | one generation or the other; not a mix of agents from G and rules from G' | already applied | keep their snapshot |
+| Credential ensure fails midway | unchanged | a key file may exist; retry reuses it and does not rotate | keep their snapshot |
 | `503` during sync | previous generation | n/a | keep their snapshot |
 
 Not claimed, and not implemented:

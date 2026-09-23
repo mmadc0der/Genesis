@@ -26,6 +26,20 @@ func TestRedactorValueRedactsNestedJSON(t *testing.T) {
 	}
 }
 
+func TestRedactorStripsPrivateKeyBlocks(t *testing.T) {
+	block := "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecret\n-----END OPENSSH PRIVATE KEY-----"
+	got := newRedactor(nil).text("before " + block + " after")
+	if strings.Contains(got, "AAAAsecret") || strings.Contains(got, "PRIVATE KEY") {
+		t.Fatalf("private key remained: %s", got)
+	}
+	if !strings.Contains(got, redactedSecret) {
+		t.Fatalf("marker missing: %s", got)
+	}
+	if got := (*redactor)(nil).text(block); strings.Contains(got, "AAAAsecret") {
+		t.Fatalf("nil redactor kept key: %s", got)
+	}
+}
+
 func TestRedactorValueLeavesNilAndUnknownUnchanged(t *testing.T) {
 	red := newRedactor([]string{"sk-live-secret-value"})
 	if got := red.value(nil); got != nil {
