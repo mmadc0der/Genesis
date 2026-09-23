@@ -3,6 +3,10 @@
 # Missing default YAML files are copied onto an existing named volume so image
 # upgrades can deliver newly shipped agents and rules. repos.d is created when
 # missing; image defaults are copied only if that directory exists in the image.
+# providers.d is not seeded. It stays outside this volume. When
+# GENESIS_PROVIDERS_DIR or /etc/genesis/providers.d exists, root tightens
+# that directory in place (0750 root:genesis, files 0640) and does not
+# follow symlinks. The example provider file is not copied here.
 # Existing files, including
 # dangling or live dest symlinks, are left unchanged. Only regular files with
 # valid agent/rule names are copied; source and dest directories must not be
@@ -123,12 +127,35 @@ copy_missing "$defaults/agents.d" "$agents"
 copy_missing "$defaults/rules.d" "$rules"
 copy_missing "$defaults/repos.d" "$repos"
 
+lock_providers() {
+	path=${GENESIS_PROVIDERS_DIR:-/etc/genesis/providers.d}
+	if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+		return 0
+	fi
+	if [ -L "$path" ]; then
+		echo "genesis: providers directory must not be a symlink: $path" >&2
+		exit 1
+	fi
+	if [ ! -d "$path" ]; then
+		echo "genesis: providers path is not a directory: $path" >&2
+		exit 1
+	fi
+	# find without -L does not follow file or directory symlinks. -xdev
+	# refuses to walk a bind mount nested inside the provider directory.
+	if [ "$(id -u)" = 0 ]; then
+		find "$path" -xdev \( -type d -o -type f \) -exec chown root:genesis {} +
+	fi
+	find "$path" -xdev -type d -exec chmod 0750 {} +
+	find "$path" -xdev -type f -exec chmod 0640 {} +
+}
+
 if [ "${1:-}" = "seed-config" ]; then
 	exit 0
 fi
 
 own_tree "$config" 0755 0644
 own_tree "$data" 0700 0600
+lock_providers
 
 if [ "${1:-}" = "own-config" ]; then
 	exit 0

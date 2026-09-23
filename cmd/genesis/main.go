@@ -35,12 +35,12 @@ func parseCommand(args []string) (string, []string) {
 }
 
 func runLaunchFromArgs(logger *slog.Logger, args []string) {
-	listen, agentsDir, rulesDir, reposDir, dataDir, syncToken, listenerUser := parseLaunchFlags(args, logger)
-	runLaunch(logger, listen, agentsDir, rulesDir, reposDir, dataDir, syncToken, listenerUser)
+	listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken, listenerUser := parseLaunchFlags(args, logger)
+	runLaunch(logger, listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken, listenerUser)
 }
 
 func runListen(logger *slog.Logger, args []string) {
-	listen, agentsDir, rulesDir, reposDir, dataDir, syncToken := parseListenFlags("listen", args, logger)
+	listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken := parseListenFlags("listen", args, logger)
 
 	absoluteAgentsDir, err := filepath.Abs(agentsDir)
 	if err != nil {
@@ -53,6 +53,10 @@ func runListen(logger *slog.Logger, args []string) {
 	absoluteReposDir, err := resolveOptionalDir(reposDir)
 	if err != nil {
 		fail(logger, "resolve repos directory", err)
+	}
+	absoluteProvidersDir, err := resolveOptionalDir(providersDir)
+	if err != nil {
+		fail(logger, "resolve providers directory", err)
 	}
 	absoluteDataDir, err := prepareDataDir(dataDir)
 	if err != nil {
@@ -80,9 +84,10 @@ func runListen(logger *slog.Logger, args []string) {
 	}
 
 	handler := &eventServer{
-		agentsDir: absoluteAgentsDir,
-		rulesDir:  absoluteRulesDir,
-		reposDir:  absoluteReposDir,
+		agentsDir:    absoluteAgentsDir,
+		rulesDir:     absoluteRulesDir,
+		reposDir:     absoluteReposDir,
+		providersDir: absoluteProvidersDir,
 		runner: processRunner{
 			pythonPath: pythonPath,
 			source:     embeddedPythonRunner,
@@ -112,6 +117,8 @@ func runListen(logger *slog.Logger, args []string) {
 		"rules", len(handler.generation.rules),
 		"repositories", len(handler.generation.repos),
 		"repositories_active", handler.generation.reposActive,
+		"providers", len(handler.generation.providers),
+		"providers_active", handler.generation.providersActive,
 		"digest", handler.generation.digest,
 		"python", pythonPath,
 		"data", absoluteDataDir,
@@ -123,29 +130,31 @@ func runListen(logger *slog.Logger, args []string) {
 	}
 }
 
-func parseListenFlags(command string, args []string, logger *slog.Logger) (listen, agentsDir, rulesDir, reposDir, dataDir, syncToken string) {
+func parseListenFlags(command string, args []string, logger *slog.Logger) (listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken string) {
 	flags := flag.NewFlagSet(command, flag.ExitOnError)
 	listenFlag := flags.String("listen", "127.0.0.1:8787", "HTTP listen address")
 	agentsFlag := flags.String("agents", "agents.d", "directory containing YAML agent definitions")
 	rulesFlag := flags.String("rules", "rules.d", "directory containing YAML rules")
 	reposFlag := flags.String("repos", "repos.d", "directory containing YAML repository declarations; missing directory leaves the layer inactive")
+	providersFlag := flags.String("providers", defaultProvidersDir, "root-owned directory of provider identity files; missing directory leaves the layer inactive")
 	dataFlag := flags.String("data", "genesis-data", "directory for per-run journals, stderr, results, and retained DeepSeek homes")
 	tokenFlag := flags.String("sync-token", os.Getenv(syncTokenEnv), "bearer token required for POST /sync; empty disables /sync")
 	parseFlagSet(flags, args, logger)
-	return *listenFlag, *agentsFlag, *rulesFlag, *reposFlag, *dataFlag, *tokenFlag
+	return *listenFlag, *agentsFlag, *rulesFlag, *reposFlag, *providersFlag, *dataFlag, *tokenFlag
 }
 
-func parseLaunchFlags(args []string, logger *slog.Logger) (listen, agentsDir, rulesDir, reposDir, dataDir, syncToken, listenerUser string) {
+func parseLaunchFlags(args []string, logger *slog.Logger) (listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, syncToken, listenerUser string) {
 	flags := flag.NewFlagSet("launch", flag.ExitOnError)
 	listenFlag := flags.String("listen", "127.0.0.1:8787", "HTTP listen address")
 	agentsFlag := flags.String("agents", "agents.d", "directory containing YAML agent definitions")
 	rulesFlag := flags.String("rules", "rules.d", "directory containing YAML rules")
 	reposFlag := flags.String("repos", "repos.d", "directory containing YAML repository declarations; missing directory leaves the layer inactive")
+	providersFlag := flags.String("providers", defaultProvidersDir, "root-owned directory of provider identity files; missing directory leaves the layer inactive")
 	dataFlag := flags.String("data", "genesis-data", "directory for per-run journals, stderr, results, and retained DeepSeek homes")
 	tokenFlag := flags.String("sync-token", os.Getenv(syncTokenEnv), "bearer token required for POST /sync; empty disables /sync")
 	listenerUserFlag := flags.String("listener-user", os.Getenv(listenerUserEnv), "OS user for the unprivileged listener; required when launch runs as root")
 	parseFlagSet(flags, args, logger)
-	return *listenFlag, *agentsFlag, *rulesFlag, *reposFlag, *dataFlag, *tokenFlag, *listenerUserFlag
+	return *listenFlag, *agentsFlag, *rulesFlag, *reposFlag, *providersFlag, *dataFlag, *tokenFlag, *listenerUserFlag
 }
 
 func resolveOptionalDir(path string) (string, error) {

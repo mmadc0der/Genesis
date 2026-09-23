@@ -104,6 +104,14 @@ never runs an agent-supplied shell snippet.
 | `ensure_agent_user` | dedicated `user`, Bash, home, cwd, allowlisted `setup` | applied by root launch / agents `/sync`; otherwise a hard failure so the generation is not activated |
 | `ensure_agent_paths` | shared-UID agent `cwd` / `home` | unsupported: no OS user; Genesis does not mkdir/chown as root |
 | `provision_declared_env` | declared `env` keys (not values) | unsupported: `env` is a process map, not a package graph |
+| `ensure_repository_grant` | local agent-to-repository grant | unsupported: not activated and not sent to GitHub |
+| `ensure_credential` | credential material for that grant | unsupported: key material stays `pending` or `none`; no App JWT, installation token, or SSH key |
+| `ensure_remote_registration` | remote key or App registration | unsupported: Genesis does not call GitHub |
+
+`providers.d` is reloaded with agents or repos, not as its own scope name.
+A missing providers directory stays inactive. Grant intents are omitted from
+rules-only plans. The HTTP `grant_plan` does not include secret references
+or provider identity names. See [providers.md](providers.md).
 
 Repository intents (`ensure_repository`, `ensure_actions`,
 `ensure_bootstrap`, `ensure_secrets`, `ensure_protection`,

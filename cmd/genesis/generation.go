@@ -11,18 +11,20 @@ import (
 )
 
 type generation struct {
-	agents      map[string]agentDefinition
-	rules       []rule
-	repos       map[string]repositoryDefinition
-	reposActive bool
-	digest      string
+	agents          map[string]agentDefinition
+	rules           []rule
+	repos           map[string]repositoryDefinition
+	reposActive     bool
+	providers       map[string]providerDefinition
+	providersActive bool
+	digest          string
 }
 
-func loadGeneration(agentsDir, rulesDir, reposDir string) (*generation, error) {
-	return loadScopedGeneration(agentsDir, rulesDir, reposDir, syncScope{Agents: true, Rules: true, Repos: true}, nil)
+func loadGeneration(agentsDir, rulesDir, reposDir, providersDir string) (*generation, error) {
+	return loadScopedGeneration(agentsDir, rulesDir, reposDir, providersDir, syncScope{Agents: true, Rules: true, Repos: true}, nil)
 }
 
-func loadScopedGeneration(agentsDir, rulesDir, reposDir string, scope syncScope, current *generation) (*generation, error) {
+func loadScopedGeneration(agentsDir, rulesDir, reposDir, providersDir string, scope syncScope, current *generation) (*generation, error) {
 	if !scope.Agents && !scope.Rules && !scope.Repos {
 		return nil, fmt.Errorf("sync scope must include agents, rules, and/or repos")
 	}
@@ -34,11 +36,15 @@ func loadScopedGeneration(agentsDir, rulesDir, reposDir string, scope syncScope,
 	var rules []rule
 	repos := map[string]repositoryDefinition{}
 	reposActive := false
+	providers := map[string]providerDefinition{}
+	providersActive := false
 	if current != nil {
 		agents = current.agents
 		rules = current.rules
 		repos = current.repos
 		reposActive = current.reposActive
+		providers = current.providers
+		providersActive = current.providersActive
 	}
 
 	if scope.Agents {
@@ -70,21 +76,39 @@ func loadScopedGeneration(agentsDir, rulesDir, reposDir string, scope syncScope,
 		repos = loaded
 		reposActive = active
 	}
+	if current == nil || scope.Agents || scope.Repos {
+		loaded, active, err := loadProviders(providersDir, agentsDir, rulesDir, reposDir)
+		if err != nil {
+			return nil, &generationLoadError{kind: "providers", err: err}
+		}
+		providers = loaded
+		providersActive = active
+	}
+	bound, err := bindGrants(agents, repos, reposActive, providers, providersActive)
+	if err != nil {
+		return nil, &generationLoadError{kind: "agents", err: err}
+	}
+	agents = bound
 
-	digest, err := digestGeneration(agents, rules, repos, reposActive)
+	digest, err := digestGeneration(agents, rules, repos, reposActive, providers, providersActive)
 	if err != nil {
 		kind := "agents"
 		if reposActive {
 			kind = "repos"
 		}
+		if providersActive {
+			kind = "providers"
+		}
 		return nil, &generationLoadError{kind: kind, err: err}
 	}
 	return &generation{
-		agents:      agents,
-		rules:       rules,
-		repos:       repos,
-		reposActive: reposActive,
-		digest:      digest,
+		agents:          agents,
+		rules:           rules,
+		repos:           repos,
+		reposActive:     reposActive,
+		providers:       providers,
+		providersActive: providersActive,
+		digest:          digest,
 	}, nil
 }
 
@@ -101,8 +125,8 @@ func (e *generationLoadError) Unwrap() error {
 	return e.err
 }
 
-func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map[string]repositoryDefinition, reposActive bool) (string, error) {
-	if err := generationUTF8(agents, rules, repos, reposActive); err != nil {
+func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map[string]repositoryDefinition, reposActive bool, providers map[string]providerDefinition, providersActive bool) (string, error) {
+	if err := generationUTF8(agents, rules, repos, reposActive, providers, providersActive); err != nil {
 		return "", err
 	}
 	type agentDigest struct {
@@ -114,6 +138,7 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 		Setup        *agentSetup       `json:"setup"`
 		Env          map[string]string `json:"env"`
 		Secrets      []string          `json:"secrets"`
+		GitHub       *digestGitHub     `json:"github,omitempty"`
 	}
 	type ruleDigest struct {
 		Name  string            `json:"name"`
@@ -138,6 +163,7 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 			Setup:        definition.Setup,
 			Env:          definition.Env,
 			Secrets:      definition.Secrets,
+			GitHub:       gitHubDigest(definition),
 		})
 	}
 	ruleDigests := make([]ruleDigest, 0, len(rules))
@@ -148,7 +174,7 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 			Agent: candidate.Agent,
 		})
 	}
-	if !reposActive {
+	if !reposActive && !providersActive {
 		payload, err := json.Marshal(struct {
 			Agents []agentDigest `json:"agents"`
 			Rules  []ruleDigest  `json:"rules"`
@@ -159,11 +185,41 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 		sum := sha256.Sum256(payload)
 		return "sha256:" + hex.EncodeToString(sum[:]), nil
 	}
+	if reposActive && !providersActive {
+		payload, err := json.Marshal(struct {
+			Agents       []agentDigest          `json:"agents"`
+			Rules        []ruleDigest           `json:"rules"`
+			Repositories []repositoryDefinition `json:"repositories"`
+		}{Agents: agentDigests, Rules: ruleDigests, Repositories: canonicalRepositories(repos)})
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(payload)
+		return "sha256:" + hex.EncodeToString(sum[:]), nil
+	}
+	if !reposActive {
+		payload, err := json.Marshal(struct {
+			Agents    []agentDigest    `json:"agents"`
+			Rules     []ruleDigest     `json:"rules"`
+			Providers []digestProvider `json:"providers"`
+		}{Agents: agentDigests, Rules: ruleDigests, Providers: canonicalProviderDigests(providers)})
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(payload)
+		return "sha256:" + hex.EncodeToString(sum[:]), nil
+	}
 	payload, err := json.Marshal(struct {
 		Agents       []agentDigest          `json:"agents"`
 		Rules        []ruleDigest           `json:"rules"`
 		Repositories []repositoryDefinition `json:"repositories"`
-	}{Agents: agentDigests, Rules: ruleDigests, Repositories: canonicalRepositories(repos)})
+		Providers    []digestProvider       `json:"providers"`
+	}{
+		Agents:       agentDigests,
+		Rules:        ruleDigests,
+		Repositories: canonicalRepositories(repos),
+		Providers:    canonicalProviderDigests(providers),
+	})
 	if err != nil {
 		return "", err
 	}
@@ -171,7 +227,7 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-func generationUTF8(agents map[string]agentDefinition, rules []rule, repos map[string]repositoryDefinition, reposActive bool) error {
+func generationUTF8(agents map[string]agentDefinition, rules []rule, repos map[string]repositoryDefinition, reposActive bool, providers map[string]providerDefinition, providersActive bool) error {
 	for id, definition := range agents {
 		if err := requireUTF8(id, definition.Instructions, definition.Cwd, definition.Home, definition.User); err != nil {
 			return err
@@ -192,6 +248,16 @@ func generationUTF8(agents map[string]agentDefinition, rules []rule, repos map[s
 		if err := requireUTF8(definition.Secrets...); err != nil {
 			return err
 		}
+		if definition.GitHub != nil {
+			if err := requireUTF8(definition.GitHub.Repository, definition.GitHub.Identity, definition.GitHub.Git); err != nil {
+				return err
+			}
+			for name, level := range definition.GitHub.Permissions {
+				if err := requireUTF8(name, level); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	for _, candidate := range rules {
 		if err := requireUTF8(candidate.name, candidate.Agent); err != nil {
@@ -203,15 +269,17 @@ func generationUTF8(agents map[string]agentDefinition, rules []rule, repos map[s
 			}
 		}
 	}
-	if !reposActive {
-		return nil
-	}
-	for _, repository := range repos {
-		if err := repositoryUTF8(repository); err != nil {
-			return err
+	if reposActive {
+		for _, repository := range repos {
+			if err := repositoryUTF8(repository); err != nil {
+				return err
+			}
 		}
 	}
-	return nil
+	if !providersActive {
+		return nil
+	}
+	return providerUTF8(providers)
 }
 
 func repositoryUTF8(repository repositoryDefinition) error {

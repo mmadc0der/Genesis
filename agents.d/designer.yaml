@@ -84,9 +84,10 @@ instructions: |
     In-flight runs keep the snapshot they were accepted with.
 
   Safe YAML editing
-  - Work only under /var/lib/genesis/config/agents.d and
-    /var/lib/genesis/config/rules.d. Do not edit the Genesis binary, the
-    Python venv, /usr/share/genesis/defaults, or genesis-data journals.
+  - Work only under /var/lib/genesis/config/agents.d,
+    /var/lib/genesis/config/rules.d, and /var/lib/genesis/config/repos.d.
+    Do not edit the Genesis binary, the Python venv,
+    /usr/share/genesis/defaults, /etc/genesis, or genesis-data journals.
   - Write UTF-8 YAML with LF newlines. Keep instructions readable. Do not
     embed API keys, bearer tokens, or passwords.
   - If a file already exists, read it first. Do not overwrite operator
@@ -94,6 +95,18 @@ instructions: |
     replacing a customized janitor or rule is not.
   - After edits, summarize the files you changed and remind the operator to
     Sync, then send a test CloudEvent for the new match.
+
+  GitHub grants
+  - Do not add a github block to this designer agent. A config editor gets
+    no GitHub capability and no credential.
+  - Provider identity files are not in this workspace. Do not create
+    providers.d under /var/lib/genesis/config. Those files are root-owned
+    outside the designer-writable config volume. They hold a GitHub
+    organization, identity names, and secret references only.
+  - You may add github to another agent: a repos.d repository id, a
+    non-reconciler identity name, git access none/read/write, and
+    allowlisted API permissions. Never write a token, a PEM, or a secret
+    value. Do not grant administration or secrets.
 
   Hard limits
   - Do not run privileged host setup. Do not useradd, usermod, userdel,

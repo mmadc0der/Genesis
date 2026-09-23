@@ -18,15 +18,20 @@ const (
 )
 
 type privilegedIntent struct {
-	Kind      string   `json:"kind"`
-	Agent     string   `json:"agent,omitempty"`
-	User      string   `json:"user,omitempty"`
-	Cwd       string   `json:"cwd,omitempty"`
-	Home      string   `json:"home,omitempty"`
-	Shell     string   `json:"shell,omitempty"`
-	Groups    []string `json:"groups,omitempty"`
-	Workspace string   `json:"workspace,omitempty"`
-	EnvKeys   []string `json:"env_keys,omitempty"`
+	Kind        string            `json:"kind"`
+	Agent       string            `json:"agent,omitempty"`
+	User        string            `json:"user,omitempty"`
+	Cwd         string            `json:"cwd,omitempty"`
+	Home        string            `json:"home,omitempty"`
+	Shell       string            `json:"shell,omitempty"`
+	Groups      []string          `json:"groups,omitempty"`
+	Workspace   string            `json:"workspace,omitempty"`
+	EnvKeys     []string          `json:"env_keys,omitempty"`
+	Repository  string            `json:"repository,omitempty"`
+	Identity    string            `json:"identity,omitempty"`
+	Git         string            `json:"git,omitempty"`
+	Permissions map[string]string `json:"permissions,omitempty"`
+	Credential  string            `json:"credential,omitempty"`
 }
 
 type privilegedPlan struct {
@@ -79,19 +84,19 @@ func buildPlan(agents map[string]agentDefinition, includeAgents bool) privileged
 				Home:  definition.Home,
 			})
 		}
-		if len(definition.Env) == 0 {
-			continue
+		if len(definition.Env) > 0 {
+			keys := make([]string, 0, len(definition.Env))
+			for key := range definition.Env {
+				keys = append(keys, key)
+			}
+			slices.Sort(keys)
+			intents = append(intents, privilegedIntent{
+				Kind:    intentProvisionDeclaredEnv,
+				Agent:   id,
+				EnvKeys: keys,
+			})
 		}
-		keys := make([]string, 0, len(definition.Env))
-		for key := range definition.Env {
-			keys = append(keys, key)
-		}
-		slices.Sort(keys)
-		intents = append(intents, privilegedIntent{
-			Kind:    intentProvisionDeclaredEnv,
-			Agent:   id,
-			EnvKeys: keys,
-		})
+		intents = appendGrantIntents(intents, id, definition)
 	}
 	return privilegedPlan{Intents: intents, Agents: true}
 }
@@ -119,6 +124,10 @@ func evaluatePlan(plan privilegedPlan) (coordinateResult, error) {
 				Reason: "env is a process map, not a package graph; Genesis does not install runtimes or packages",
 			})
 		default:
+			if change, ok := classifyGrantIntent(intent); ok {
+				result.Unsupported = append(result.Unsupported, change)
+				continue
+			}
 			return coordinateResult{}, fmt.Errorf("unknown privileged intent kind %q", intent.Kind)
 		}
 	}

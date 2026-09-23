@@ -54,20 +54,22 @@ const (
 )
 
 type controlConfig struct {
-	listen      string
-	listenerURL string
-	agentsDir   string
-	rulesDir    string
-	reposDir    string
-	dataDir     string
-	syncToken   string
-	webDir      string
+	listen       string
+	listenerURL  string
+	agentsDir    string
+	rulesDir     string
+	reposDir     string
+	providersDir string
+	dataDir      string
+	syncToken    string
+	webDir       string
 }
 
 type controlServer struct {
 	agentsDir       string
 	rulesDir        string
 	reposDir        string
+	providersDir    string
 	dataDir         string
 	listenerURL     string
 	syncToken       string
@@ -162,6 +164,7 @@ func runControl(logger *slog.Logger, args []string) {
 		"agents", cfg.agentsDir,
 		"rules", cfg.rulesDir,
 		"repos", cfg.reposDir,
+		"providers", cfg.providersDir,
 		"data", cfg.dataDir,
 		"web", cfg.webDir,
 		"sync_configured", cfg.syncToken != "",
@@ -178,6 +181,7 @@ func parseControlConfig(args []string, logger *slog.Logger) (controlConfig, erro
 	agentsFlag := flags.String("agents", "agents.d", "directory containing YAML agent definitions")
 	rulesFlag := flags.String("rules", "rules.d", "directory containing YAML rules")
 	reposFlag := flags.String("repos", "repos.d", "directory containing YAML repository declarations; missing directory leaves the layer inactive")
+	providersFlag := flags.String("providers", defaultProvidersDir, "root-owned directory of provider identity files; missing directory leaves the layer inactive")
 	dataFlag := flags.String("data", "genesis-data", "read-only per-run journal directory")
 	tokenFlag := flags.String("sync-token", os.Getenv(syncTokenEnv), "bearer token sent only to the listener POST /sync")
 	webFlag := flags.String("web", controlDefaultWeb, "directory of built control panel files; missing directory serves the API only")
@@ -202,6 +206,13 @@ func parseControlConfig(args []string, logger *slog.Logger) (controlConfig, erro
 			return controlConfig{}, fmt.Errorf("resolve repos directory: %w", err)
 		}
 	}
+	providersDir := strings.TrimSpace(*providersFlag)
+	if providersDir != "" {
+		providersDir, err = filepath.Abs(providersDir)
+		if err != nil {
+			return controlConfig{}, fmt.Errorf("resolve providers directory: %w", err)
+		}
+	}
 	dataDir, err := existingDir(*dataFlag, "data")
 	if err != nil {
 		return controlConfig{}, err
@@ -221,14 +232,15 @@ func parseControlConfig(args []string, logger *slog.Logger) (controlConfig, erro
 		}
 	}
 	return controlConfig{
-		listen:      *listenFlag,
-		listenerURL: listenerURL,
-		agentsDir:   agentsDir,
-		rulesDir:    rulesDir,
-		reposDir:    reposDir,
-		dataDir:     dataDir,
-		syncToken:   *tokenFlag,
-		webDir:      webDir,
+		listen:       *listenFlag,
+		listenerURL:  listenerURL,
+		agentsDir:    agentsDir,
+		rulesDir:     rulesDir,
+		reposDir:     reposDir,
+		providersDir: providersDir,
+		dataDir:      dataDir,
+		syncToken:    *tokenFlag,
+		webDir:       webDir,
 	}, nil
 }
 
@@ -280,6 +292,7 @@ func newControlServer(cfg controlConfig, logger *slog.Logger) *controlServer {
 		agentsDir:       cfg.agentsDir,
 		rulesDir:        cfg.rulesDir,
 		reposDir:        cfg.reposDir,
+		providersDir:    cfg.providersDir,
 		dataDir:         cfg.dataDir,
 		listenerURL:     cfg.listenerURL,
 		syncToken:       cfg.syncToken,
@@ -443,7 +456,7 @@ func (c *controlServer) currentState(r *http.Request) controlState {
 }
 
 func (c *controlServer) loadDesired() (*generationView, error) {
-	loaded, err := loadGeneration(c.agentsDir, c.rulesDir, c.reposDir)
+	loaded, err := loadGeneration(c.agentsDir, c.rulesDir, c.reposDir, c.providersDir)
 	if err != nil {
 		return nil, err
 	}
@@ -739,7 +752,8 @@ func sameAgent(left, right agentView) bool {
 		left.User == right.User &&
 		sameSetup(left.Setup, right.Setup) &&
 		maps.Equal(left.Env, right.Env) &&
-		slices.Equal(left.Secrets, right.Secrets)
+		slices.Equal(left.Secrets, right.Secrets) &&
+		sameGitHub(left.GitHub, right.GitHub)
 }
 
 func sameSetup(left, right *agentSetup) bool {

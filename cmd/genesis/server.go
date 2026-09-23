@@ -39,14 +39,16 @@ type cloudEvent map[string]json.RawMessage
 // user, cwd/home remain a workspace split under the listener UID and are not
 // a security sandbox.
 type agentDefinition struct {
-	Instructions string            `yaml:"instructions"`
-	Cwd          string            `yaml:"cwd"`
-	Home         string            `yaml:"home"`
-	User         string            `yaml:"user,omitempty"`
-	Setup        *agentSetup       `yaml:"setup,omitempty"`
-	Env          map[string]string `yaml:"env,omitempty"`
-	Secrets      []string          `yaml:"secrets,omitempty"`
-	id           string
+	Instructions   string            `yaml:"instructions"`
+	Cwd            string            `yaml:"cwd"`
+	Home           string            `yaml:"home"`
+	User           string            `yaml:"user,omitempty"`
+	Setup          *agentSetup       `yaml:"setup,omitempty"`
+	Env            map[string]string `yaml:"env,omitempty"`
+	Secrets        []string          `yaml:"secrets,omitempty"`
+	GitHub         *agentGitHub      `yaml:"github,omitempty" json:"-"`
+	id             string
+	credentialMode string
 }
 
 // agentSetup is the allowlisted host contract for a dedicated OS user.
@@ -87,16 +89,17 @@ type invocationRunner interface {
 }
 
 type eventServer struct {
-	agentsDir   string
-	rulesDir    string
-	reposDir    string
-	runner      invocationRunner
-	newRunID    func() (string, error)
-	secrets     map[string]string
-	logger      *slog.Logger
-	syncToken   string
-	coordinator privilegedCoordinator
-	store       *runStore
+	agentsDir    string
+	rulesDir     string
+	reposDir     string
+	providersDir string
+	runner       invocationRunner
+	newRunID     func() (string, error)
+	secrets      map[string]string
+	logger       *slog.Logger
+	syncToken    string
+	coordinator  privilegedCoordinator
+	store        *runStore
 
 	mu         sync.RWMutex
 	syncing    bool
@@ -119,7 +122,7 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *eventServer) loadInitialGeneration() error {
-	generation, err := loadGeneration(s.agentsDir, s.rulesDir, s.reposDir)
+	generation, err := loadGeneration(s.agentsDir, s.rulesDir, s.reposDir, s.providersDir)
 	if err != nil {
 		return err
 	}
@@ -503,6 +506,9 @@ func (a agentDefinition) validate() error {
 		}
 	}
 	if err := a.setupContract().validate(a.User != ""); err != nil {
+		return err
+	}
+	if err := a.validateGitHubShape(); err != nil {
 		return err
 	}
 

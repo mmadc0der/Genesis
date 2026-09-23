@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyPanelLoad, buildMessage, driftLabel, eventLine, maxCursor, mergeEvents, repositoryLabel, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
+import { applyPanelLoad, buildMessage, driftLabel, eventLine, githubGrantSummary, maxCursor, mergeEvents, repositoryLabel, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
 import type { Agent, ControlState, LifecycleEvent, Repository, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
@@ -161,6 +161,49 @@ describe("control panel model", () => {
     );
     expect(repositorySyncNotice(200, "not-json")).toContain("not JSON");
     expect(repositorySyncNotice(500, "repositories are invalid")).toBe("repositories are invalid");
+    const grantBody = JSON.stringify({
+      repository_plan: { remote_mutation: "none", applied: [] },
+      grant_plan: { credential_active: false, key_material: "pending", remote_registration: "unsupported" },
+    });
+    expect(repositorySyncNotice(200, grantBody)).toContain("GitHub credentials were not activated.");
+    expect(
+      repositorySyncNotice(
+        200,
+        JSON.stringify({
+          repository_plan: { remote_mutation: "none", applied: [] },
+          grant_plan: { credential_active: true, key_material: "pending", remote_registration: "unsupported" },
+        }),
+      ),
+    ).toContain("credential was reported active");
+    const summary = githubGrantSummary({
+      github: {
+        repository: "lab-widget",
+        git: "read",
+        credential: "none",
+        permissions: { metadata: "read", contents: "read" },
+        secret: "GENESIS_PROVIDER_SECRET_REF_XYZ",
+        identity: "prog-bot",
+      } as Agent["github"],
+    });
+    expect(summary).toBe("GitHub lab-widget, git read, no credential, contents read, metadata read. Not activated.");
+    expect(summary).not.toContain("GENESIS_PROVIDER_SECRET_REF_XYZ");
+    expect(summary).not.toContain("prog-bot");
+    expect(
+      githubGrantSummary({
+        github: { repository: "lab", git: "write", credential: "pending", permissions: { contents: "write" } },
+      }),
+    ).toBe("GitHub lab, git write, credential pending, contents write. Not activated.");
+    const unexpected = githubGrantSummary({
+      github: {
+        repository: "lab",
+        git: "read",
+        credential: "GENESIS_PROVIDER_SECRET_REF_XYZ",
+        permissions: { metadata: "read" },
+      },
+    });
+    expect(unexpected).toBe("GitHub lab, git read, unrecognized credential, metadata read. Not activated.");
+    expect(unexpected).not.toContain("GENESIS_PROVIDER_SECRET_REF_XYZ");
+    expect(githubGrantSummary({ github: undefined })).toBe("");
     expect(JSON.stringify(secretNames(previousRepository))).not.toContain("ghp_");
     expect(kept.state?.drift).toBe("desired_invalid");
     expect(kept.runs.map((item) => item.run_id)).toEqual(["gen_1"]);

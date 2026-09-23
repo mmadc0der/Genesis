@@ -28,7 +28,7 @@ uv run --locked ./bin/genesis launch \
 ./bin/genesis control \
   -listen 127.0.0.1:8790 \
   -listener http://127.0.0.1:8787 \
-  -agents agents.d -rules rules.d -repos repos.d -data genesis-data \
+  -agents agents.d -rules rules.d -repos repos.d -providers providers.d -data genesis-data \
   -web web/dist
 ```
 
@@ -86,7 +86,10 @@ still returns the active generation when the listener can, `/api/agents`, `/api/
 The UI keeps state, repositories, and runs when an agent, rule, or repository
 request fails. Repository records contain secret names only. The panel shows
 that a repository plan was not applied; Sync does not pretend a provider
-changed.
+changed. Provider identity files are not served. Agent grants, when
+present, show repository, git access, allowlisted permissions, and whether
+a credential is pending or unnecessary. They do not show provider identity
+records or secret references. See [providers.md](providers.md).
 `sync_configured` and `syncing` are listener facts on `active` and
 `listener`; a file snapshot omits them.
 

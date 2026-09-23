@@ -56,6 +56,9 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 	if designer.Home != "/home/genesis" {
 		t.Fatalf("designer home = %q", designer.Home)
 	}
+	if designer.GitHub != nil {
+		t.Fatalf("designer github = %#v", designer.GitHub)
+	}
 	if len(designer.Secrets) != 1 || designer.Secrets[0] != deepSeekAPIKey {
 		t.Fatalf("designer secrets = %#v, want default %s only", designer.Secrets, deepSeekAPIKey)
 	}
@@ -78,6 +81,8 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"useradd",
 		"You must not POST /sync yourself",
 		"Do not run privileged host setup",
+		"no GitHub capability",
+		"providers.d",
 	} {
 		if !strings.Contains(designer.Instructions, phrase) {
 			t.Fatalf("designer instructions missing %q", phrase)
@@ -148,7 +153,7 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		t.Fatal("example.yaml must not match the designer user-message event")
 	}
 
-	generation, err := loadGeneration(filepath.Join(root, "agents.d"), filepath.Join(root, "rules.d"), filepath.Join(root, "repos.d"))
+	generation, err := loadGeneration(filepath.Join(root, "agents.d"), filepath.Join(root, "rules.d"), filepath.Join(root, "repos.d"), filepath.Join(root, "providers.d"))
 	if err != nil {
 		t.Fatal(err)
 	}

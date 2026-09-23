@@ -9,6 +9,7 @@ import {
   mergeEvents,
   mergeRuns,
   presenceLabel,
+  githubGrantSummary,
   repositoryLabel,
   repositoryPolicy,
   repositorySyncNotice,
@@ -516,6 +517,7 @@ export function App() {
               <p class="mono path">{agent.cwd}</p>
               <p class="mono path">{agent.home}</p>
               <p>Secrets: {agent.secrets.length ? agent.secrets.join(", ") : "none"}</p>
+              {agent.github ? <p>{githubGrantSummary(agent)}</p> : null}
             </section>
           ) : null}
           {rule ? (
