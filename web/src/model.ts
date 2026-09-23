@@ -63,7 +63,7 @@ export function repositorySyncNotice(status: number, body: string): string {
       credential_active?: boolean;
       key_material?: string;
       remote_registration?: string;
-      material?: unknown[];
+      material?: Array<{ remote_status?: string; remote_key_id?: string }>;
     };
   };
   try {
@@ -73,7 +73,7 @@ export function repositorySyncNotice(status: number, body: string): string {
         credential_active?: boolean;
         key_material?: string;
         remote_registration?: string;
-        material?: unknown[];
+        material?: Array<{ remote_status?: string; remote_key_id?: string }>;
       };
     };
   } catch {
@@ -92,7 +92,13 @@ export function repositorySyncNotice(status: number, body: string): string {
       return "Sync completed, but GitHub remote registration was not left unsupported.";
     }
     if (Array.isArray(grant.material) && grant.material.length > 0) {
-      return `${base} Root holds local SSH material. Live GitHub registration remains pending.`;
+      const registered = grant.material.some(
+        (item) => item?.remote_status === "ready" && typeof item.remote_key_id === "string" && item.remote_key_id.length > 0,
+      );
+      if (registered) {
+        return `${base} The SSH deploy key is registered. A dedicated run can receive its per-run SSH socket. Repository settings, rulesets, Actions, webhooks, and App tokens were not applied.`;
+      }
+      return `${base} Root holds local SSH material. The deploy key is not ready.`;
     }
     return `${base} GitHub credentials were not activated.`;
   }

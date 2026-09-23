@@ -259,7 +259,7 @@ func TestGrantPlanIsLocalAndDoesNotExposeProviderMaterial(t *testing.T) {
 	if grants.CredentialActive || grants.KeyMaterial != keyMaterialPending || grants.RemoteRegistration != remoteRegistrationUnsupported {
 		t.Fatalf("grant plan = %#v", grants)
 	}
-	if err := grantPlanExposes(grants, providerSecretRef, programmerSecret, reviewerSecret, programmerIdentity, reviewerIdentity, readerIdentity, reconcilerIdentity); err != nil {
+	if err := grantPlanExposes(grants, providerSecretRef, programmerSecret, reviewerSecret, programmerIdentity, reviewerIdentity, readerIdentity, reconcilerIdentity, "910000000000000001", "910000000000000002"); err != nil {
 		t.Fatal(err)
 	}
 	publicOnly := buildPlan(map[string]agentDefinition{"reader": loaded.agents["reader"]}, true)
@@ -704,8 +704,8 @@ func TestDockerImageDoesNotInstallExampleProviders(t *testing.T) {
 	if strings.Contains(text, "COPY providers.d") {
 		t.Fatal("image copies providers.d into the live directory")
 	}
-	if strings.Contains(strings.ToLower(text), "openssh") {
-		t.Fatal("image installs OpenSSH; the agent protocol is in-process")
+	if !strings.Contains(text, "openssh-client") || strings.Contains(text, "openssh-server") {
+		t.Fatal("image must install the OpenSSH client and not an SSH server")
 	}
 	compose, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
 	if err != nil {
@@ -713,6 +713,9 @@ func TestDockerImageDoesNotInstallExampleProviders(t *testing.T) {
 	}
 	if strings.Count(string(compose), "target: /var/lib/genesis/credentials") != 1 {
 		t.Fatal("credential store must be mounted on the root service only")
+	}
+	if strings.Count(string(compose), "target: /var/lib/genesis/secrets") != 1 {
+		t.Fatal("secret store must be mounted on the root service only")
 	}
 	entrypoint, err := os.ReadFile(filepath.Join(root, "docker-entrypoint.sh"))
 	if err != nil {
@@ -733,8 +736,9 @@ func TestDockerImageDoesNotInstallExampleProviders(t *testing.T) {
 		"chmod 0750 /etc/genesis/providers.d",
 		"chown root:root /var/lib/genesis /var/lib/genesis/credentials",
 		"chmod 0755 /var/lib/genesis",
-		"chmod 0700 /var/lib/genesis/credentials",
+		"chmod 0700 /var/lib/genesis/credentials /var/lib/genesis/secrets",
 		"-credentials", "/var/lib/genesis/credentials",
+		"-secrets", "/var/lib/genesis/secrets",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("Dockerfile missing %q", want)
@@ -772,6 +776,8 @@ identities:
     role: reconciler
     credential: app
     secret: ` + providerSecretRef + `
+    app_id: "910000000000000001"
+    installation_id: "910000000000000002"
   - name: ` + programmerIdentity + `
     role: programmer
     credential: app

@@ -179,7 +179,21 @@ describe("control panel model", () => {
           },
         }),
       ),
-    ).toContain("Live GitHub registration remains pending.");
+    ).toContain("The deploy key is not ready.");
+    expect(
+      repositorySyncNotice(
+        200,
+        JSON.stringify({
+          repository_plan: { remote_mutation: "none", applied: [] },
+          grant_plan: {
+            credential_active: false,
+            key_material: "pending",
+            remote_registration: "unsupported",
+            material: [{ grant_id: "gabc", remote_status: "ready", remote_key_id: "42" }],
+          },
+        }),
+      ),
+    ).toContain("SSH deploy key is registered.");
     expect(
       repositorySyncNotice(
         200,

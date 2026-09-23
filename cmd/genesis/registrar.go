@@ -19,20 +19,13 @@ type grantRegistration struct {
 	Repository  string
 	Fingerprint string
 	PublicKey   string
+	Git         string
+	RemoteKeyID string
 }
 
 type grantRegistrationResult struct {
 	Status      string
 	RemoteKeyID string
-}
-
-type githubRegistrar struct{}
-
-func (githubRegistrar) Register(ctx context.Context, _ grantRegistration) (grantRegistrationResult, error) {
-	if err := ctx.Err(); err != nil {
-		return grantRegistrationResult{}, err
-	}
-	return grantRegistrationResult{Status: remoteRegistrationUnsupported}, nil
 }
 
 // fakeRegistrar lets tests complete the ready path without a network.
@@ -61,7 +54,7 @@ func (f *fakeRegistrar) Register(_ context.Context, req grantRegistration) (gran
 		status = remoteRegistrationUnsupported
 	}
 	switch status {
-	case remoteRegistrationUnsupported, remoteRegistrationNone, remoteStatusReady, remoteStatusPending:
+	case remoteRegistrationUnsupported, remoteRegistrationNone, remoteStatusReady, remoteStatusPending, remoteStatusRefused:
 	default:
 		return grantRegistrationResult{}, errUnknownRegistrationStatus
 	}

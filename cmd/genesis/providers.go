@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -29,6 +31,8 @@ const (
 	remoteRegistrationUnsupported = "unsupported"
 )
 
+var gitHubIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
+
 type providerDefinition struct {
 	ID         string             `json:"-" yaml:"-"`
 	Provider   string             `json:"-" yaml:"provider"`
@@ -37,10 +41,12 @@ type providerDefinition struct {
 }
 
 type providerIdentity struct {
-	Name       string `json:"-" yaml:"name"`
-	Role       string `json:"-" yaml:"role"`
-	Credential string `json:"-" yaml:"credential"`
-	Secret     string `json:"-" yaml:"secret,omitempty"`
+	Name           string `json:"-" yaml:"name"`
+	Role           string `json:"-" yaml:"role"`
+	Credential     string `json:"-" yaml:"credential"`
+	Secret         string `json:"-" yaml:"secret,omitempty"`
+	AppID          string `json:"-" yaml:"app_id,omitempty"`
+	InstallationID string `json:"-" yaml:"installation_id,omitempty"`
 }
 
 func loadProviders(directory, agentsDir, rulesDir, reposDir string) (map[string]providerDefinition, bool, error) {
@@ -242,6 +248,9 @@ func (identity providerIdentity) validate() error {
 			return err
 		}
 	}
+	if err := validateReconcilerAppIDs(identity); err != nil {
+		return err
+	}
 	switch identity.Credential {
 	case credentialApp:
 		if identity.Role == roleReader {
@@ -261,6 +270,35 @@ func (identity providerIdentity) validate() error {
 		return errors.New("credential must be app or none")
 	}
 	return nil
+}
+
+func validateReconcilerAppIDs(identity providerIdentity) error {
+	if err := rejectSecretMaterial("identities.app_id", identity.AppID); err != nil {
+		return err
+	}
+	if err := rejectSecretMaterial("identities.installation_id", identity.InstallationID); err != nil {
+		return err
+	}
+	if identity.Role != roleReconciler {
+		if identity.AppID != "" || identity.InstallationID != "" {
+			return errors.New("app id is only valid on the reconciler identity")
+		}
+		return nil
+	}
+	if err := validateGitHubID("identities.app_id", identity.AppID); err != nil {
+		return err
+	}
+	return validateGitHubID("identities.installation_id", identity.InstallationID)
+}
+
+func validateGitHubID(field, value string) error {
+	if !gitHubIDPattern.MatchString(value) {
+		return fmt.Errorf("%s is invalid", field)
+	}
+	if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+		return fmt.Errorf("%s is invalid", field)
+	}
+	return rejectSecretMaterial(field, value)
 }
 
 func validateProviderSet(providers map[string]providerDefinition) error {

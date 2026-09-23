@@ -29,10 +29,11 @@ const (
 	intentEnsureCredential         = "ensure_credential"
 	intentEnsureRemoteRegistration = "ensure_remote_registration"
 
-	grantLocalOnlyReason     = "repository grant is a local intent only; Genesis did not activate a credential or call GitHub"
-	keyMaterialPendingReason = "key material is pending; Genesis did not mint an App JWT, installation access token, or SSH private key"
-	keyMaterialNoneReason    = "no key material is required; Genesis did not activate a credential"
-	remoteRegistrationReason = "remote registration is unsupported until stage 3; Genesis did not call GitHub or register a key"
+	grantLocalOnlyReason          = "repository grant is a local intent only; Genesis did not activate a credential or call GitHub"
+	keyMaterialPendingReason      = "key material is pending; Genesis did not mint an App JWT, installation access token, or SSH private key"
+	keyMaterialNoneReason         = "no key material is required; Genesis did not activate a credential"
+	remoteRegistrationReason      = "the listener does not call GitHub; root launch registers a deploy key when the reconciler app is configured and records the result on material"
+	coordinatorRegistrationReason = "deploy key registration is not ready"
 )
 
 // agentGitHub is an optional capability on an agent. Identity is a provider
@@ -100,10 +101,12 @@ type digestProvider struct {
 }
 
 type digestProviderIdentity struct {
-	Name       string `json:"name"`
-	Role       string `json:"role"`
-	Credential string `json:"credential"`
-	SecretRef  string `json:"secret_ref,omitempty"`
+	Name           string `json:"name"`
+	Role           string `json:"role"`
+	Credential     string `json:"credential"`
+	SecretRef      string `json:"secret_ref,omitempty"`
+	AppID          string `json:"app_id,omitempty"`
+	InstallationID string `json:"installation_id,omitempty"`
 }
 
 // rolePermissionCeilings are the maximum GitHub App permission levels a
@@ -574,10 +577,12 @@ func canonicalProviderDigests(providers map[string]providerDefinition) []digestP
 		digests := make([]digestProviderIdentity, 0, len(identities))
 		for _, identity := range identities {
 			digests = append(digests, digestProviderIdentity{
-				Name:       identity.Name,
-				Role:       identity.Role,
-				Credential: identity.Credential,
-				SecretRef:  identity.Secret,
+				Name:           identity.Name,
+				Role:           identity.Role,
+				Credential:     identity.Credential,
+				SecretRef:      identity.Secret,
+				AppID:          identity.AppID,
+				InstallationID: identity.InstallationID,
 			})
 		}
 		out = append(out, digestProvider{
@@ -596,7 +601,7 @@ func providerUTF8(providers map[string]providerDefinition) error {
 			return err
 		}
 		for _, identity := range provider.Identities {
-			if err := requireUTF8(identity.Name, identity.Role, identity.Credential, identity.Secret); err != nil {
+			if err := requireUTF8(identity.Name, identity.Role, identity.Credential, identity.Secret, identity.AppID, identity.InstallationID); err != nil {
 				return err
 			}
 		}

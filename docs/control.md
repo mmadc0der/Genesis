@@ -91,7 +91,9 @@ present, show repository, git access, allowlisted permissions, and whether
 a credential is pending or unnecessary. They do not show provider identity
 records, secret references, or SSH private keys. Run stderr and result
 bodies are stripped of OpenSSH private-key blocks before they are served.
-Live GitHub registration remains pending until stage 3. See
+A ready deploy key is reported on sync `material` and can be delivered as
+a per-run SSH socket. The panel does not show App ids, secret references,
+or private keys, and it does not treat an App token as active. See
 [providers.md](providers.md).
 `sync_configured` and `syncing` are listener facts on `active` and
 `listener`; a file snapshot omits them.

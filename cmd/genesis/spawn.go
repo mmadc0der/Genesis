@@ -57,13 +57,18 @@ type privilegedState struct {
 	listenerUser string
 	dataDir      string
 
-	mu          sync.Mutex
-	users       map[string]reconciledIdentity
-	spawned     map[int]*spawnedChild
-	credentials *credentialStore
-	registrar   grantRegistrar
-	held        map[string]heldGrant
-	uidGrants   map[uint32]*uidGrantHold
+	mu           sync.Mutex
+	users        map[string]reconciledIdentity
+	spawned      map[int]*spawnedChild
+	credentials  *credentialStore
+	secrets      *secretStore
+	agentsDir    string
+	rulesDir     string
+	reposDir     string
+	providersDir string
+	registrar    grantRegistrar
+	held         map[string]heldGrant
+	uidGrants    map[uint32]*uidGrantHold
 }
 
 type uidGrantHold struct {

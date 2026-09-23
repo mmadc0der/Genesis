@@ -16,6 +16,7 @@ set -eu
 config="${GENESIS_CONFIG_DIR:-/var/lib/genesis/config}"
 data="${GENESIS_DATA_DIR:-/var/lib/genesis/data}"
 credentials="${GENESIS_CREDENTIALS_DIR:-/var/lib/genesis/credentials}"
+secrets="${GENESIS_SECRETS_DIR:-/var/lib/genesis/secrets}"
 defaults="${GENESIS_DEFAULTS_DIR:-/usr/share/genesis/defaults}"
 agents="$config/agents.d"
 rules="$config/rules.d"
@@ -187,6 +188,43 @@ lock_credentials() {
 	find "$path" -xdev -type f -exec chmod 0600 {} +
 }
 
+lock_secrets() {
+	path=$secrets
+	if [ -z "${GENESIS_SECRETS_DIR:-}" ] && [ ! -e "$path" ] && [ ! -L "$path" ]; then
+		return 0
+	fi
+	if [ -L "$path" ]; then
+		echo "genesis: secrets directory must not be a symlink: $path" >&2
+		exit 1
+	fi
+	case "$path" in
+		"$config"|"$config"/*|"$data"|"$data"/*|"$credentials"|"$credentials"/*)
+			echo "genesis: secrets directory must stay outside config, data, and credentials: $path" >&2
+			exit 1
+			;;
+	esac
+	mkdir -p "$path"
+	parent=$(dirname "$path")
+	if [ "$(id -u)" = 0 ] && [ "$parent" = "/var/lib/genesis" ]; then
+		if [ -L "$parent" ]; then
+			echo "genesis: secret parent must not be a symlink: $parent" >&2
+			exit 1
+		fi
+		chown root:root "$parent"
+		chmod 0755 "$parent"
+	fi
+	if [ -L "$path" ] || [ ! -d "$path" ]; then
+		echo "genesis: secrets path is not a directory: $path" >&2
+		exit 1
+	fi
+	# find without -L does not follow a secret file that was replaced by a symlink.
+	if [ "$(id -u)" = 0 ]; then
+		find "$path" -xdev \( -type d -o -type f \) -exec chown root:root {} +
+	fi
+	find "$path" -xdev -type d -exec chmod 0700 {} +
+	find "$path" -xdev -type f -exec chmod 0600 {} +
+}
+
 if [ "${1:-}" = "seed-config" ]; then
 	exit 0
 fi
@@ -195,6 +233,7 @@ own_tree "$config" 0755 0644
 own_tree "$data" 0700 0600
 lock_providers
 lock_credentials
+lock_secrets
 
 if [ "${1:-}" = "own-config" ]; then
 	exit 0

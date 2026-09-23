@@ -24,7 +24,7 @@ type listenerIdentity struct {
 	Groups   []uint32
 }
 
-func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, credentialsDir, syncToken, listenerUser string) {
+func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, providersDir, dataDir, credentialsDir, secretsDir, syncToken, listenerUser string) {
 	identity, err := resolveListenerIdentity(os.Geteuid(), listenerUser)
 	if err != nil {
 		fail(logger, "resolve listener user", err)
@@ -86,12 +86,22 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, provi
 		parent.Close()
 		fail(logger, "resolve credentials directory", err)
 	}
+	absoluteSecretsDir, err := filepath.Abs(secretsDir)
+	if err != nil {
+		child.Close()
+		parent.Close()
+		fail(logger, "resolve secrets directory", err)
+	}
 
 	listenerName := ""
 	if identity != nil {
 		listenerName = identity.Username
 	}
 	state := newPrivilegedState(logger, pythonPath, embeddedPythonRunner, listenerName, absoluteDataDir)
+	state.agentsDir = absoluteAgentsDir
+	state.rulesDir = absoluteRulesDir
+	state.reposDir = absoluteReposDir
+	state.providersDir = absoluteProvidersDir
 	if os.Geteuid() == 0 {
 		store, err := openCredentialStore(absoluteCredentialsDir, credentialBounds{
 			AgentsDir:    absoluteAgentsDir,
@@ -100,13 +110,31 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, provi
 			ProvidersDir: absoluteProvidersDir,
 			DataDir:      absoluteDataDir,
 			ConfigRoot:   designerWritableConfigRoot,
+			SecretsDir:   absoluteSecretsDir,
 		})
 		if err != nil {
 			child.Close()
 			parent.Close()
 			fail(logger, "prepare credential store", err)
 		}
+		secrets, err := openSecretStore(absoluteSecretsDir, secretBounds{
+			AgentsDir:      absoluteAgentsDir,
+			RulesDir:       absoluteRulesDir,
+			ReposDir:       absoluteReposDir,
+			ProvidersDir:   absoluteProvidersDir,
+			DataDir:        absoluteDataDir,
+			ConfigRoot:     designerWritableConfigRoot,
+			CredentialsDir: absoluteCredentialsDir,
+		})
+		if err != nil {
+			_ = store.dir.Close()
+			child.Close()
+			parent.Close()
+			fail(logger, "prepare secret store", err)
+		}
 		state.credentials = store
+		state.secrets = secrets
+		state.registrar = newGitHubRegistrar(state)
 	}
 	loaded, err := loadGeneration(absoluteAgentsDir, absoluteRulesDir, absoluteReposDir, absoluteProvidersDir)
 	if err != nil {
@@ -120,14 +148,7 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, provi
 		fail(logger, "reconcile dedicated agent users", err)
 	}
 
-	command := exec.Command(executable, "listen",
-		"-listen", listen,
-		"-agents", absoluteAgentsDir,
-		"-rules", absoluteRulesDir,
-		"-repos", absoluteReposDir,
-		"-providers", absoluteProvidersDir,
-		"-data", absoluteDataDir,
-	)
+	command := exec.Command(executable, listenerArgs(listen, absoluteAgentsDir, absoluteRulesDir, absoluteReposDir, absoluteProvidersDir, absoluteDataDir)...)
 	command.Env = launchChildEnv(syncToken, identity)
 	applyListenerIdentity(command, identity)
 	command.ExtraFiles = []*os.File{child}
@@ -152,6 +173,7 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, provi
 		"providers", absoluteProvidersDir,
 		"data", absoluteDataDir,
 		"credentials", absoluteCredentialsDir,
+		"secrets", absoluteSecretsDir,
 		"sync_configured", syncToken != "",
 	}
 	if identity != nil {
@@ -166,6 +188,18 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, provi
 	state.killAll()
 	_ = parent.Close()
 	os.Exit(code)
+}
+
+func listenerArgs(listen, agentsDir, rulesDir, reposDir, providersDir, dataDir string) []string {
+	return []string{
+		"listen",
+		"-listen", listen,
+		"-agents", agentsDir,
+		"-rules", rulesDir,
+		"-repos", reposDir,
+		"-providers", providersDir,
+		"-data", dataDir,
+	}
 }
 
 func resolveListenerIdentity(euid int, requested string) (*listenerIdentity, error) {

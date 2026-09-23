@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
@@ -31,6 +32,7 @@ const (
 	keyMaterialLocal        = "local"
 	remoteStatusReady       = "ready"
 	remoteStatusPending     = "pending"
+	remoteStatusRefused     = "refused"
 	grantGenerationInitial  = 1
 	credentialsDockerPath   = "/var/lib/genesis/credentials"
 	privateKeyFileName      = "id_ed25519"
@@ -54,6 +56,7 @@ type credentialBounds struct {
 	ProvidersDir string
 	DataDir      string
 	ConfigRoot   string
+	SecretsDir   string
 }
 
 type credentialStore struct {
@@ -190,7 +193,7 @@ func (s *credentialStore) rejectOverlap() error {
 	if s.bounds.ConfigRoot != "" {
 		forbidden = append(forbidden, s.bounds.ConfigRoot)
 	}
-	for _, path := range []string{s.bounds.AgentsDir, s.bounds.RulesDir, s.bounds.ReposDir, s.bounds.ProvidersDir, s.bounds.DataDir} {
+	for _, path := range []string{s.bounds.AgentsDir, s.bounds.RulesDir, s.bounds.ReposDir, s.bounds.ProvidersDir, s.bounds.DataDir, s.bounds.SecretsDir} {
 		if strings.TrimSpace(path) != "" {
 			forbidden = append(forbidden, path)
 		}
@@ -375,20 +378,23 @@ func (s *credentialStore) ensureRegistration(ctx context.Context, intent privile
 		if err != nil {
 			return err
 		}
-		if current.KeyMaterial != keyMaterialLocal {
+		if current.KeyMaterial != keyMaterialLocal || intent.Credential == credentialNone || intent.Git == gitNone {
 			record = current
 			return nil
+		}
+		if current.Generation != grantGenerationInitial {
+			return s.refuseReady(current, errGrantRotationRefused)
 		}
 		if registrar == nil {
 			registrar = githubRegistrar{}
 		}
 		private, err := s.readPrivateKey(id, current.Fingerprint)
 		if err != nil {
-			return err
+			return s.refuseReady(current, err)
 		}
 		signer, err := ssh.NewSignerFromKey(private)
 		if err != nil {
-			return err
+			return s.refuseReady(current, err)
 		}
 		public := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
 		result, err := registrar.Register(ctx, grantRegistration{
@@ -397,24 +403,23 @@ func (s *credentialStore) ensureRegistration(ctx context.Context, intent privile
 			Repository:  intent.Repository,
 			Fingerprint: current.Fingerprint,
 			PublicKey:   public,
+			Git:         intent.Git,
+			RemoteKeyID: current.RemoteKeyID,
 		})
 		if err != nil {
-			return err
+			return s.refuseReady(current, err)
 		}
 		switch result.Status {
-		case remoteRegistrationUnsupported, remoteRegistrationNone, remoteStatusReady, remoteStatusPending:
+		case remoteRegistrationUnsupported, remoteRegistrationNone, remoteStatusReady, remoteStatusPending, remoteStatusRefused:
 		default:
-			return errUnknownRegistrationStatus
+			return s.refuseReady(current, errUnknownRegistrationStatus)
+		}
+		if result.Status == remoteStatusReady && result.RemoteKeyID == "" {
+			return s.refuseReady(current, errors.New("ready registration did not return a remote key id"))
 		}
 		current.RemoteStatus = result.Status
 		if result.Status == remoteStatusReady {
-			if result.RemoteKeyID == "" {
-				return errors.New("ready registration did not return a remote key id")
-			}
 			current.RemoteKeyID = result.RemoteKeyID
-		}
-		if current.Generation != grantGenerationInitial {
-			return errGrantRotationRefused
 		}
 		if err := s.saveRecord(current); err != nil {
 			return err
@@ -423,6 +428,17 @@ func (s *credentialStore) ensureRegistration(ctx context.Context, intent privile
 		return nil
 	})
 	return record, err
+}
+
+func (s *credentialStore) refuseReady(current grantRecord, cause error) error {
+	if current.RemoteStatus != remoteStatusReady {
+		return cause
+	}
+	current.RemoteStatus = remoteStatusRefused
+	if err := s.saveRecord(current); err != nil {
+		return err
+	}
+	return cause
 }
 
 func (s *credentialStore) ensureLocalKey(intent privilegedIntent, id string) (grantRecord, error) {
@@ -749,8 +765,13 @@ func (s *privilegedState) consumeGrantIntent(intent privilegedIntent) (grantDeci
 		s.logGrant(obs)
 		return decision, nil
 	case intentEnsureRemoteRegistration:
-		record, err := s.credentials.ensureRegistration(context.Background(), intent, s.grantDriver())
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		record, err := s.credentials.ensureRegistration(ctx, intent, s.grantDriver())
 		if err != nil {
+			if id, idErr := grantIDFromIntent(intent); idErr == nil {
+				s.dropHeld(intent.Agent, id)
+			}
 			return grantDecision{}, err
 		}
 		obs := record.observation()
@@ -760,7 +781,7 @@ func (s *privilegedState) consumeGrantIntent(intent privilegedIntent) (grantDeci
 			s.logGrant(obs)
 			return decision, nil
 		}
-		reason := remoteRegistrationReason
+		reason := coordinatorRegistrationReason
 		if record.KeyMaterial != keyMaterialLocal {
 			reason = "no SSH identity to register; Genesis did not call GitHub"
 		}
@@ -786,6 +807,20 @@ func (s *privilegedState) logGrant(obs grantObservation) {
 		"remote_key_id", obs.RemoteKeyID,
 		"key_material", obs.KeyMaterial,
 	)
+}
+
+func (s *privilegedState) dropHeld(agent, grantID string) {
+	if s == nil || agent == "" || grantID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held == nil {
+		return
+	}
+	if current, ok := s.held[agent]; ok && current.ID == grantID {
+		delete(s.held, agent)
+	}
 }
 
 func (s *privilegedState) replaceHeld(next map[string]heldGrant) {
