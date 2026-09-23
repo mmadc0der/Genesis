@@ -38,7 +38,7 @@ The listener loads `agents.d`, `rules.d`, and, when the directory exists,
 `repos.d` once at start and keeps an immutable in-memory generation (agent
 map, rule list, repository map, content digest). A missing `repos.d` is
 inactive and is omitted from the digest, so agent/rule digests stay
-compatible. `POST /events` matches only that snapshot. Editing YAML on disk
+compatible. A symlink is rejected; it is not treated as missing. `POST /events` matches only that snapshot. Editing YAML on disk
 does nothing until `POST /sync`. In-flight runs already hold the accept-time
 agent copy. Repository declarations do not start runs.
 
@@ -66,6 +66,8 @@ rules. `["repos"]` rereads repository declarations and leaves agents and rules
 cached. Unknown scope values are `400`. Scope is which directories to
 reread. It is not independent activation of host vs matcher state, and it is
 not an mtime "only new files" filter. A missing `repos.d` stays inactive.
+A symlink `repos.d` fails the load. `["repos"]` does not reload agents or
+rules and does not send a host plan.
 
 Successful sync:
 

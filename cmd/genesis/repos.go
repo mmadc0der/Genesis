@@ -3,12 +3,14 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 )
 
@@ -31,17 +33,21 @@ const (
 	roleDevops               = "devops"
 	maxDescriptionRunes      = 350
 	maxReviewCount           = 6
+	maxRepositoryFileBytes   = 1 << 20
+	maxActionPatternBytes    = 256
+	maxCheckContextRunes     = 255
+	maxActionSegments        = 8
 )
 
 var (
-	githubOrgPattern    = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
-	githubRepoPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
-	gitBranchPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	closedNamePattern   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-	secretNamePattern   = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
-	checkContextPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	actionPattern       = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:@[A-Za-z0-9_.*-]+)?$`)
-	repositoryRoles     = map[string]struct{}{
+	githubOrgPattern     = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
+	githubRepoPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+	gitBranchPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	closedNamePattern    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	secretNamePattern    = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+	actionSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9_.*-]+$`)
+	actionRefPattern     = regexp.MustCompile(`^[A-Za-z0-9_.*-]+$`)
+	repositoryRoles      = map[string]struct{}{
 		roleManager:    {},
 		roleProgrammer: {},
 		roleReviewer:   {},
@@ -148,13 +154,30 @@ func loadRepositories(directory string) (map[string]repositoryDefinition, bool, 
 		return nil, false, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, false, fmt.Errorf("repos directory must not be a symlink")
+		return nil, false, errors.New("repos directory must not be a symlink")
 	}
 	if !info.IsDir() {
 		return nil, false, fmt.Errorf("repos path %q is not a directory", directory)
 	}
+	// Re-open the directory we just classified. O_NOFOLLOW keeps a symlink swap
+	// from redirecting the read, and the directory fd is what later Openat calls use.
+	dirFile, err := os.OpenFile(directory, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, false, errors.New("repos directory must not be a symlink")
+		}
+		return nil, false, err
+	}
+	defer dirFile.Close()
+	opened, err := dirFile.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !opened.IsDir() {
+		return nil, false, fmt.Errorf("repos path %q is not a directory", directory)
+	}
 
-	entries, err := os.ReadDir(directory)
+	entries, err := dirFile.ReadDir(-1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -166,26 +189,23 @@ func loadRepositories(directory string) (map[string]repositoryDefinition, bool, 
 		if extension != ".yaml" && extension != ".yml" {
 			continue
 		}
-		path := filepath.Join(directory, name)
-		fileInfo, err := os.Lstat(path)
-		if err != nil {
-			return nil, false, err
-		}
-		if fileInfo.Mode()&os.ModeSymlink != 0 {
-			return nil, false, fmt.Errorf("%s: repository file must not be a symlink", name)
-		}
-		if !fileInfo.Mode().IsRegular() {
-			return nil, false, fmt.Errorf("%s: repository file must be a regular file", name)
+		if name == "." || name == ".." || strings.ContainsAny(name, `/\`) || strings.ContainsRune(name, 0) {
+			return nil, false, fmt.Errorf("%s: invalid repository file name", name)
 		}
 		id, err := agentIDFromFilename(name)
-		if err != nil {
-			return nil, false, fmt.Errorf("%s: invalid repository id %q", name, strings.TrimSuffix(name, filepath.Ext(name)))
+		if err != nil || strings.Contains(id, "..") {
+			stem := strings.TrimSuffix(name, filepath.Ext(name))
+			return nil, false, fmt.Errorf("%s: invalid repository id %q", name, stem)
 		}
 		if _, exists := repos[id]; exists {
 			return nil, false, fmt.Errorf("%s: duplicate repository id %q", name, id)
 		}
+		contents, err := readRepositoryEntry(dirFile, name)
+		if err != nil {
+			return nil, false, err
+		}
 		var loaded repositoryDefinition
-		if err := loadYAMLDocument(path, &loaded); err != nil {
+		if err := decodeYAMLBytes(name, contents, &loaded); err != nil {
 			return nil, false, err
 		}
 		loaded.ID = id
@@ -200,6 +220,39 @@ func loadRepositories(directory string) (map[string]repositoryDefinition, bool, 
 		repos[id] = loaded
 	}
 	return repos, true, nil
+}
+
+func readRepositoryEntry(dir *os.File, name string) ([]byte, error) {
+	fd, err := syscall.Openat(int(dir.Fd()), name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%s: repository file must not be a symlink", name)
+		}
+		if errors.Is(err, syscall.ENXIO) {
+			return nil, fmt.Errorf("%s: repository file must be a regular file", name)
+		}
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: repository file must be a regular file", name)
+	}
+	if info.Size() > maxRepositoryFileBytes {
+		return nil, fmt.Errorf("%s: repository file exceeds %d bytes", name, maxRepositoryFileBytes)
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maxRepositoryFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(contents)) > maxRepositoryFileBytes {
+		return nil, fmt.Errorf("%s: repository file exceeds %d bytes", name, maxRepositoryFileBytes)
+	}
+	return contents, nil
 }
 
 func (r *repositoryDefinition) validate() error {
@@ -447,10 +500,7 @@ func (p repositoryProtection) validate() error {
 			return fmt.Errorf("duplicate protection.ruleset.required_checks %q", check)
 		}
 		seen[check] = struct{}{}
-		if !checkContextPattern.MatchString(check) || strings.Contains(check, "..") {
-			return fmt.Errorf("invalid protection.ruleset.required_checks %q", check)
-		}
-		if err := rejectSecretMaterial("protection.ruleset.required_checks", check); err != nil {
+		if err := validateCheckContext(check); err != nil {
 			return err
 		}
 	}
@@ -486,21 +536,22 @@ func (r *repositoryDefinition) validateIdentities() error {
 }
 
 func validateGitHubOrg(value string) error {
-	if !githubOrgPattern.MatchString(value) || strings.Contains(value, "..") {
+	if !githubOrgPattern.MatchString(value) || strings.Contains(value, "..") || strings.Contains(value, "--") {
 		return fmt.Errorf("invalid org %q", value)
 	}
 	return rejectSecretMaterial("org", value)
 }
 
 func validateGitHubRepoName(value string) error {
-	if value == "." || value == ".." || !githubRepoPattern.MatchString(value) || strings.Contains(value, "..") {
+	if value == "." || value == ".." || !githubRepoPattern.MatchString(value) || strings.Contains(value, "..") || strings.HasSuffix(strings.ToLower(value), ".git") {
 		return fmt.Errorf("invalid name %q", value)
 	}
 	return rejectSecretMaterial("name", value)
 }
 
 func validateBranch(field, value string) error {
-	if !gitBranchPattern.MatchString(value) || strings.Contains(value, "..") {
+	lowered := strings.ToLower(value)
+	if !gitBranchPattern.MatchString(value) || strings.Contains(value, "..") || strings.HasSuffix(value, ".") || strings.HasSuffix(lowered, ".lock") || lowered == "head" {
 		return fmt.Errorf("invalid %s %q", field, value)
 	}
 	return rejectSecretMaterial(field, value)
@@ -521,13 +572,44 @@ func validateSecretName(field, value string) error {
 }
 
 func validateActionPattern(value string) error {
-	if strings.Contains(value, "..") || strings.Contains(value, `\`) || strings.Contains(value, "://") || !actionPattern.MatchString(value) {
+	if value == "" || len(value) > maxActionPatternBytes || strings.Contains(value, "..") || strings.Contains(value, `\`) || strings.Contains(value, "://") || strings.ContainsAny(value, " \t\r\n") || strings.ContainsRune(value, 0) {
 		return fmt.Errorf("invalid actions.selected %q", value)
+	}
+	name, ref, hasRef := strings.Cut(value, "@")
+	if hasRef && (ref == "" || strings.Contains(ref, "@") || !actionRefPattern.MatchString(ref)) {
+		return fmt.Errorf("invalid actions.selected %q", value)
+	}
+	parts := strings.Split(name, "/")
+	if len(parts) < 2 || len(parts) > maxActionSegments {
+		return fmt.Errorf("invalid actions.selected %q", value)
+	}
+	for _, part := range parts {
+		if part == "." || part == ".." || !actionSegmentPattern.MatchString(part) {
+			return fmt.Errorf("invalid actions.selected %q", value)
+		}
 	}
 	return rejectSecretMaterial("actions.selected", value)
 }
 
+func validateCheckContext(value string) error {
+	if value == "" || strings.TrimSpace(value) != value || strings.ContainsAny(value, "\r\n") || strings.ContainsRune(value, 0) || utf8.RuneCountInString(value) > maxCheckContextRunes || strings.Contains(value, "..") || strings.Contains(value, `\`) || strings.Contains(value, "://") || strings.HasPrefix(value, "/") {
+		return fmt.Errorf("invalid protection.ruleset.required_checks %q", value)
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune(" _./:()-,+", r):
+		default:
+			return fmt.Errorf("invalid protection.ruleset.required_checks %q", value)
+		}
+	}
+	return rejectSecretMaterial("protection.ruleset.required_checks", value)
+}
+
 func validateDescription(value string) error {
+	if !utf8.ValidString(value) {
+		return errors.New("settings.description must be valid UTF-8")
+	}
 	if strings.TrimSpace(value) != value || strings.ContainsAny(value, "\r\n") || strings.ContainsRune(value, '\x00') {
 		return errors.New("settings.description must be a single trimmed line")
 	}
@@ -673,8 +755,11 @@ func repositoryDirectoryUsable(directory string) (bool, error) {
 		}
 		return false, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return false, nil
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, errors.New("repos directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("repos path %q is not a directory", directory)
 	}
 	return true, nil
 }

@@ -456,6 +456,115 @@ func TestDockerEntrypointSeedRefusesUnsafePaths(t *testing.T) {
 	})
 }
 
+func TestDockerEntrypointReposDirectory(t *testing.T) {
+	root := repoRoot(t)
+	entrypoint := filepath.Join(root, "docker-entrypoint.sh")
+	run := func(configDir, dataDir, defaultsDir string) ([]byte, error) {
+		t.Helper()
+		cmd := exec.Command("sh", entrypoint, "seed-config")
+		cmd.Env = append(os.Environ(),
+			"GENESIS_CONFIG_DIR="+configDir,
+			"GENESIS_DATA_DIR="+dataDir,
+			"GENESIS_DEFAULTS_DIR="+defaultsDir,
+		)
+		return cmd.CombinedOutput()
+	}
+
+	t.Run("missing defaults create an empty directory and no declaration", func(t *testing.T) {
+		config := t.TempDir()
+		output, err := run(config, t.TempDir(), t.TempDir())
+		if err != nil {
+			t.Fatalf("seed-config: %v\n%s", err, output)
+		}
+		info, err := os.Lstat(filepath.Join(config, "repos.d"))
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("repos.d = %v %#v", err, info)
+		}
+		entries, err := os.ReadDir(filepath.Join(config, "repos.d"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("invented repository declarations: %#v", entries)
+		}
+	})
+
+	t.Run("copies a missing default and does not overwrite", func(t *testing.T) {
+		defaults := t.TempDir()
+		config := t.TempDir()
+		copyFile(t, filepath.Join(root, "repos.d", "example.yaml"), filepath.Join(defaults, "repos.d", "example.yaml"))
+		if err := os.MkdirAll(filepath.Join(config, "repos.d"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		kept := []byte("provider: github\n")
+		if err := os.WriteFile(filepath.Join(config, "repos.d", "operator.yaml"), kept, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output, err := run(config, t.TempDir(), defaults)
+		if err != nil {
+			t.Fatalf("seed-config: %v\n%s", err, output)
+		}
+		if !bytes.Contains(output, []byte("seeded missing repos.d/example.yaml")) {
+			t.Fatalf("expected example seed log, got:\n%s", output)
+		}
+		got, err := os.ReadFile(filepath.Join(config, "repos.d", "operator.yaml"))
+		if err != nil || string(got) != string(kept) {
+			t.Fatalf("overwrote operator repository file: %v %q", err, got)
+		}
+		again, err := run(config, t.TempDir(), defaults)
+		if err != nil {
+			t.Fatalf("second seed: %v\n%s", err, again)
+		}
+		if bytes.Contains(again, []byte("seeded missing repos.d/example.yaml")) {
+			t.Fatalf("second seed recopied example:\n%s", again)
+		}
+	})
+
+	t.Run("source symlink and unsafe name are refused", func(t *testing.T) {
+		defaults := t.TempDir()
+		example := filepath.Join(defaults, "repos.d", "example.yaml")
+		copyFile(t, filepath.Join(root, "repos.d", "example.yaml"), example)
+		if err := os.Remove(example); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(root, "repos.d", "example.yaml"), example); err != nil {
+			t.Fatal(err)
+		}
+		output, err := run(t.TempDir(), t.TempDir(), defaults)
+		if err == nil || !bytes.Contains(output, []byte("non-regular repos.d/example.yaml")) {
+			t.Fatalf("source symlink error = %v\n%s", err, output)
+		}
+
+		defaults = t.TempDir()
+		copyFile(t, filepath.Join(root, "repos.d", "example.yaml"), filepath.Join(defaults, "repos.d", "-evil.yaml"))
+		output, err = run(t.TempDir(), t.TempDir(), defaults)
+		if err == nil || !bytes.Contains(output, []byte("unsafe repos.d/-evil.yaml")) {
+			t.Fatalf("unsafe name error = %v\n%s", err, output)
+		}
+	})
+
+	t.Run("destination directory symlink is refused", func(t *testing.T) {
+		defaults := t.TempDir()
+		config := t.TempDir()
+		outside := t.TempDir()
+		copyFile(t, filepath.Join(root, "repos.d", "example.yaml"), filepath.Join(defaults, "repos.d", "example.yaml"))
+		if err := os.Symlink(outside, filepath.Join(config, "repos.d")); err != nil {
+			t.Fatal(err)
+		}
+		output, err := run(config, t.TempDir(), defaults)
+		if err == nil || !bytes.Contains(output, []byte("must not be a symlink")) {
+			t.Fatalf("dest symlink error = %v\n%s", err, output)
+		}
+		entries, err := os.ReadDir(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("wrote through repos.d symlink: %#v", entries)
+		}
+	})
+}
+
 func TestDockerEntrypointOwnDoesNotFollowSymlinks(t *testing.T) {
 	root := repoRoot(t)
 	entrypoint := filepath.Join(root, "docker-entrypoint.sh")

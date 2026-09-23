@@ -357,8 +357,10 @@ func loadYAMLDocument(path string, destination any) error {
 	if err != nil {
 		return err
 	}
+	return decodeYAMLBytes(filepath.Base(path), contents, destination)
+}
 
-	name := filepath.Base(path)
+func decodeYAMLBytes(name string, contents []byte, destination any) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(contents))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(destination); err != nil {

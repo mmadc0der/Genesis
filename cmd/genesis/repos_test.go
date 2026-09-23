@@ -9,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestRepositorySchemaAndClosedPaths(t *testing.T) {
@@ -151,6 +154,39 @@ func TestRepositorySchemaAndClosedPaths(t *testing.T) {
 		{name: "too many reviews", mutate: func(s string) string {
 			return strings.Replace(s, "required_approving_reviews: 1", "required_approving_reviews: 7", 1)
 		}, want: "required_approving_reviews"},
+		{name: "repeated org hyphen", mutate: func(s string) string {
+			return strings.Replace(s, "org: octo-org", "org: octo--org", 1)
+		}, want: "invalid org"},
+		{name: "git suffix", mutate: func(s string) string {
+			return strings.Replace(s, "name: lab-widget", "name: lab-widget.git", 1)
+		}, want: "invalid name"},
+		{name: "git suffix folded", mutate: func(s string) string {
+			return strings.Replace(s, "name: lab-widget", "name: lab-widget.GIT", 1)
+		}, want: "invalid name"},
+		{name: "branch lock", mutate: func(s string) string {
+			return strings.Replace(s, "default_branch: main", "default_branch: main.lock", 1)
+		}, want: "default_branch"},
+		{name: "branch head", mutate: func(s string) string {
+			return strings.Replace(s, "default_branch: main", "default_branch: HEAD", 1)
+		}, want: "default_branch"},
+		{name: "branch slash", mutate: func(s string) string {
+			return strings.Replace(s, "default_branch: main", "default_branch: release/1", 1)
+		}, want: "default_branch"},
+		{name: "action url", mutate: func(s string) string {
+			return strings.Replace(s, "actions/checkout@v4", "https://github.com/actions/checkout@v4", 1)
+		}, want: "actions.selected"},
+		{name: "check traversal", mutate: func(s string) string {
+			return strings.Replace(s, "      - ci\n", "      - ../ci\n", 1)
+		}, want: "required_checks"},
+		{name: "duplicate key", mutate: func(s string) string {
+			return strings.Replace(s, "org: octo-org\n", "org: octo-org\norg: other-org\n", 1)
+		}, want: "already defined"},
+		{name: "explicit id", mutate: func(s string) string {
+			return "id: other\n" + s
+		}, want: "field id not found"},
+		{name: "nested unknown", mutate: func(s string) string {
+			return strings.Replace(s, "  default_branch: main\n", "  default_branch: main\n  homepage: https://example.test\n", 1)
+		}, want: "field homepage not found"},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -213,6 +249,74 @@ func TestRepositorySchemaAndClosedPaths(t *testing.T) {
 	}
 	if _, _, err := loadRepositories(fileLinkDir); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("symlink file = %v", err)
+	}
+
+	dotDot := t.TempDir()
+	writeRepoFile(t, dotDot, "a..b.yaml", body)
+	if _, _, err := loadRepositories(dotDot); err == nil || !strings.Contains(err.Error(), "invalid repository id") {
+		t.Fatalf("dotdot id = %v", err)
+	}
+
+	widened := strings.Replace(strings.Replace(body,
+		"    - actions/checkout@v4\n",
+		"    - actions/checkout@v4\n    - octo-org/*\n    - my-org/repo/.github/workflows/ci.yml@main\n",
+		1,
+	), "      - ci\n", "      - ci\n      - \"ci/circleci: test\"\n", 1)
+	wideDir := t.TempDir()
+	writeRepoFile(t, wideDir, "lab.yaml", widened)
+	wide, active, err := loadRepositories(wideDir)
+	if err != nil || !active {
+		t.Fatalf("wider patterns = %v", err)
+	}
+	if got := wide["lab"].Actions.Selected; len(got) != 3 || got[0] != "actions/checkout@v4" {
+		t.Fatalf("selected = %#v", got)
+	}
+	if got := wide["lab"].Protection.Ruleset.RequiredChecks; len(got) != 2 || got[1] != "ci/circleci: test" {
+		t.Fatalf("checks = %#v", got)
+	}
+
+	if err := validateDescription("bad\xff"); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("description utf-8 = %v", err)
+	}
+	if _, err := digestGeneration(map[string]agentDefinition{
+		"ok": {Instructions: "bad\xff", Cwd: "/tmp/a", Home: "/tmp/b"},
+	}, nil, nil, false); err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
+		t.Fatalf("digest utf-8 = %v", err)
+	}
+	agentsDir := t.TempDir()
+	rulesDir := t.TempDir()
+	cwd, home := writeNamedAgent(t, agentsDir, "ok.yaml", nil)
+	writeRule(t, filepath.Join(rulesDir, "ok.yaml"), rule{Match: map[string]string{"type": "dev.genesis.run"}, Agent: "ok"})
+	linkRoot := t.TempDir()
+	linkRepos := filepath.Join(linkRoot, "repos.d")
+	if err := os.Symlink(t.TempDir(), linkRepos); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadGeneration(agentsDir, rulesDir, linkRepos); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink generation = %v", err)
+	}
+	usable, err := repositoryDirectoryUsable(linkRepos)
+	if err == nil || usable || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("usable symlink = %v %v", usable, err)
+	}
+	inactive, err := loadGeneration(agentsDir, rulesDir, filepath.Join(t.TempDir(), "missing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inactive.digest != legacyAgentsRulesDigest(t, inactive.agents["ok"], cwd, home) {
+		t.Fatal("symlink handling changed the missing-directory digest")
+	}
+
+	claimed := repositoryPlan{
+		Requested:      true,
+		Active:         true,
+		RemoteMutation: "applied",
+		Applied:        []string{"ensure_repository:lab"},
+		Intents:        []repositoryIntent{{Kind: intentEnsureRepository, ID: "lab"}},
+		Unsupported:    []repositoryUnsupported{{Kind: intentEnsureRepository, ID: "lab", Reason: "applied remotely"}},
+	}
+	if err := repositoryPlanIsNotApplied(claimed); err == nil {
+		t.Fatal("repository plan accepted a claimed provider mutation")
 	}
 }
 
@@ -302,6 +406,30 @@ func TestSyncRepositoryPlanIsNotApplied(t *testing.T) {
 	server.mu.RUnlock()
 	if !eventStillMatches || appliedDigest == absentDigest {
 		t.Fatalf("repos sync digest=%s rules preserved=%v", appliedDigest, eventStillMatches)
+	}
+
+	writeAgent(t, filepath.Join(server.agentsDir, "ok.yaml"), agentDefinition{
+		Instructions: "stay",
+		Cwd:          "/home/workspace-janitor/workspace",
+		Home:         "/home/workspace-janitor",
+		User:         "workspace-janitor",
+	})
+	response = sendSync(server, "sync-secret", map[string]any{"scope": []string{scopeRepos}})
+	if response.Code != http.StatusOK {
+		t.Fatalf("repos sync with dirty dedicated agent = %d %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Privileged.HostMutation != hostMutationNone || len(body.Privileged.Applied) != 0 || body.RepositoryPlan.RemoteMutation != remoteMutationNone {
+		t.Fatalf("repos-only privileged = %#v plan = %#v", body.Privileged, body.RepositoryPlan)
+	}
+	server.mu.RLock()
+	cachedUser := server.generation.agents["ok"].User
+	sameDigest := server.generation.digest == appliedDigest
+	server.mu.RUnlock()
+	if cachedUser != "" || !sameDigest {
+		t.Fatalf("repos-only sync reloaded agents user=%q digest unchanged=%v", cachedUser, sameDigest)
 	}
 
 	writeRepoFile(t, reposDir, "other.yaml", validRepositoryYAML("other-org", "other-widget"))
@@ -407,6 +535,113 @@ func TestControlRepositoryCatalog(t *testing.T) {
 	keptOne, _ := kept[0].(map[string]any)
 	if keptOne["presence"] != presenceActiveOnly || keptOne["id"] != "lab" {
 		t.Fatalf("active cache hidden = %#v", broken)
+	}
+}
+
+func TestRepositorySpecialFilesFailClosed(t *testing.T) {
+	fifoDir := t.TempDir()
+	fifo := filepath.Join(fifoDir, "lab.yaml")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := loadRepositories(fifoDir)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("fifo = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("repository load blocked on a named pipe")
+	}
+
+	bigDir := t.TempDir()
+	payload := make([]byte, maxRepositoryFileBytes+1)
+	for i := range payload {
+		payload[i] = 'a'
+	}
+	if err := os.WriteFile(filepath.Join(bigDir, "lab.yaml"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadRepositories(bigDir); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversize = %v", err)
+	}
+}
+
+func TestRepositorySyncReadDoesNotRace(t *testing.T) {
+	server := newSyncTestServer(t, nil)
+	reposDir := filepath.Join(t.TempDir(), "repos.d")
+	if err := os.Mkdir(reposDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server.reposDir = reposDir
+	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+	if response := sendSync(server, "sync-secret", map[string]any{"scope": []string{scopeRepos}}); response.Code != http.StatusOK {
+		t.Fatalf("seed sync = %d %s", response.Code, response.Body.String())
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	readErr := make(chan string, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			request := httptest.NewRequest(http.MethodGet, "/generation", nil)
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"repositories_active":true`) {
+				select {
+				case readErr <- response.Body.String():
+				default:
+				}
+				return
+			}
+		}
+	}()
+	for range 12 {
+		response := sendSync(server, "sync-secret", map[string]any{"scope": []string{scopeRepos}})
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"remote_mutation":"none"`) {
+			t.Fatalf("sync = %d %s", response.Code, response.Body.String())
+		}
+	}
+	close(stop)
+	wg.Wait()
+	select {
+	case body := <-readErr:
+		t.Fatalf("generation read during sync = %s", body)
+	default:
+	}
+}
+
+func TestControlSymlinkReposDirectoryIsAnError(t *testing.T) {
+	control, listener := newPanelFixture(t)
+	parent := t.TempDir()
+	reposDir := filepath.Join(parent, "repos.d")
+	if err := os.Symlink(t.TempDir(), reposDir); err != nil {
+		t.Fatal(err)
+	}
+	control.reposDir = reposDir
+	listener.reposDir = reposDir
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	catalog := getJSON[map[string]any](t, panel.URL+"/api/repositories")
+	message, _ := catalog["desired_error"].(string)
+	if !strings.Contains(message, "symlink") || catalog["repositories_active"] != false {
+		t.Fatalf("symlink catalog = %#v", catalog)
+	}
+	synced := postJSON(t, panel.URL+"/api/sync", `{"scope":["repos"]}`, http.StatusInternalServerError)
+	if !strings.Contains(synced, "repositories are invalid") {
+		t.Fatalf("symlink sync = %s", synced)
 	}
 }
 

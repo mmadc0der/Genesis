@@ -154,7 +154,7 @@ func repositoryPlanIsNotApplied(plan repositoryPlan) error {
 	}
 	for i, intent := range plan.Intents {
 		unsupported := plan.Unsupported[i]
-		if unsupported.Kind != intent.Kind || unsupported.ID != intent.ID || unsupported.Reason == "" {
+		if unsupported.Kind != intent.Kind || unsupported.ID != intent.ID || unsupported.Reason != repositoryNotAppliedReason {
 			return fmt.Errorf("repository intent %s %s was not marked unsupported", intent.Kind, intent.ID)
 		}
 	}

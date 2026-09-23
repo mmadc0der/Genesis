@@ -11,6 +11,7 @@ import {
   presenceLabel,
   repositoryLabel,
   repositoryPolicy,
+  repositorySyncNotice,
   secretNames,
   shortDigest,
   type PanelSnapshot,
@@ -205,11 +206,7 @@ export function App() {
     setNotice("");
     try {
       const result = await postText("/api/sync", "application/json", JSON.stringify({ scope: ["agents", "rules", "repos"] }));
-      if (result.status === 200) {
-        setNotice("Synced agents, rules, and repositories. Repository plans were not applied to a provider.");
-      } else {
-        setNotice(result.text.trim() || `Sync returned ${result.status}`);
-      }
+      setNotice(repositorySyncNotice(result.status, result.text));
       await refreshCatalog();
     } catch (reason) {
       setNotice(reason instanceof Error ? reason.message : "Sync failed");

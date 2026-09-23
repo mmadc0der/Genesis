@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyPanelLoad, buildMessage, driftLabel, eventLine, maxCursor, mergeEvents, repositoryLabel, repositoryPolicy, secretNames, shortDigest } from "./model";
+import { applyPanelLoad, buildMessage, driftLabel, eventLine, maxCursor, mergeEvents, repositoryLabel, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
 import type { Agent, ControlState, LifecycleEvent, Repository, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
@@ -153,6 +153,14 @@ describe("control panel model", () => {
     expect(repositoryLabel(previousRepository)).toBe("octo-org/lab-widget");
     expect(repositoryPolicy(previousRepository)).toBe("adopt, remove retain");
     expect(secretNames(previousRepository)).toEqual(["DEEPSEEK_API_KEY", "ci:CI_BOT_TOKEN"]);
+    expect(repositorySyncNotice(200, JSON.stringify({ repository_plan: { remote_mutation: "none", applied: [] } }))).toContain(
+      "not applied",
+    );
+    expect(repositorySyncNotice(200, JSON.stringify({ repository_plan: { remote_mutation: "applied", applied: ["ensure_repository:lab"] } }))).toContain(
+      "did not confirm",
+    );
+    expect(repositorySyncNotice(200, "not-json")).toContain("not JSON");
+    expect(repositorySyncNotice(500, "repositories are invalid")).toBe("repositories are invalid");
     expect(JSON.stringify(secretNames(previousRepository))).not.toContain("ghp_");
     expect(kept.state?.drift).toBe("desired_invalid");
     expect(kept.runs.map((item) => item.run_id)).toEqual(["gen_1"]);

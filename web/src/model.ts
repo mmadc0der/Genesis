@@ -55,6 +55,21 @@ export function repositoryPolicy(repository: Pick<Repository, "lifecycle">): str
   return `${repository.lifecycle.existing}, remove ${repository.lifecycle.remove}`;
 }
 
+export function repositorySyncNotice(status: number, body: string): string {
+  if (status !== 200) return body.trim() || `Sync returned ${status}`;
+  let parsed: { repository_plan?: { remote_mutation?: string; applied?: unknown } };
+  try {
+    parsed = JSON.parse(body) as { repository_plan?: { remote_mutation?: string; applied?: unknown } };
+  } catch {
+    return "Sync returned a response that is not JSON. The provider result was not confirmed.";
+  }
+  const applied = parsed.repository_plan?.applied;
+  if (parsed.repository_plan?.remote_mutation === "none" && Array.isArray(applied) && applied.length === 0) {
+    return "Synced agents, rules, and repositories. Repository plans were not applied to a provider.";
+  }
+  return "Sync completed, but the repository plan did not confirm that the provider was left untouched.";
+}
+
 export function secretNames(repository: Pick<Repository, "secrets">): string[] {
   const names = [...(repository.secrets?.repository ?? [])];
   for (const environment of repository.secrets?.environments ?? []) {
