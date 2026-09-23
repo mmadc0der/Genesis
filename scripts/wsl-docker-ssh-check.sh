@@ -75,6 +75,7 @@ if ! grep -q 'OpenSSH_' /tmp/genesis-ssh-version.txt; then
   echo "image ssh is not an OpenSSH client" >&2
   exit 1
 fi
+grep 'OpenSSH_' /tmp/genesis-ssh-version.txt
 rm -f /tmp/genesis-ssh-version.txt
 
 docker compose run --rm --no-deps --entrypoint sh \

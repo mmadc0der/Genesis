@@ -272,5 +272,6 @@ transport and clock and use a local fake GitHub API. No real credential
 is required.
 
 Repository creation, settings, rulesets, Actions, webhooks, App-token
-delivery, deletion, and rotation stay unsupported. The manual container
-check is [ssh-client-verification.md](ssh-client-verification.md).
+delivery, deletion, and rotation stay unsupported. CI uses a local fake
+GitHub API. The manual WSL checklist, including the real reconciler App
+steps, is [ssh-client-verification.md](ssh-client-verification.md).

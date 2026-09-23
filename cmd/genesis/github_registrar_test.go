@@ -612,6 +612,127 @@ func TestSSHCheckScriptIsGuarded(t *testing.T) {
 			t.Fatalf("ssh check contains %q", forbidden)
 		}
 	}
+	if !strings.Contains(text, "grep 'OpenSSH_'") {
+		t.Fatal("ssh check does not print the OpenSSH version")
+	}
+	docBytes, err := os.ReadFile(filepath.Join(root, "docs", "ssh-client-verification.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(docBytes)
+	for _, want := range []string{
+		"No-credential smoke",
+		"Administration: Read and write",
+		"Metadata: Read-only",
+		"GITHUB_APP_RECONCILER_PEM",
+		"credential_active",
+		"remote_key_id",
+		"SSH_AUTH_SOCK",
+		"git: none",
+		"refused",
+		"Do not print",
+		"ssh client check passed",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("verification checklist missing %q", want)
+		}
+	}
+	if strings.Contains(doc, "-----BEGIN") {
+		t.Fatal("verification checklist contains a PEM block")
+	}
+}
+
+func TestVerificationChecklistYAMLLoads(t *testing.T) {
+	root := repoRoot(t)
+	docBytes, err := os.ReadFile(filepath.Join(root, "docs", "ssh-client-verification.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(docBytes)
+	provider := checklistTemplate(t, doc, "Path(\"/tmp/genesis-probe-provider.yaml\").write_text(f\"\"\"", "\"\"\")")
+	repository := checklistTemplate(t, doc, "Path(\"/tmp/genesis-probe-repo.yaml\").write_text(f\"\"\"", "\"\"\")")
+	replacer := strings.NewReplacer("{org}", "octo-org", "{repo}", "genesis-deploy-probe", "{app}", "100001", "{inst}", "100002")
+	provider = replacer.Replace(provider)
+	repository = replacer.Replace(repository)
+	agents := checklistAgents(t, doc)
+	if len(agents) != 3 {
+		t.Fatalf("agent samples = %d", len(agents))
+	}
+	rulesSource, err := os.ReadFile(filepath.Join(root, "rules.d", "example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{agents[0], agents[1]} {
+		dir := t.TempDir()
+		agentsDir := filepath.Join(dir, "agents")
+		rulesDir := filepath.Join(dir, "rules")
+		reposDir := filepath.Join(dir, "repos")
+		providersDir := filepath.Join(dir, "providers")
+		for _, path := range []string{agentsDir, rulesDir, reposDir, providersDir} {
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(agentsDir, "workspace-janitor.yaml"), []byte(agent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rulesDir, "example.yaml"), rulesSource, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(reposDir, "probe.yaml"), []byte(repository), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(providersDir, "probe.yaml"), []byte(provider), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := loadGeneration(agentsDir, rulesDir, reposDir, providersDir)
+		if err != nil {
+			t.Fatalf("checklist YAML: %v\nprovider:\n%s\nrepo:\n%s\nagent:\n%s", err, provider, repository, agent)
+		}
+		if !loaded.providersActive || !loaded.reposActive {
+			t.Fatalf("active providers=%v repos=%v", loaded.providersActive, loaded.reposActive)
+		}
+		janitor := loaded.agents["workspace-janitor"]
+		if janitor.GitHub == nil || janitor.GitHub.Repository != "probe" {
+			t.Fatalf("grant = %#v", janitor.GitHub)
+		}
+	}
+	if !strings.Contains(agents[0], "git: write") || !strings.Contains(agents[1], "git: none") || agents[0] != agents[2] {
+		t.Fatal("write, none, and restored agent samples drifted")
+	}
+}
+
+func checklistTemplate(t *testing.T, doc, start, end string) string {
+	t.Helper()
+	_, after, ok := strings.Cut(doc, start)
+	if !ok {
+		t.Fatalf("checklist missing %s", start)
+	}
+	body, _, ok := strings.Cut(after, end)
+	if !ok || strings.TrimSpace(body) == "" {
+		t.Fatal("checklist template was empty")
+	}
+	return body
+}
+
+func checklistAgents(t *testing.T, doc string) []string {
+	t.Helper()
+	const marker = "cat > /var/lib/genesis/config/agents.d/workspace-janitor.yaml' <<'EOF'\n"
+	var agents []string
+	rest := doc
+	for {
+		_, after, ok := strings.Cut(rest, marker)
+		if !ok {
+			break
+		}
+		body, tail, ok := strings.Cut(after, "\nEOF")
+		if !ok {
+			t.Fatal("agent sample was not closed")
+		}
+		agents = append(agents, body+"\n")
+		rest = tail
+	}
+	return agents
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
