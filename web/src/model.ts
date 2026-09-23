@@ -93,7 +93,9 @@ export function githubGrantSummary(agent: Pick<Agent, "github">): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, level]) => `${name} ${level}`)
     .join(", ");
-  const credential = grant.credential === "none" ? "no credential" : "credential pending";
+  let credential = "unrecognized credential";
+  if (grant.credential === "none") credential = "no credential";
+  if (grant.credential === "pending") credential = "credential pending";
   const detail = permissions ? `, ${permissions}` : "";
   return `GitHub ${grant.repository}, git ${grant.git}, ${credential}${detail}. Not activated.`;
 }

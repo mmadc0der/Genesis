@@ -63,6 +63,29 @@ func loadProviders(directory, agentsDir, rulesDir, reposDir string) (map[string]
 	if !info.IsDir() {
 		return nil, false, errors.New("providers path is not a directory")
 	}
+	// Parent symlinks are invisible to the lexical check above. Resolve them
+	// and reject a real directory that lands inside the designer volume or
+	// agents, rules, or repos.
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		return nil, false, err
+	}
+	resolvedAgents, err := resolveExistingPath(agentsDir)
+	if err != nil {
+		return nil, false, err
+	}
+	resolvedRules, err := resolveExistingPath(rulesDir)
+	if err != nil {
+		return nil, false, err
+	}
+	resolvedRepos, err := resolveExistingPath(reposDir)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := validateProvidersLocation(resolved, resolvedAgents, resolvedRules, resolvedRepos); err != nil {
+		return nil, false, err
+	}
+	directory = resolved
 	dirFile, err := os.OpenFile(directory, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
@@ -266,6 +289,9 @@ func validateProvidersLocation(providersDir, agentsDir, rulesDir, reposDir strin
 	if clean == "" || clean == "." {
 		return errors.New("providers directory is required")
 	}
+	if !filepath.IsAbs(clean) {
+		return errors.New("providers directory must be absolute")
+	}
 	if pathWithin(clean, designerWritableConfigRoot) {
 		return errors.New("providers directory must be outside the designer-writable config volume")
 	}
@@ -279,6 +305,24 @@ func validateProvidersLocation(providersDir, agentsDir, rulesDir, reposDir strin
 		}
 	}
 	return nil
+}
+
+func resolveExistingPath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+	clean := filepath.Clean(path)
+	if _, err := os.Lstat(clean); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return clean, nil
+		}
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 func pathWithin(path, root string) bool {

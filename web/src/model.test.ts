@@ -188,6 +188,21 @@ describe("control panel model", () => {
     expect(summary).toBe("GitHub lab-widget, git read, no credential, contents read, metadata read. Not activated.");
     expect(summary).not.toContain("GENESIS_PROVIDER_SECRET_REF_XYZ");
     expect(summary).not.toContain("prog-bot");
+    expect(
+      githubGrantSummary({
+        github: { repository: "lab", git: "write", credential: "pending", permissions: { contents: "write" } },
+      }),
+    ).toBe("GitHub lab, git write, credential pending, contents write. Not activated.");
+    const unexpected = githubGrantSummary({
+      github: {
+        repository: "lab",
+        git: "read",
+        credential: "GENESIS_PROVIDER_SECRET_REF_XYZ",
+        permissions: { metadata: "read" },
+      },
+    });
+    expect(unexpected).toBe("GitHub lab, git read, unrecognized credential, metadata read. Not activated.");
+    expect(unexpected).not.toContain("GENESIS_PROVIDER_SECRET_REF_XYZ");
     expect(githubGrantSummary({ github: undefined })).toBe("");
     expect(JSON.stringify(secretNames(previousRepository))).not.toContain("ghp_");
     expect(kept.state?.drift).toBe("desired_invalid");

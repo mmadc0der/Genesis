@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -99,6 +101,21 @@ func TestProviderSchemaRejectsSecretMaterialAndUnsafePaths(t *testing.T) {
 	}
 	if _, _, err := loadProviders(link, agentsDir, rulesDir, reposDir); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("symlink providers error = %v", err)
+	}
+	if _, _, err := loadProviders("providers.d", agentsDir, rulesDir, reposDir); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative providers error = %v", err)
+	}
+
+	hidden := filepath.Join(agentsDir, "nested-providers")
+	if err := os.Mkdir(hidden, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(agentsDir, filepath.Join(outside, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadProviders(filepath.Join(outside, "alias", "nested-providers"), agentsDir, rulesDir, reposDir); err == nil || !strings.Contains(err.Error(), "inside agents") {
+		t.Fatalf("parent symlink providers error = %v", err)
 	}
 
 	encoded, err := json.Marshal(providerDefinition{
@@ -424,6 +441,107 @@ func TestReviewerIdentityStaysSeparate(t *testing.T) {
 	}
 }
 
+func TestScopedSyncDoesNotPlanUsersOrGrants(t *testing.T) {
+	agentsDir := t.TempDir()
+	rulesDir := t.TempDir()
+	reposDir := t.TempDir()
+	providersDir := t.TempDir()
+	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+	writeRepoFile(t, providersDir, "github.yaml", validProviderYAML())
+	writeAgent(t, filepath.Join(agentsDir, "worker.yaml"), agentDefinition{
+		Instructions: "Test agent instructions.",
+		Cwd:          "/home/worker/work",
+		Home:         "/home/worker",
+		User:         "worker",
+		GitHub: &agentGitHub{
+			Repository:  "lab",
+			Identity:    programmerIdentity,
+			Git:         gitWrite,
+			Permissions: map[string]string{"contents": "write", "metadata": "read"},
+		},
+	})
+	writeRule(t, filepath.Join(rulesDir, "worker.yaml"), rule{
+		Match: map[string]string{"type": "dev.genesis.run"},
+		Agent: "worker",
+	})
+	recorder := &recordingCoordinator{}
+	server := &eventServer{
+		agentsDir:    agentsDir,
+		rulesDir:     rulesDir,
+		reposDir:     reposDir,
+		providersDir: providersDir,
+		runner:       &fakeRunner{invocations: make(chan invocation, 1)},
+		newRunID:     func() (string, error) { return "gen_scope", nil },
+		logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		syncToken:    "sync-secret",
+		coordinator:  recorder,
+		store:        testStore(t),
+	}
+	if err := server.loadInitialGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []string{"rules", "repos"} {
+		response := sendSync(server, "sync-secret", map[string]any{"scope": []string{scope}})
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s sync = %d %s", scope, response.Code, response.Body.String())
+		}
+		var body syncResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.GrantPlan.Requested || len(body.GrantPlan.Intents) != 0 || len(body.Privileged.Unsupported) != 0 || len(body.Privileged.Applied) != 0 || body.Privileged.HostMutation != hostMutationNone {
+			t.Fatalf("%s sync planned work: grant=%#v privileged=%#v", scope, body.GrantPlan, body.Privileged)
+		}
+	}
+	if len(recorder.plans) != 2 {
+		t.Fatalf("plans = %d", len(recorder.plans))
+	}
+	for _, plan := range recorder.plans {
+		if len(plan.Intents) != 0 || plan.Agents {
+			t.Fatalf("scoped plan = %#v", plan)
+		}
+	}
+
+	loaded, err := loadGeneration(agentsDir, rulesDir, reposDir, providersDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPlan := buildPlan(loaded.agents, true)
+	host := newMemoryHost()
+	state := &privilegedState{logger: discardLogger(), host: host, mutate: true, dataDir: t.TempDir()}
+	applied, err := state.apply(agentPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.HostMutation != hostMutationApplied || len(host.users) != 1 || host.users["worker"] == nil {
+		t.Fatalf("apply users=%#v result=%#v", host.users, applied)
+	}
+	if len(applied.Applied) != 1 || applied.Applied[0] != intentEnsureAgentUser+":worker" {
+		t.Fatalf("applied = %#v", applied.Applied)
+	}
+	sawGrant := map[string]bool{}
+	for _, change := range applied.Unsupported {
+		sawGrant[change.Kind] = true
+		if strings.Contains(change.Reason, programmerSecret) || strings.Contains(change.Reason, programmerIdentity) {
+			t.Fatalf("unsupported exposed provider material: %s", change.Reason)
+		}
+	}
+	for _, kind := range []string{intentEnsureRepositoryGrant, intentEnsureCredential, intentEnsureRemoteRegistration} {
+		if !sawGrant[kind] {
+			t.Fatalf("missing unsupported %s in %#v", kind, applied.Unsupported)
+		}
+	}
+}
+
+type recordingCoordinator struct {
+	plans []privilegedPlan
+}
+
+func (r *recordingCoordinator) Coordinate(_ context.Context, plan privilegedPlan) (coordinateResult, error) {
+	r.plans = append(r.plans, plan)
+	return evaluatePlan(plan)
+}
+
 func TestEntrypointDoesNotSeedProvidersIntoConfigVolume(t *testing.T) {
 	root := repoRoot(t)
 	config := t.TempDir()
@@ -449,6 +567,109 @@ func TestEntrypointDoesNotSeedProvidersIntoConfigVolume(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(config, "providers.d")); !os.IsNotExist(err) {
 		t.Fatalf("config volume gained providers.d: %v", err)
+	}
+}
+
+func TestEntrypointLocksProviderFilesWithoutFollowingSymlinks(t *testing.T) {
+	root := repoRoot(t)
+	config := t.TempDir()
+	data := t.TempDir()
+	defaults := t.TempDir()
+	providers := t.TempDir()
+	secret := filepath.Join(providers, "github.yaml")
+	if err := os.WriteFile(secret, []byte("provider: github\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.yaml")
+	if err := os.WriteFile(outside, []byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(providers, "alias.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	run := func(providersPath, command string) ([]byte, error) {
+		cmd := exec.Command("sh", filepath.Join(root, "docker-entrypoint.sh"), command)
+		cmd.Env = append(os.Environ(),
+			"GENESIS_CONFIG_DIR="+config,
+			"GENESIS_DATA_DIR="+data,
+			"GENESIS_DEFAULTS_DIR="+defaults,
+			"GENESIS_PROVIDERS_DIR="+providersPath,
+		)
+		return cmd.CombinedOutput()
+	}
+	output, err := run(providers, "seed-config")
+	if err != nil {
+		t.Fatalf("seed-config: %v\n%s", err, output)
+	}
+	seeded, err := os.Stat(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seeded.Mode().Perm() != 0o644 {
+		t.Fatalf("seed-config changed provider mode to %o", seeded.Mode().Perm())
+	}
+	output, err = run(providers, "own-config")
+	if err != nil {
+		t.Fatalf("own-config: %v\n%s", err, output)
+	}
+	locked, err := os.Stat(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locked.Mode().Perm() != 0o640 {
+		t.Fatalf("provider file mode = %o", locked.Mode().Perm())
+	}
+	dirInfo, err := os.Stat(providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm() != 0o750 {
+		t.Fatalf("providers directory mode = %o", dirInfo.Mode().Perm())
+	}
+	outsideInfo, err := os.Stat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outsideInfo.Mode().Perm() != 0o644 {
+		t.Fatalf("followed provider symlink and chmod'd target: %o", outsideInfo.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(config, "providers.d")); !os.IsNotExist(err) {
+		t.Fatalf("config volume gained providers.d: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "linked-providers")
+	if err := os.Symlink(providers, link); err != nil {
+		t.Fatal(err)
+	}
+	output, err = run(link, "own-config")
+	if err == nil || !bytes.Contains(output, []byte("must not be a symlink")) {
+		t.Fatalf("symlink providers directory error = %v\n%s", err, output)
+	}
+}
+
+func TestDockerImageDoesNotInstallExampleProviders(t *testing.T) {
+	root := repoRoot(t)
+	dockerfile, err := os.ReadFile(filepath.Join(root, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(dockerfile)
+	if strings.Contains(text, "COPY providers.d") {
+		t.Fatal("image copies providers.d into the live directory")
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "/etc/genesis/providers.d") && (strings.Contains(line, "a+rX") || strings.Contains(line, "0644")) {
+			t.Fatalf("provider path is world-readable: %s", line)
+		}
+	}
+	for _, want := range []string{
+		"groupadd --gid 65532 genesis",
+		"useradd --create-home --uid 65532 --gid 65532",
+		"chown root:genesis /etc/genesis/providers.d",
+		"chmod 0750 /etc/genesis/providers.d",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Dockerfile missing %q", want)
+		}
 	}
 }
 

@@ -21,7 +21,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --compile-bytecode
 
 FROM python:3.12-bookworm
-RUN useradd --create-home --uid 65532 --shell /usr/sbin/nologin genesis \
+RUN groupadd --gid 65532 genesis \
+	&& useradd --create-home --uid 65532 --gid 65532 --shell /usr/sbin/nologin genesis \
 	&& mkdir -p /var/lib/genesis/config /var/lib/genesis/data /usr/share/genesis/defaults /usr/share/genesis/web /etc/genesis/providers.d
 WORKDIR /app
 COPY --from=build /out/genesis /usr/local/bin/genesis
@@ -29,14 +30,14 @@ COPY --from=python-deps /app/.venv /app/.venv
 COPY --from=web /src/dist /usr/share/genesis/web
 COPY agents.d /usr/share/genesis/defaults/agents.d
 COPY rules.d /usr/share/genesis/defaults/rules.d
-COPY providers.d /etc/genesis/providers.d
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/genesis /usr/local/bin/docker-entrypoint.sh \
-	&& chmod -R a+rX /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web /etc/genesis/providers.d \
+	&& chmod -R a+rX /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web \
 	&& chmod -R go-w /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web \
-	&& chown -R root:root /etc/genesis \
-	&& chmod 0755 /etc/genesis /etc/genesis/providers.d \
-	&& chmod 0644 /etc/genesis/providers.d/* \
+	&& chown root:root /etc/genesis \
+	&& chown root:genesis /etc/genesis/providers.d \
+	&& chmod 0755 /etc/genesis \
+	&& chmod 0750 /etc/genesis/providers.d \
 	&& chown -R genesis:genesis /var/lib/genesis
 ENV PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 ENV GENESIS_LISTENER_USER=genesis

@@ -9,10 +9,20 @@ volume. Listener, launch, and control take `-providers` (default
 `providers.d`). A missing directory leaves the layer inactive and leaves the
 agents-and-rules digest unchanged. An empty directory is active.
 
-Docker keeps this directory at `/etc/genesis/providers.d` in the image. The
-entrypoint does not copy it into `/var/lib/genesis/config`. The designer
-agent cannot declare a GitHub capability, and a providers path inside that
-volume, or inside `agents.d` / `rules.d` / `repos.d`, fails closed.
+Docker keeps an empty directory at `/etc/genesis/providers.d` in the image,
+owned `root:genesis` and mode `0750`. The example file is not copied there.
+The entrypoint does not copy providers into `/var/lib/genesis/config`. On
+start it tightens an existing providers directory in place: directories
+`0750`, regular files `0640`, owner `root:genesis` when launched as root,
+without following symlinks. Dedicated agent users are not in the `genesis`
+group, so they cannot read secret references. The listener and control
+process run as `genesis` (uid/gid `65532`) and can. The shared-UID designer
+is that same user, so it can read the directory; it cannot write it.
+
+The designer agent cannot declare a GitHub capability, and a providers path
+inside that volume, or inside `agents.d` / `rules.d` / `repos.d`, fails
+closed. A path that only looks outside those trees, but resolves through a
+parent symlink into one of them, fails closed too.
 
 ## Provider file
 
@@ -54,7 +64,7 @@ PEM markers and GitHub token prefixes are rejected in every string. The
 reference is not a path, URL, or file body. Genesis does not read it.
 
 `providers.d/example.yaml` matches `repos.d/example.yaml`'s organization. It
-is not applied.
+is not applied. The image does not install it into `/etc/genesis/providers.d`.
 
 ## Agent capability
 

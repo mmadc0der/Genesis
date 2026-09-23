@@ -176,8 +176,11 @@ Schema, closed paths, and the next slice are in
 directory leaves the layer inactive and does not change the agent/rule
 digest. Files name one GitHub organization, named identities, and secret
 references. They never contain secret values. The directory must sit
-outside the designer-writable config volume. Docker reads it from
-`/etc/genesis/providers.d` and does not copy it into `genesis-config`.
+outside the designer-writable config volume. Docker keeps an empty
+`/etc/genesis/providers.d` (`root:genesis`, mode `0750`) and does not copy
+it or `providers.d/example.yaml` into `genesis-config`. Provider files are
+tightened to `0640` on start so dedicated agent users cannot read secret
+references.
 
 An agent may declare an optional `github` capability: a `repos.d`
 repository, a non-reconciler identity, git access `none`/`read`/`write`,
