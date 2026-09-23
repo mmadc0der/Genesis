@@ -62,6 +62,9 @@ In the GitHub UI, as an owner of `$ORG`:
    - Repository permission **Administration: Read and write**.
    - Repository permission **Metadata: Read-only** (GitHub requires this).
    - No other repository or organization permissions. Do not grant Contents.
+     A minted token is rejected unless its permission set is exact:
+     discovery is only `metadata: read`, and the key token is only
+     `administration: write` plus `metadata: read`.
    - Install it on **only** `$ORG/$REPO`. Do not choose all repositories.
 3. Copy the App ID. After install, the installation URL ends in the
    installation id (`.../installations/<id>`). Both are public decimals.
@@ -267,9 +270,10 @@ PY
 ```
 
 A `500` with `github auth` means the App id, installation id, PEM, or
-Administration permission is wrong. `github missing` means the org, repo, or
+Administration permission is wrong, or the minted token includes any
+permission outside that exact set. `github missing` means the org, repo, or
 installation target does not match. `github partial` means the installation
-token was not limited to this one repository. Do not print log bodies.
+token is not exactly `$ORG/$REPO`. Do not print log bodies.
 
 ## 5. The dedicated process gets the socket
 
@@ -415,6 +419,12 @@ fingerprint is empty. `retained_material` contains the previous write
 grant id. `list_keys` still shows exactly one key, with the original id.
 The event is `202`. The proof file says `socket_absent=yes`.
 
+That sync also removes a socket section 5 already handed out, before the
+response returns, including while that process is still running. The old
+process can keep a stale `SSH_AUTH_SOCK` value; `ssh-add -l` on it fails
+because the socket file is gone. The new process never receives the
+variable.
+
 Restore write access. This is the adopt path again:
 
 ```sh
@@ -504,7 +514,9 @@ cat /tmp/genesis-socket-refused.txt
 ```
 
 Do not sync again before the absent proof. A failed sync leaves the listener
-generation in place and drops the deliverable grant.
+generation in place and drops the deliverable grant before the `500`
+returns. A process that already had `SSH_AUTH_SOCK` can keep that stale
+value; the socket file is gone, and the next process does not get one.
 
 Expected: HTTP `500` and body `privileged coordination failed`. Logs contain
 `github collision` and none of the secret markers. `state.json` prints
@@ -560,9 +572,9 @@ Save these lines and nothing else:
 | Adopt | `200` and `adopted_same_key` equal to the create id; still one key |
 | Socket on | `202`, `socket_mode=600`, dedicated uid, `dedicated_process_has_socket=yes`, matching `ssh-add` fingerprint, GitHub text naming `$ORG/$REPO` |
 | Socket off after the run | `0` |
-| `git: none` | `200`, material not ready, one unchanged key, `202`, `socket_absent=yes` |
+| `git: none` | `200`, material not ready, one unchanged key, live socket file removed immediately, `202`, `socket_absent=yes` |
 | Restore | `restored_same_key` equal to the create id |
-| Refusal | `500`, `github collision`, no secret markers, `refused <id> 1`, `202`, `socket_absent=yes`, two keys still listed |
+| Refusal | `500`, `github collision`, no secret markers, `refused <id> 1`, live socket file removed before the response, `202`, `socket_absent=yes`, two keys still listed |
 | Cleanup | repo `404`, PEM path gone |
 
 `credential_active` stays false. The HTTP plan's `remote_registration`
