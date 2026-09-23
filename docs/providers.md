@@ -241,7 +241,10 @@ For a non-public git `read` or `write` grant, the root coordinator mints a
 short-lived App JWT (`iat` 60 seconds in the past, `exp` eight minutes
 ahead, `iss` the app id) and repository-scoped installation tokens. It
 discovers `GET /repos/{org}/{name}`, then lists deploy keys with a token
-scoped to that repository id and `administration: write`. A key whose
+scoped to that repository id and only `administration: write` plus
+`metadata: read`. The declared agent, identity, git access, and
+permissions must still match the provider organization. A cross-org
+identity cannot register a key. A key whose
 title, SHA256 fingerprint, and `read_only` flag already match is reused.
 Otherwise the public key is posted. `git: write` sends `read_only: false`.
 `git: read` sends `read_only: true`. The title is `genesis-` plus the
@@ -249,12 +252,19 @@ grant id. The numeric key id and `remote_status: ready` are stored on the
 grant. Generation stays 1.
 
 A title that belongs to a different key, or a fingerprint that belongs to
-a different title, fails closed. Genesis does not delete or rotate keys.
+a different title, fails closed. Another deploy key on the repository is
+left in place, including a key that is not Ed25519, unless it reuses this
+grant's title or recorded key id. Genesis does not delete or rotate keys.
 Auth `401` mints a new JWT and token once. Rate limits and `5xx` retry
 only inside a short bound; a long `Retry-After` fails closed so sync is
 not held open. A grant that was `ready` and no longer matches is stored
-as `refused` and the per-run socket is not delivered. A create that is not
-confirmed stays unready; the next sync lists and adopts an exact match.
+as `refused`. A changed grant id, a removed grant, or that refusal drops
+the held per-run socket immediately, including a socket already given to
+a running process. The listener cannot mark a grant ready over IPC. A
+create that is not confirmed stays unready; the next sync lists and adopts
+an exact match. An installation token must be repository-scoped, name the
+declared owner and repository, expire more than 30 seconds out, and carry
+only the permissions that were requested.
 
 No private key, App JWT, installation token, or secret reference is
 written to logs, IPC errors, or the sync body. Tests inject the HTTP

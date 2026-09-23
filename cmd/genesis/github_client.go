@@ -100,8 +100,6 @@ type tokenResult struct {
 	repos        []string
 	ids          []int64
 	perms        gitHubPermissions
-	permName     string
-	permLevel    string
 }
 
 type gitHubRepo struct {
@@ -125,6 +123,7 @@ type deployKeyView struct {
 	Title       string
 	Fingerprint string
 	ReadOnly    bool
+	usable      bool
 }
 
 type githubClient struct {
@@ -192,7 +191,7 @@ func (g githubRegistrar) register(ctx context.Context, req grantRegistration) (g
 		return grantRegistrationResult{}, err
 	}
 	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(public)))
-	discovery, err := client.mint(ctx, []string{app.Repo}, nil, gitHubPermissions{Metadata: "read"}, "metadata", "read")
+	discovery, err := client.mint(ctx, []string{app.Repo}, nil, gitHubPermissions{Metadata: "read"})
 	if err != nil {
 		return grantRegistrationResult{}, err
 	}
@@ -203,7 +202,7 @@ func (g githubRegistrar) register(ctx context.Context, req grantRegistration) (g
 	if len(discovery.Repositories) != 1 || repo.ID != discovery.Repositories[0].ID {
 		return grantRegistrationResult{}, githubErr("partial")
 	}
-	keyToken, err := client.mint(ctx, nil, []int64{repo.ID}, gitHubPermissions{Administration: "write", Metadata: "read"}, "administration", "write")
+	keyToken, err := client.mint(ctx, nil, []int64{repo.ID}, gitHubPermissions{Administration: "write", Metadata: "read"})
 	if err != nil {
 		return grantRegistrationResult{}, err
 	}
@@ -286,8 +285,8 @@ func validateGitHubBase(base string) (string, *url.URL, error) {
 	return strings.TrimRight(parsed.String(), "/"), parsed, nil
 }
 
-func (c *githubClient) mint(ctx context.Context, repos []string, ids []int64, perms gitHubPermissions, permName, permLevel string) (tokenResult, error) {
-	tok := tokenResult{repos: append([]string(nil), repos...), ids: append([]int64(nil), ids...), perms: perms, permName: permName, permLevel: permLevel}
+func (c *githubClient) mint(ctx context.Context, repos []string, ids []int64, perms gitHubPermissions) (tokenResult, error) {
+	tok := tokenResult{repos: append([]string(nil), repos...), ids: append([]int64(nil), ids...), perms: perms}
 	if err := c.remint(ctx, &tok); err != nil {
 		return tokenResult{}, err
 	}
@@ -305,14 +304,12 @@ func (c *githubClient) remint(ctx context.Context, tok *tokenResult) error {
 	if len(tok.ids) == 1 {
 		wantID = tok.ids[0]
 	}
-	if err := c.requireScoped(minted, tok.permName, tok.permLevel, wantID); err != nil {
+	if err := c.requireScoped(minted, tok.perms, wantID); err != nil {
 		return err
 	}
 	minted.repos = tok.repos
 	minted.ids = tok.ids
 	minted.perms = tok.perms
-	minted.permName = tok.permName
-	minted.permLevel = tok.permLevel
 	*tok = minted
 	return nil
 }
@@ -351,27 +348,60 @@ func (c *githubClient) mintOnce(ctx context.Context, repos []string, ids []int64
 	}, nil
 }
 
-func (c *githubClient) requireScoped(tok tokenResult, permName, permLevel string, wantID int64) error {
+func (c *githubClient) requireScoped(tok tokenResult, requested gitHubPermissions, wantID int64) error {
 	if !tok.ExpiresAt.After(c.now().Add(30 * time.Second)) {
+		return githubErr("auth")
+	}
+	want, err := expectedTokenPermissions(requested)
+	if err != nil || !permissionMapsEqual(tok.Permissions, want) {
 		return githubErr("auth")
 	}
 	if tok.Selection != "selected" || len(tok.Repositories) != 1 {
 		return githubErr("partial")
 	}
 	repo := tok.Repositories[0]
-	if repo.ID <= 0 || !strings.EqualFold(repo.Name, c.app.Repo) {
+	if repo.ID <= 0 || strings.TrimSpace(repo.FullName) == "" || !strings.EqualFold(repo.Name, c.app.Repo) {
 		return githubErr("partial")
 	}
-	if repo.FullName != "" && !strings.EqualFold(repo.FullName, c.app.Org+"/"+c.app.Repo) {
+	if !strings.EqualFold(repo.FullName, c.app.Org+"/"+c.app.Repo) {
 		return githubErr("partial")
 	}
 	if wantID > 0 && repo.ID != wantID {
 		return githubErr("partial")
 	}
-	if tok.Permissions[permName] != permLevel {
-		return githubErr("auth")
-	}
 	return nil
+}
+
+func expectedTokenPermissions(requested gitHubPermissions) (map[string]string, error) {
+	want := map[string]string{}
+	if requested.Metadata != "" {
+		if requested.Metadata != "read" && requested.Metadata != "write" {
+			return nil, githubErr("auth")
+		}
+		want["metadata"] = requested.Metadata
+	}
+	if requested.Administration != "" {
+		if requested.Administration != "read" && requested.Administration != "write" {
+			return nil, githubErr("auth")
+		}
+		want["administration"] = requested.Administration
+	}
+	if len(want) == 0 {
+		return nil, githubErr("auth")
+	}
+	return want, nil
+}
+
+func permissionMapsEqual(got, want map[string]string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for key, value := range want {
+		if got[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *githubClient) getRepo(ctx context.Context, tok *tokenResult) (gitHubRepo, error) {
@@ -383,13 +413,13 @@ func (c *githubClient) getRepo(ctx context.Context, tok *tokenResult) (gitHubRep
 	if err := json.Unmarshal(body, &repo); err != nil {
 		return gitHubRepo{}, githubErr("partial")
 	}
-	if repo.ID <= 0 || !strings.EqualFold(repo.Name, c.app.Repo) || !strings.EqualFold(repo.Owner.Login, c.app.Org) {
+	if repo.ID <= 0 || strings.TrimSpace(repo.FullName) == "" || !strings.EqualFold(repo.Name, c.app.Repo) || !strings.EqualFold(repo.Owner.Login, c.app.Org) {
 		return gitHubRepo{}, githubErr("partial")
 	}
-	if repo.FullName != "" && !strings.EqualFold(repo.FullName, c.app.Org+"/"+c.app.Repo) {
+	if !strings.EqualFold(repo.FullName, c.app.Org+"/"+c.app.Repo) {
 		return gitHubRepo{}, githubErr("partial")
 	}
-	if err := c.requireScoped(*tok, tok.permName, tok.permLevel, repo.ID); err != nil {
+	if err := c.requireScoped(*tok, tok.perms, repo.ID); err != nil {
 		return gitHubRepo{}, err
 	}
 	return repo, nil
@@ -440,6 +470,9 @@ func (c *githubClient) createKey(ctx context.Context, tok *tokenResult, title, p
 	views, err := deployViews([]gitHubDeployKey{created})
 	if err != nil {
 		return deployKeyView{}, err
+	}
+	if len(views) != 1 || !views[0].usable {
+		return deployKeyView{}, githubErr("partial")
 	}
 	return views[0], nil
 }
@@ -774,20 +807,22 @@ func authorizedFingerprint(public string) (string, ssh.PublicKey, error) {
 
 func deployViews(keys []gitHubDeployKey) ([]deployKeyView, error) {
 	views := make([]deployKeyView, 0, len(keys))
+	seen := map[int64]struct{}{}
 	for _, key := range keys {
 		if key.ID <= 0 || key.ReadOnly == nil {
 			return nil, githubErr("partial")
 		}
-		fingerprint, _, err := authorizedFingerprint(key.Key)
-		if err != nil {
+		if _, dup := seen[key.ID]; dup {
 			return nil, githubErr("partial")
 		}
-		views = append(views, deployKeyView{
-			ID:          key.ID,
-			Title:       key.Title,
-			Fingerprint: fingerprint,
-			ReadOnly:    *key.ReadOnly,
-		})
+		seen[key.ID] = struct{}{}
+		view := deployKeyView{ID: key.ID, Title: key.Title, ReadOnly: *key.ReadOnly}
+		fingerprint, _, err := authorizedFingerprint(key.Key)
+		if err == nil {
+			view.Fingerprint = fingerprint
+			view.usable = true
+		}
+		views = append(views, view)
 	}
 	return views, nil
 }
@@ -802,21 +837,21 @@ func classifyDeployKeys(keys []deployKeyView, title, fingerprint string, readOnl
 			matched := key
 			byID = &matched
 		}
-		if key.Fingerprint == fingerprint {
+		if key.usable && key.Fingerprint == fingerprint {
 			byFingerprint = append(byFingerprint, key)
 		}
 		if key.Title == title {
 			byTitle = append(byTitle, key)
 		}
 	}
+	if len(byFingerprint) > 1 || len(byTitle) > 1 {
+		return 0, githubErr("collision")
+	}
 	if byID != nil {
-		if byID.Fingerprint != fingerprint || byID.Title != title || byID.ReadOnly != readOnly {
+		if !byID.usable || byID.Fingerprint != fingerprint || byID.Title != title || byID.ReadOnly != readOnly {
 			return 0, githubErr("collision")
 		}
 		return byID.ID, nil
-	}
-	if len(byFingerprint) > 1 || len(byTitle) > 1 {
-		return 0, githubErr("collision")
 	}
 	if len(byFingerprint) == 1 && len(byTitle) == 1 && byFingerprint[0].ID == byTitle[0].ID && byFingerprint[0].ReadOnly == readOnly && byFingerprint[0].Title == title && byFingerprint[0].Fingerprint == fingerprint {
 		return byFingerprint[0].ID, nil
@@ -888,7 +923,7 @@ func (s *privilegedState) resolveReconcilerApp(ctx context.Context, req grantReg
 	if err := ctx.Err(); err != nil {
 		return githubAppBinding{}, err
 	}
-	if s == nil || s.secrets == nil {
+	if s == nil || s.secrets == nil || strings.TrimSpace(s.agentsDir) == "" {
 		return githubAppBinding{}, errReconcilerUnavailable
 	}
 	repos, reposActive, err := loadRepositories(s.reposDir)
@@ -896,35 +931,35 @@ func (s *privilegedState) resolveReconcilerApp(ctx context.Context, req grantReg
 		return githubAppBinding{}, errReconcilerUnavailable
 	}
 	repo, ok := repos[req.Repository]
-	if !ok {
+	if !ok || repo.Provider != repositoryProviderGitHub {
+		return githubAppBinding{}, errReconcilerUnavailable
+	}
+	if err := validateGitHubOrg(repo.Org); err != nil || validateGitHubRepoName(repo.Name) != nil {
 		return githubAppBinding{}, errReconcilerUnavailable
 	}
 	providers, providersActive, err := loadProviders(s.providersDir, s.agentsDir, s.rulesDir, s.reposDir)
 	if err != nil || !providersActive {
 		return githubAppBinding{}, errReconcilerUnavailable
 	}
-	var chosen providerIdentity
-	found := false
-	for _, provider := range providers {
-		if !strings.EqualFold(provider.Org, repo.Org) {
-			continue
-		}
-		for _, identity := range provider.Identities {
-			if identity.Role != roleReconciler {
-				continue
-			}
-			if found {
-				return githubAppBinding{}, errReconcilerUnavailable
-			}
-			chosen = identity
-			found = true
-		}
-	}
-	if !found || chosen.Credential != credentialApp {
+	agents, err := loadAgents(s.agentsDir)
+	if err != nil {
 		return githubAppBinding{}, errReconcilerUnavailable
 	}
-	if err := validateGitHubOrg(repo.Org); err != nil || validateGitHubRepoName(repo.Name) != nil {
+	bound, err := bindGrants(agents, repos, true, providers, true)
+	if err != nil {
 		return githubAppBinding{}, errReconcilerUnavailable
+	}
+	agent, ok := bound[req.Agent]
+	if !ok || agent.GitHub == nil {
+		return githubAppBinding{}, errReconcilerUnavailable
+	}
+	grant := agent.GitHub
+	if grant.Repository != req.Repository || grant.Identity != req.Identity || grant.Git != req.Git || !permissionMapsEqual(grant.Permissions, req.Permissions) {
+		return githubAppBinding{}, errReconcilerUnavailable
+	}
+	chosen, err := selectReconciler(repo, providers, grant.Identity)
+	if err != nil {
+		return githubAppBinding{}, err
 	}
 	payload, err := s.secrets.read(chosen.Secret)
 	if err != nil {
@@ -942,4 +977,41 @@ func (s *privilegedState) resolveReconcilerApp(ctx context.Context, req grantReg
 		InstallationID: chosen.InstallationID,
 		Key:            key,
 	}, nil
+}
+
+func selectReconciler(repo repositoryDefinition, providers map[string]providerDefinition, identityName string) (providerIdentity, error) {
+	var reconciler providerIdentity
+	var matched providerIdentity
+	haveReconciler := false
+	haveIdentity := false
+	for _, provider := range providers {
+		if provider.Provider != repositoryProviderGitHub {
+			continue
+		}
+		sameOrg := strings.EqualFold(provider.Org, repo.Org)
+		for _, identity := range provider.Identities {
+			if identity.Role == roleReconciler && sameOrg {
+				if haveReconciler || identity.Credential != credentialApp || identity.Secret == "" {
+					return providerIdentity{}, errReconcilerUnavailable
+				}
+				reconciler = identity
+				haveReconciler = true
+			}
+			if identity.Name != identityName {
+				continue
+			}
+			if haveIdentity || !sameOrg || identity.Role == roleReconciler || identity.Credential != credentialApp || identity.Secret == "" {
+				return providerIdentity{}, errReconcilerUnavailable
+			}
+			if !repositoryDeclaresRole(repo, identity.Role) {
+				return providerIdentity{}, errReconcilerUnavailable
+			}
+			matched = identity
+			haveIdentity = true
+		}
+	}
+	if !haveIdentity || !haveReconciler || matched.Secret == reconciler.Secret {
+		return providerIdentity{}, errReconcilerUnavailable
+	}
+	return reconciler, nil
 }

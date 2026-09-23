@@ -196,7 +196,8 @@ Sync returns a `grant_plan` whose `credential_active` is false. Root
 `-credentials` and, when `-secrets` holds the reconciler App key, registers
 that public key as a repository deploy key. The listener summary stays
 `pending` or `none`; the root result is `material.remote_status`. No socket
-is delivered until that status is `ready`. Public-read and `git: none`
+is delivered until that status is `ready`, and a changed, removed, or refused
+grant drops the socket immediately. Public-read and `git: none`
 grants do not call GitHub. App tokens are not given to agents. Private
 keys, App JWTs, and installation tokens stay out of logs and APIs. See
 [docs/providers.md](docs/providers.md).

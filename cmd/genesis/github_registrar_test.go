@@ -278,6 +278,109 @@ func TestDeployKeyRegistrationAdoptsCreatesAndFailsClosed(t *testing.T) {
 		}
 	})
 
+	t.Run("extra token permission is refused", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.extraPermission = "contents"
+		_, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitRead,
+		})
+		if !githubKind(err, "auth") || fake.repoCalls != 0 || fake.listCalls != 0 || fake.postCalls != 0 || strings.Contains(err.Error(), "ghs_") {
+			t.Fatalf("extra permission = %v repos=%d", err, fake.repoCalls)
+		}
+	})
+
+	t.Run("short lived token is refused", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.expiresSoon = true
+		_, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitRead,
+		})
+		if !githubKind(err, "auth") || fake.repoCalls != 0 || strings.Contains(err.Error(), "ghs_") {
+			t.Fatalf("expiry = %v", err)
+		}
+	})
+
+	t.Run("token without full name is refused", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.omitTokenFullName = true
+		_, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitRead,
+		})
+		if !githubKind(err, "partial") || fake.repoCalls != 0 || fake.postCalls != 0 {
+			t.Fatalf("missing full name = %v repos=%d", err, fake.repoCalls)
+		}
+	})
+
+	t.Run("repository owner must match the declaration", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.owner = "evil"
+		_, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitRead,
+		})
+		if !githubKind(err, "partial") || fake.listCalls != 0 || fake.postCalls != 0 {
+			t.Fatalf("owner mismatch = %v lists=%d posts=%d", err, fake.listCalls, fake.postCalls)
+		}
+	})
+
+	t.Run("token repository id must match the repository", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.tokenID = 999
+		_, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitRead,
+		})
+		if !githubKind(err, "partial") || fake.keyTokenPosts != 0 || fake.postCalls != 0 {
+			t.Fatalf("id mismatch = %v key-tokens=%d", err, fake.keyTokenPosts)
+		}
+	})
+
+	t.Run("canonical name case still matches", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.owner = "Octo-Org"
+		fake.repoName = "Lab-Widget"
+		fake.tokenName = "Lab-Widget"
+		fake.tokenFullName = "Octo-Org/Lab-Widget"
+		result, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitRead,
+		})
+		if err != nil || result.RemoteKeyID != "77" {
+			t.Fatalf("case = %#v %v", result, err)
+		}
+	})
+
+	t.Run("unrelated key does not block registration", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.preload(9, "someone-else", testRSAPublic(t), false)
+		result, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitWrite,
+		})
+		if err != nil || result.RemoteKeyID != "77" || fake.postCalls != 1 {
+			t.Fatalf("unrelated = %#v %v posts=%d", result, err, fake.postCalls)
+		}
+	})
+
+	t.Run("non-ed25519 title collision fails closed", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.preload(9, title, testRSAPublic(t), false)
+		_, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitWrite,
+		})
+		if !githubKind(err, "collision") || fake.postCalls != 0 || fake.deleteCalls != 0 {
+			t.Fatalf("rsa title = %v posts=%d", err, fake.postCalls)
+		}
+	})
+
+	t.Run("error body does not leak tokens", func(t *testing.T) {
+		fake := newGitHubFake(t, now)
+		fake.repoStatus = http.StatusInternalServerError
+		fake.leakBody = true
+		_, err := fake.registrar().Register(context.Background(), grantRegistration{
+			GrantID: grantID, Fingerprint: fingerprint, PublicKey: public, Git: gitRead,
+		})
+		if err == nil || strings.Contains(err.Error(), "ghs_") || strings.Contains(err.Error(), "eyJ") || strings.Contains(err.Error(), "PRIVATE KEY") || strings.Contains(err.Error(), "MIIE") {
+			t.Fatalf("leak = %v", err)
+		}
+	})
+
 	t.Run("second page is searched before create", func(t *testing.T) {
 		fake := newGitHubFake(t, now)
 		fake.pageTwo = true
@@ -345,6 +448,7 @@ func TestReconcilerSecretResolutionIsRootNamedAndFailClosed(t *testing.T) {
 	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
 	secretName := "GITHUB_APP_RECONCILER_PEM"
 	writeRepoFile(t, providersDir, "github.yaml", reconcilerProviderYAML(secretName))
+	writeGrantAgent(t, agentsDir, "worker", programmerIdentity, "lab", gitRead, map[string]string{"contents": "read", "metadata": "read"})
 	key := testAppKey(t)
 	secrets := openTestSecretStore(t)
 	writeSecretPEM(t, secrets.root, secretName, key)
@@ -355,7 +459,11 @@ func TestReconcilerSecretResolutionIsRootNamedAndFailClosed(t *testing.T) {
 		reposDir:     reposDir,
 		providersDir: providersDir,
 	}
-	binding, err := state.resolveReconcilerApp(context.Background(), grantRegistration{Repository: "lab"})
+	request := grantRegistration{
+		Agent: "worker", Repository: "lab", Identity: programmerIdentity, Git: gitRead,
+		Permissions: map[string]string{"contents": "read", "metadata": "read"},
+	}
+	binding, err := state.resolveReconcilerApp(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,6 +472,40 @@ func TestReconcilerSecretResolutionIsRootNamedAndFailClosed(t *testing.T) {
 	}
 	if binding.Key == nil || binding.Key.N.Cmp(key.N) != 0 {
 		t.Fatal("resolved key did not match the reconciler secret")
+	}
+	writeRepoFile(t, providersDir, "other.yaml", `provider: github
+org: evil-org
+identities:
+  - name: outsider
+    role: programmer
+    credential: app
+    secret: EVIL_APP_PRIVATE_KEY_PEM
+  - name: evil-bot
+    role: reconciler
+    credential: app
+    secret: EVIL_APP_RECONCILER_PEM
+    app_id: "300001"
+    installation_id: "300002"
+`)
+	evilKey := testAppKey(t)
+	writeSecretPEM(t, secrets.root, "EVIL_APP_RECONCILER_PEM", evilKey)
+	cross := request
+	cross.Identity = "outsider"
+	if _, err := state.resolveReconcilerApp(context.Background(), cross); err == nil || strings.Contains(err.Error(), "EVIL") || strings.Contains(err.Error(), secretName) {
+		t.Fatalf("cross-org identity error = %v", err)
+	}
+	wrongGit := request
+	wrongGit.Git = gitWrite
+	wrongGit.Permissions = map[string]string{"contents": "write", "metadata": "read"}
+	if _, err := state.resolveReconcilerApp(context.Background(), wrongGit); err == nil {
+		t.Fatal("undeclared git write was accepted")
+	}
+	if _, err := state.resolveReconcilerApp(context.Background(), grantRegistration{Repository: "lab"}); err == nil {
+		t.Fatal("missing agent identity was accepted")
+	}
+	again, err := state.resolveReconcilerApp(context.Background(), request)
+	if err != nil || again.Key == nil || again.Key.N.Cmp(key.N) != 0 || again.Key.N.Cmp(evilKey.N) == 0 {
+		t.Fatalf("reconciler key changed after the cross-org probe: %v", err)
 	}
 	if err := os.Remove(filepath.Join(secrets.root, secretName)); err != nil {
 		t.Fatal(err)
@@ -442,6 +584,14 @@ func TestNextKeyPageRejectsForeignHosts(t *testing.T) {
 	if _, err := nextKeyPage(origin.URL, header, "octo-org", "lab-widget"); err == nil {
 		t.Fatal("foreign link was accepted")
 	}
+	header.Set("Link", `<https://api.github.com/repos/octo-org/lab-widget/keys?page=2&access_token=ghs_secret>; rel="next"`)
+	if _, err := nextKeyPage(origin.URL, header, "octo-org", "lab-widget"); err == nil {
+		t.Fatal("token query was accepted")
+	}
+	header.Set("Link", `</repos/octo-org/lab-widget/keys?page=2>; rel="next", <//evil.example/repos/octo-org/lab-widget/keys?page=3>; rel="next"`)
+	if _, err := nextKeyPage(origin.URL, header, "octo-org", "lab-widget"); err == nil {
+		t.Fatal("protocol-relative link was accepted")
+	}
 }
 
 func TestSSHCheckScriptIsGuarded(t *testing.T) {
@@ -471,34 +621,45 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 }
 
 type gitHubFake struct {
-	t              *testing.T
-	server         *httptest.Server
-	key            *rsa.PrivateKey
-	now            time.Time
-	mu             sync.Mutex
-	keys           []gitHubDeployKey
-	tokenCalls     int
-	discoveryPosts int
-	keyTokenPosts  int
-	repoCalls      int
-	listCalls      int
-	postCalls      int
-	deleteCalls    int
-	lastTitle      string
-	lastKey        string
-	lastReadOnly   bool
-	authFails      int
-	repoStatus     int
-	repoFailOnce   bool
-	listAfter      string
-	listFailOnce   bool
-	listFailed     bool
-	postStatus     int
-	adoptOnPost    bool
-	emptyCreate    bool
-	selection      string
-	pageTwo        bool
-	pemMarker      string
+	t                 *testing.T
+	server            *httptest.Server
+	key               *rsa.PrivateKey
+	now               time.Time
+	mu                sync.Mutex
+	keys              []gitHubDeployKey
+	tokenCalls        int
+	discoveryPosts    int
+	keyTokenPosts     int
+	repoCalls         int
+	listCalls         int
+	postCalls         int
+	deleteCalls       int
+	lastTitle         string
+	lastKey           string
+	lastReadOnly      bool
+	authFails         int
+	repoStatus        int
+	repoFailOnce      bool
+	listAfter         string
+	listFailOnce      bool
+	listFailed        bool
+	postStatus        int
+	adoptOnPost       bool
+	emptyCreate       bool
+	selection         string
+	pageTwo           bool
+	pemMarker         string
+	owner             string
+	repoName          string
+	fullName          string
+	tokenID           int64
+	tokenName         string
+	tokenFullName     string
+	omitTokenFullName bool
+	omitRepoFullName  bool
+	extraPermission   string
+	expiresSoon       bool
+	leakBody          bool
 }
 
 func newGitHubFake(t *testing.T, now time.Time) *gitHubFake {
@@ -577,7 +738,22 @@ func (f *gitHubFake) serveToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad scope", http.StatusBadRequest)
 		return
 	}
-	repos := []gitHubRepoRef{{ID: 4242, Name: "lab-widget", FullName: "octo-org/lab-widget"}}
+	name := f.tokenName
+	if name == "" {
+		name = "lab-widget"
+	}
+	full := f.tokenFullName
+	if full == "" {
+		full = "octo-org/" + name
+	}
+	if f.omitTokenFullName {
+		full = ""
+	}
+	id := int64(4242)
+	if f.tokenID != 0 {
+		id = f.tokenID
+	}
+	repos := []gitHubRepoRef{{ID: id, Name: name, FullName: full}}
 	if f.selection == "all" {
 		repos = nil
 	}
@@ -585,9 +761,16 @@ func (f *gitHubFake) serveToken(w http.ResponseWriter, r *http.Request) {
 	if token != "ghs_test_discovery_token_value" {
 		permissions["administration"] = "write"
 	}
+	if f.extraPermission != "" {
+		permissions[f.extraPermission] = "write"
+	}
+	expires := f.now.Add(time.Hour)
+	if f.expiresSoon {
+		expires = f.now.Add(10 * time.Second)
+	}
 	_ = json.NewEncoder(w).Encode(gitHubTokenResponse{
 		Token:               token,
-		ExpiresAt:           f.now.Add(time.Hour),
+		ExpiresAt:           expires,
 		Permissions:         permissions,
 		RepositorySelection: f.selection,
 		Repositories:        repos,
@@ -599,6 +782,9 @@ func (f *gitHubFake) serveRepo(w http.ResponseWriter, r *http.Request) {
 	if f.repoFailOnce {
 		f.repoFailOnce = false
 		w.WriteHeader(http.StatusInternalServerError)
+		if f.leakBody {
+			_, _ = w.Write([]byte(`{"token":"ghs_leak_token_value","pem":"-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----","jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"}`))
+		}
 		return
 	}
 	if r.Header.Get("Authorization") != "Bearer ghs_test_discovery_token_value" {
@@ -606,11 +792,29 @@ func (f *gitHubFake) serveRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if f.repoStatus != 0 {
 		w.WriteHeader(f.repoStatus)
+		if f.leakBody {
+			_, _ = w.Write([]byte(`{"token":"ghs_leak_token_value","pem":"-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----","jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"}`))
+		}
 		return
 	}
-	_ = json.NewEncoder(w).Encode(gitHubRepo{ID: 4242, Name: "lab-widget", FullName: "octo-org/lab-widget", Owner: struct {
+	name := f.repoName
+	if name == "" {
+		name = "lab-widget"
+	}
+	owner := f.owner
+	if owner == "" {
+		owner = "octo-org"
+	}
+	full := f.fullName
+	if full == "" {
+		full = owner + "/" + name
+	}
+	if f.omitRepoFullName {
+		full = ""
+	}
+	_ = json.NewEncoder(w).Encode(gitHubRepo{ID: 4242, Name: name, FullName: full, Owner: struct {
 		Login string `json:"login"`
-	}{Login: "octo-org"}})
+	}{Login: owner}})
 }
 
 func (f *gitHubFake) serveKeys(w http.ResponseWriter, r *http.Request) {
@@ -715,6 +919,19 @@ func (f *gitHubFake) verifyJWT(header string) {
 	}
 }
 
+func testRSAPublic(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := ssh.NewPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(public)))
+}
+
 func testDeployPublic(t *testing.T) (string, string) {
 	t.Helper()
 	_, private, err := ed25519.GenerateKey(rand.Reader)
@@ -766,6 +983,10 @@ identities:
     secret: ` + secret + `
     app_id: "100001"
     installation_id: "100002"
+  - name: ` + programmerIdentity + `
+    role: programmer
+    credential: app
+    secret: ` + programmerSecret + `
 `
 }
 

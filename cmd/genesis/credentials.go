@@ -401,9 +401,11 @@ func (s *credentialStore) ensureRegistration(ctx context.Context, intent privile
 			GrantID:     id,
 			Agent:       intent.Agent,
 			Repository:  intent.Repository,
+			Identity:    intent.Identity,
 			Fingerprint: current.Fingerprint,
 			PublicKey:   public,
 			Git:         intent.Git,
+			Permissions: clonePermissions(intent.Permissions),
 			RemoteKeyID: current.RemoteKeyID,
 		})
 		if err != nil {
@@ -417,9 +419,13 @@ func (s *credentialStore) ensureRegistration(ctx context.Context, intent privile
 		if result.Status == remoteStatusReady && result.RemoteKeyID == "" {
 			return s.refuseReady(current, errors.New("ready registration did not return a remote key id"))
 		}
-		current.RemoteStatus = result.Status
 		if result.Status == remoteStatusReady {
+			current.RemoteStatus = remoteStatusReady
 			current.RemoteKeyID = result.RemoteKeyID
+		} else if current.RemoteStatus == remoteStatusReady {
+			current.RemoteStatus = remoteStatusRefused
+		} else {
+			current.RemoteStatus = result.Status
 		}
 		if err := s.saveRecord(current); err != nil {
 			return err
@@ -739,16 +745,20 @@ func (s *privilegedState) consumeGrantIntent(intent privilegedIntent) (grantDeci
 		}
 		return grantDecision{Unsupported: &change}, nil
 	}
+	id, err := grantIDFromIntent(intent)
+	if err != nil {
+		s.revokeAgentAccess(intent.Agent)
+		return grantDecision{}, err
+	}
+	// A replaced grant stops being deliverable before the new one is registered.
+	s.revokeOtherGrant(intent.Agent, id)
 	switch intent.Kind {
 	case intentEnsureRepositoryGrant:
-		id, err := grantIDFromIntent(intent)
-		if err != nil {
-			return grantDecision{}, err
-		}
 		return grantDecision{Applied: intent.Kind + ":" + intent.Agent, GrantID: id}, nil
 	case intentEnsureCredential:
 		record, err := s.credentials.ensureCredential(intent)
 		if err != nil {
+			s.revokeAgentAccess(intent.Agent)
 			return grantDecision{}, err
 		}
 		obs := record.observation()
@@ -769,9 +779,7 @@ func (s *privilegedState) consumeGrantIntent(intent privilegedIntent) (grantDeci
 		defer cancel()
 		record, err := s.credentials.ensureRegistration(ctx, intent, s.grantDriver())
 		if err != nil {
-			if id, idErr := grantIDFromIntent(intent); idErr == nil {
-				s.dropHeld(intent.Agent, id)
-			}
+			s.revokeAgentAccess(intent.Agent)
 			return grantDecision{}, err
 		}
 		obs := record.observation()
@@ -781,6 +789,7 @@ func (s *privilegedState) consumeGrantIntent(intent privilegedIntent) (grantDeci
 			s.logGrant(obs)
 			return decision, nil
 		}
+		s.revokeAgentAccess(intent.Agent)
 		reason := coordinatorRegistrationReason
 		if record.KeyMaterial != keyMaterialLocal {
 			reason = "no SSH identity to register; Genesis did not call GitHub"
@@ -809,17 +818,38 @@ func (s *privilegedState) logGrant(obs grantObservation) {
 	)
 }
 
-func (s *privilegedState) dropHeld(agent, grantID string) {
-	if s == nil || agent == "" || grantID == "" {
+func (s *privilegedState) revokeAgentAccess(agent string) {
+	s.revokeGrantSockets(agent, "", false)
+}
+
+func (s *privilegedState) revokeOtherGrant(agent, keepID string) {
+	s.revokeGrantSockets(agent, keepID, true)
+}
+
+func (s *privilegedState) revokeGrantSockets(agent, keepID string, keep bool) {
+	if s == nil || agent == "" {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.held == nil {
-		return
+	if s.held != nil {
+		current, ok := s.held[agent]
+		if ok && (!keep || current.ID != keepID) {
+			delete(s.held, agent)
+		}
 	}
-	if current, ok := s.held[agent]; ok && current.ID == grantID {
-		delete(s.held, agent)
+	stops := make([]*runSSHAgent, 0)
+	for _, child := range s.spawned {
+		if child == nil || child.ssh == nil || child.agent != agent {
+			continue
+		}
+		if keep && child.grantID == keepID {
+			continue
+		}
+		stops = append(stops, child.ssh)
+	}
+	s.mu.Unlock()
+	for _, sshAgent := range stops {
+		sshAgent.stop()
 	}
 }
 

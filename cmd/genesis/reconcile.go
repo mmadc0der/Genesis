@@ -117,6 +117,9 @@ func (s *privilegedState) canMutate() bool {
 }
 
 func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
+	if plan.Agents {
+		s.revokeRemovedGrants(plan)
+	}
 	result := coordinateResult{
 		HostMutation: hostMutationNone,
 		Applied:      []string{},
@@ -197,6 +200,42 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 		s.replaceHeld(held)
 	}
 	return result, nil
+}
+
+func (s *privilegedState) revokeRemovedGrants(plan privilegedPlan) {
+	mentioned := map[string]struct{}{}
+	for _, intent := range plan.Intents {
+		if isGrantIntent(intent.Kind) && intent.Agent != "" {
+			mentioned[intent.Agent] = struct{}{}
+		}
+	}
+	s.mu.Lock()
+	agents := make([]string, 0)
+	seen := map[string]struct{}{}
+	for agent := range s.held {
+		if _, ok := mentioned[agent]; ok {
+			continue
+		}
+		agents = append(agents, agent)
+		seen[agent] = struct{}{}
+	}
+	for _, child := range s.spawned {
+		if child == nil || child.agent == "" {
+			continue
+		}
+		if _, ok := mentioned[child.agent]; ok {
+			continue
+		}
+		if _, dup := seen[child.agent]; dup {
+			continue
+		}
+		agents = append(agents, child.agent)
+		seen[child.agent] = struct{}{}
+	}
+	s.mu.Unlock()
+	for _, agent := range agents {
+		s.revokeAgentAccess(agent)
+	}
 }
 
 func readyGrants(observations []grantObservation) (map[string]heldGrant, error) {
