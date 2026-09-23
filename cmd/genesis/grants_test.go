@@ -704,6 +704,23 @@ func TestDockerImageDoesNotInstallExampleProviders(t *testing.T) {
 	if strings.Contains(text, "COPY providers.d") {
 		t.Fatal("image copies providers.d into the live directory")
 	}
+	if strings.Contains(strings.ToLower(text), "openssh") {
+		t.Fatal("image installs OpenSSH; the agent protocol is in-process")
+	}
+	compose, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(compose), "target: /var/lib/genesis/credentials") != 1 {
+		t.Fatal("credential store must be mounted on the root service only")
+	}
+	entrypoint, err := os.ReadFile(filepath.Join(root, "docker-entrypoint.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(entrypoint), credentialsDockerPath) || !strings.Contains(text, credentialsDockerPath) || !strings.Contains(string(compose), credentialsDockerPath) {
+		t.Fatal("image credential path is not wired to /var/lib/genesis/credentials")
+	}
 	for _, line := range strings.Split(text, "\n") {
 		if strings.Contains(line, "/etc/genesis/providers.d") && (strings.Contains(line, "a+rX") || strings.Contains(line, "0644")) {
 			t.Fatalf("provider path is world-readable: %s", line)
@@ -714,7 +731,8 @@ func TestDockerImageDoesNotInstallExampleProviders(t *testing.T) {
 		"useradd --create-home --uid 65532 --gid 65532",
 		"chown root:genesis /etc/genesis/providers.d",
 		"chmod 0750 /etc/genesis/providers.d",
-		"chown root:root /var/lib/genesis/credentials",
+		"chown root:root /var/lib/genesis /var/lib/genesis/credentials",
+		"chmod 0755 /var/lib/genesis",
 		"chmod 0700 /var/lib/genesis/credentials",
 		"-credentials", "/var/lib/genesis/credentials",
 	} {

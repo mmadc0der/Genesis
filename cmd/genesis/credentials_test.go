@@ -27,6 +27,310 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
+func TestRootLaunchStoreIsTraversableAndGrantDirsStayPrivate(t *testing.T) {
+	root := storeRootMode(0)
+	if root&0o001 == 0 || root&0o066 != 0 || root&0o700 != 0o700 {
+		t.Fatalf("root launch mode = %o", root)
+	}
+	if storeRootMode(1000) != credentialDirMode {
+		t.Fatalf("unprivileged mode = %o", storeRootMode(1000))
+	}
+	if credentialDirMode&0o077 != 0 {
+		t.Fatal("grant directories are not private")
+	}
+}
+
+func TestCredentialStoreRejectsRenamableParentAndReplacedPath(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openCredentialStore(filepath.Join(parent, "credentials"), credentialBounds{}); err == nil {
+		t.Fatal("store in a world-writable parent was accepted")
+	}
+
+	safe := t.TempDir()
+	root := filepath.Join(safe, "credentials")
+	store, err := openCredentialStore(root, credentialBounds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.dir.Close() })
+	if err := os.Chmod(root, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openCredentialStore(root, credentialBounds{})
+	if err != nil {
+		t.Fatalf("traversable store root was rejected: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.dir.Close() })
+	info, err := os.Lstat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != storeRootMode(os.Geteuid()) {
+		t.Fatalf("reopened mode = %o", info.Mode().Perm())
+	}
+	grants, err := os.Lstat(filepath.Join(root, "grants"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grants.Mode().Perm() != credentialDirMode {
+		t.Fatalf("grants mode = %o", grants.Mode().Perm())
+	}
+
+	real := filepath.Join(safe, "real")
+	if err := os.Rename(root, real); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(safe, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, root); err != nil {
+		t.Fatal(err)
+	}
+	intent := sampleGrant(intentEnsureCredential, "worker", "programmer", gitWrite, credentialPending)
+	if _, err := store.ensureCredential(intent); err == nil {
+		t.Fatal("replaced store path was accepted")
+	}
+	if _, err := startRunSSHAgent(store, "gen_replaced", os.Getuid(), os.Getgid(), ed25519.PrivateKey("not-a-key"), ""); err == nil {
+		t.Fatal("replaced store path bound a socket")
+	}
+	for _, dir := range []string{outside, real} {
+		walk := bytes.Buffer{}
+		if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			payload, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			walk.Write(payload)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(walk.Bytes(), []byte("PRIVATE KEY")) || bytes.Contains(walk.Bytes(), []byte("agent.sock")) {
+			t.Fatalf("replaced path received credential material in %s", dir)
+		}
+	}
+}
+
+func TestPrivateKeyErrorsDoNotEchoMaterial(t *testing.T) {
+	store := openTestCredentialStore(t)
+	intent := sampleGrant(intentEnsureCredential, "worker", "programmer", gitWrite, credentialPending)
+	record, err := store.ensureCredential(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(store.root, "grants", record.GrantID, privateKeyFileName)
+	const marker = "SUPERSECRETKEYMATERIAL"
+	if err := os.WriteFile(keyPath, []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.ensureCredential(intent)
+	if err == nil || strings.Contains(err.Error(), marker) || strings.Contains(err.Error(), "PRIVATE KEY") {
+		t.Fatalf("parse error echoed material: %v", err)
+	}
+}
+
+func TestProductionRegistrarCannotReportReady(t *testing.T) {
+	state := newPrivilegedState(discardLogger(), "/usr/bin/python3", "print(1)", "genesis", t.TempDir())
+	result, err := state.grantDriver().Register(context.Background(), grantRegistration{PublicKey: "ssh-ed25519 AAAA"})
+	if err != nil || result.Status != remoteRegistrationUnsupported || result.RemoteKeyID != "" {
+		t.Fatalf("production registrar = %#v %v", result, err)
+	}
+	if _, ok := state.grantDriver().(githubRegistrar); !ok {
+		t.Fatalf("production driver = %T", state.grantDriver())
+	}
+}
+
+func TestIPCReplyRedactsPrivateKeys(t *testing.T) {
+	reply := ipcEnvelope{
+		Error:   "boom -----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END OPENSSH PRIVATE KEY-----",
+		Payload: []byte(`{"note":"-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END OPENSSH PRIVATE KEY-----"}`),
+	}
+	sanitizeIPCReply(&reply)
+	if strings.Contains(reply.Error, "SECRET") || bytes.Contains(reply.Payload, []byte("SECRET")) || strings.Contains(reply.Error, "PRIVATE KEY") {
+		t.Fatalf("ipc leaked key: %#v", reply)
+	}
+}
+
+func TestSSHAgentStopDropsKeys(t *testing.T) {
+	store := openTestCredentialStore(t)
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	run, err := startRunSSHAgent(store, "gen_stop", os.Getuid(), os.Getgid(), private, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("unix", run.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := agent.NewClient(conn)
+	keys, err := client.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("keys = %d", len(keys))
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-stop
+			for range 20 {
+				extra, err := net.Dial("unix", run.Socket())
+				if err != nil {
+					return
+				}
+				_, _ = agent.NewClient(extra).List()
+				extra.Close()
+			}
+		}()
+	}
+	close(stop)
+	run.stop()
+	wg.Wait()
+	if _, err := net.Dial("unix", run.Socket()); err == nil {
+		t.Fatal("socket accepted after stop")
+	}
+	if _, err := client.List(); err == nil {
+		t.Fatal("agent still served a key after stop")
+	}
+	if _, err := os.Lstat(run.Socket()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket remained: %v", err)
+	}
+}
+
+func TestSharedUIDDoesNotReceiveASecondGrantSocket(t *testing.T) {
+	account, identity, dataDir, runDir, dshHome := testSpawnIdentity(t)
+	store := openTestCredentialStore(t)
+	state := newPrivilegedState(discardLogger(), "/usr/bin/python3", "import time\ntime.sleep(30)\n", account.Username, dataDir)
+	state.host = newMemoryHost()
+	state.mutate = true
+	state.credentials = store
+	state.registrar = &fakeRegistrar{Status: remoteStatusReady, KeyID: "k"}
+	state.remember(identity)
+	other := identity
+	other.Agent = "other"
+	other.Username = "other-user"
+	state.remember(other)
+	second := sampleGrant(intentEnsureCredential, other.Agent, "reviewer", gitRead, credentialPending)
+	plan := privilegedPlan{Agents: true, Intents: append(grantTrio(identity.Agent, gitWrite, credentialPending),
+		sampleGrant(intentEnsureRepositoryGrant, other.Agent, "reviewer", gitRead, credentialPending),
+		second,
+		sampleGrant(intentEnsureRemoteRegistration, other.Agent, "reviewer", gitRead, credentialPending),
+	)}
+	if _, err := state.apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	pid, err := state.spawn(spawnRequest{
+		Agent: identity.Agent, User: identity.Username, Cwd: identity.Cwd, Home: identity.Home,
+		RunDir: runDir, DshHome: dshHome,
+	}, devNull(t), devNull(t), devNull(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.killAll() })
+	otherRun := filepath.Join(dataDir, runsDirName, "gen_other")
+	otherDsh := filepath.Join(otherRun, dshHomeDirName)
+	if err := os.MkdirAll(otherDsh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.spawn(spawnRequest{
+		Agent: other.Agent, User: other.Username, Cwd: other.Cwd, Home: other.Home,
+		RunDir: otherRun, DshHome: otherDsh,
+	}, devNull(t), devNull(t), devNull(t)); err == nil {
+		t.Fatal("shared uid received a second grant socket")
+	}
+	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err != nil {
+		t.Fatal("first child died")
+	}
+	entries, err := os.ReadDir(filepath.Join(store.root, "sockets"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("sockets = %v", entries)
+	}
+}
+
+func TestConcurrentRunsOfOneGrantGetDistinctSockets(t *testing.T) {
+	account, identity, dataDir, runDir, dshHome := testSpawnIdentity(t)
+	store := openTestCredentialStore(t)
+	reportA := filepath.Join(t.TempDir(), "a")
+	reportB := filepath.Join(t.TempDir(), "b")
+	source := "import os,time\nopen(os.environ['REPORT'],'w').write(os.environ.get('SSH_AUTH_SOCK') or '')\ntime.sleep(30)\n"
+	state := newPrivilegedState(discardLogger(), "/usr/bin/python3", source, account.Username, dataDir)
+	state.host = newMemoryHost()
+	state.mutate = true
+	state.credentials = store
+	state.registrar = &fakeRegistrar{Status: remoteStatusReady, KeyID: "k"}
+	state.remember(identity)
+	t.Cleanup(func() { state.killAll() })
+	if _, err := state.apply(privilegedPlan{Agents: true, Intents: grantTrio(identity.Agent, gitWrite, credentialPending)}); err != nil {
+		t.Fatal(err)
+	}
+	spawn := func(run, dsh, report string) int {
+		t.Helper()
+		if err := os.MkdirAll(dsh, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		pid, err := state.spawn(spawnRequest{
+			Agent: identity.Agent, User: identity.Username, Cwd: identity.Cwd, Home: identity.Home,
+			RunDir: run, DshHome: dsh, Env: map[string]string{"REPORT": report},
+		}, devNull(t), devNull(t), devNull(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pid
+	}
+	otherRun := filepath.Join(dataDir, runsDirName, "gen_spawn_b")
+	otherDsh := filepath.Join(otherRun, dshHomeDirName)
+	spawn(runDir, dshHome, reportA)
+	spawn(otherRun, otherDsh, reportB)
+	sockA := strings.TrimSpace(waitFile(t, reportA))
+	sockB := strings.TrimSpace(waitFile(t, reportB))
+	if sockA == "" || sockB == "" || sockA == sockB {
+		t.Fatalf("sockets = %q %q", sockA, sockB)
+	}
+	keysOf := func(path string) []*agent.Key {
+		t.Helper()
+		conn, err := net.Dial("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		keys, err := agent.NewClient(conn).List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return keys
+	}
+	left := keysOf(sockA)
+	right := keysOf(sockB)
+	if len(left) != 1 || len(right) != 1 || !bytes.Equal(left[0].Marshal(), right[0].Marshal()) {
+		t.Fatalf("concurrent keys differ or multiplied: %d %d", len(left), len(right))
+	}
+	state.killAll()
+	if _, err := os.Lstat(sockA); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first socket remained: %v", err)
+	}
+	if _, err := os.Lstat(sockB); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("second socket remained: %v", err)
+	}
+}
+
 func TestCredentialStoreRejectsBoundaryViolations(t *testing.T) {
 	data := t.TempDir()
 	providers := t.TempDir()

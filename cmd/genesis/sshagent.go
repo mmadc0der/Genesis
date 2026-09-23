@@ -27,10 +27,13 @@ type runSSHAgent struct {
 	socket   string
 	dir      string
 	done     chan struct{}
+	keyring  agent.Agent
+	release  func()
 
-	mu    sync.Mutex
-	conns []net.Conn
-	once  sync.Once
+	mu      sync.Mutex
+	conns   []net.Conn
+	stopped bool
+	once    sync.Once
 }
 
 // sealedAgent refuses add, remove, and lock so a child cannot change the
@@ -58,14 +61,20 @@ func (s sealedAgent) RemoveAll() error    { return errors.New("ssh agent is seal
 func (s sealedAgent) Lock([]byte) error   { return errors.New("ssh agent is sealed") }
 func (s sealedAgent) Unlock([]byte) error { return errors.New("ssh agent is sealed") }
 
-func startRunSSHAgent(root string, runID string, uid, gid int, private ed25519.PrivateKey, home string) (*runSSHAgent, error) {
+func startRunSSHAgent(store *credentialStore, runID string, uid, gid int, private ed25519.PrivateKey, home string) (*runSSHAgent, error) {
+	if store == nil {
+		return nil, errors.New("ssh agent requires a credential store")
+	}
 	if err := validateRunID(runID); err != nil {
 		return nil, err
 	}
 	if private == nil {
 		return nil, errors.New("ssh agent requires a grant key")
 	}
-	dir := filepath.Join(root, "sockets", runID)
+	if err := store.confirmBound(); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(store.root, "sockets", runID)
 	socketPath := filepath.Join(dir, "agent.sock")
 	if len(socketPath) >= maxSocketPath {
 		return nil, fmt.Errorf("ssh agent socket path is too long")
@@ -73,50 +82,42 @@ func startRunSSHAgent(root string, runID string, uid, gid int, private ed25519.P
 	if home != "" && (pathWithin(socketPath, home) || pathWithin(dir, home)) {
 		return nil, errors.New("ssh agent socket must not be inside the agent home")
 	}
-	if err := prepareSocketDir(dir, uid); err != nil {
+	socketRel := "sockets/" + runID
+	if err := store.mkdirRel(socketRel, socketDirMode(uid)); err != nil {
 		return nil, err
 	}
-	if info, err := os.Lstat(socketPath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			if err := os.Remove(socketPath); err != nil {
-				return nil, err
-			}
-		} else if err := os.Remove(socketPath); err != nil {
-			return nil, err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := store.ensureTraversable(dir, uid); err != nil {
+		_ = store.removeTree(socketRel)
+		return nil, err
+	}
+	if err := store.unlinkRel(socketRel + "/agent.sock"); err != nil {
+		_ = store.removeTree(socketRel)
+		return nil, err
+	}
+	if err := store.confirmBound(); err != nil {
+		_ = store.removeTree(socketRel)
 		return nil, err
 	}
 	listener, err := listenSocket(socketPath)
 	if err != nil {
+		_ = store.removeTree(socketRel)
 		return nil, err
 	}
-	if err := os.Chmod(socketPath, credentialFileMode); err != nil {
-		listener.Close()
-		_ = os.Remove(socketPath)
-		return nil, err
-	}
-	if err := os.Chown(socketPath, uid, gid); err != nil {
-		listener.Close()
-		_ = os.Remove(socketPath)
-		return nil, err
-	}
-	if err := verifySocket(socketPath, uid); err != nil {
-		listener.Close()
-		_ = os.Remove(socketPath)
+	if err := store.ownSocket(socketRel+"/agent.sock", uid, gid); err != nil {
+		discardSocket(listener, store, socketRel)
 		return nil, err
 	}
 
 	ring := agent.NewKeyring()
 	if err := ring.Add(agent.AddedKey{PrivateKey: private, Comment: grantComment}); err != nil {
-		listener.Close()
-		_ = os.Remove(socketPath)
+		_ = ring.RemoveAll()
+		discardSocket(listener, store, socketRel)
 		return nil, err
 	}
 	extended, ok := ring.(agent.ExtendedAgent)
 	if !ok {
-		listener.Close()
-		_ = os.Remove(socketPath)
+		_ = ring.RemoveAll()
+		discardSocket(listener, store, socketRel)
 		return nil, errors.New("ssh agent keyring is not sealable")
 	}
 	served := sealedAgent{inner: extended}
@@ -125,9 +126,26 @@ func startRunSSHAgent(root string, runID string, uid, gid int, private ed25519.P
 		socket:   socketPath,
 		dir:      dir,
 		done:     make(chan struct{}),
+		keyring:  ring,
 	}
 	go run.serve(served, uid)
 	return run, nil
+}
+
+func socketDirMode(uid int) os.FileMode {
+	if os.Geteuid() == 0 && uid != os.Geteuid() {
+		return credentialSocketDirMode
+	}
+	return credentialDirMode
+}
+
+func discardSocket(listener net.Listener, store *credentialStore, socketRel string) {
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if store != nil && socketRel != "" {
+		_ = store.removeTree(socketRel)
+	}
 }
 
 func (a *runSSHAgent) serve(served agent.Agent, uid int) {
@@ -142,14 +160,25 @@ func (a *runSSHAgent) serve(served agent.Agent, uid int) {
 			conn.Close()
 			continue
 		}
-		a.mu.Lock()
-		a.conns = append(a.conns, conn)
-		a.mu.Unlock()
+		if !a.track(conn) {
+			conn.Close()
+			continue
+		}
 		go func(conn net.Conn) {
 			defer conn.Close()
 			_ = agent.ServeAgent(served, conn)
 		}(conn)
 	}
+}
+
+func (a *runSSHAgent) track(conn net.Conn) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped {
+		return false
+	}
+	a.conns = append(a.conns, conn)
+	return true
 }
 
 func (a *runSSHAgent) Socket() string {
@@ -164,13 +193,18 @@ func (a *runSSHAgent) stop() {
 		return
 	}
 	a.once.Do(func() {
-		if a.listener != nil {
-			_ = a.listener.Close()
-		}
 		a.mu.Lock()
+		a.stopped = true
+		keyring := a.keyring
 		conns := a.conns
 		a.conns = nil
 		a.mu.Unlock()
+		if keyring != nil {
+			_ = keyring.RemoveAll()
+		}
+		if a.listener != nil {
+			_ = a.listener.Close()
+		}
 		for _, conn := range conns {
 			_ = conn.Close()
 		}
@@ -181,53 +215,51 @@ func (a *runSSHAgent) stop() {
 			info, err := os.Lstat(a.socket)
 			if err == nil && info.Mode()&os.ModeSymlink != 0 {
 				_ = os.Remove(a.socket)
-			} else {
+			} else if err == nil {
 				_ = os.Remove(a.socket)
 			}
 		}
 		if a.dir != "" {
 			_ = os.Remove(a.dir)
 		}
+		if a.release != nil {
+			a.release()
+		}
 	})
 }
 
-func prepareSocketDir(dir string, uid int) error {
-	parent := filepath.Dir(dir)
-	info, err := os.Lstat(parent)
+func (s *credentialStore) ownSocket(rel string, uid, gid int) error {
+	dir, name, err := splitRel(rel)
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("ssh socket parent is not a real directory")
-	}
-	if os.Geteuid() == 0 && uid != os.Geteuid() {
-		if info.Mode().Perm()&0o001 == 0 {
-			return errors.New("ssh socket parent is not traversable by the agent user")
-		}
-	}
-	if err := os.Mkdir(dir, credentialDirMode); err != nil && !os.IsExist(err) {
-		return err
-	}
-	current, err := os.Lstat(dir)
+	parent, err := s.openDir(dir)
 	if err != nil {
 		return err
 	}
-	if current.Mode()&os.ModeSymlink != 0 || !current.IsDir() {
-		return errors.New("ssh socket directory is not a real directory")
-	}
-	mode := os.FileMode(credentialDirMode)
-	if os.Geteuid() == 0 && uid != os.Geteuid() {
-		mode = credentialSocketDirMode
-	}
-	if err := os.Chmod(dir, mode); err != nil {
+	defer parent.Close()
+	var before unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return err
 	}
-	owner, err := fileUID(current)
-	if err != nil {
+	if before.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		return errors.New("ssh agent listener is not a socket")
+	}
+	if err := unix.Fchmodat(int(parent.Fd()), name, credentialFileMode, 0); err != nil {
 		return err
 	}
-	if owner != os.Geteuid() {
-		return errors.New("ssh socket directory is not owned by the coordinator")
+	if err := unix.Fchownat(int(parent.Fd()), name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	var after unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), name, &after, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if after.Mode&unix.S_IFMT != unix.S_IFSOCK || after.Ino != before.Ino || after.Dev != before.Dev {
+		return errors.New("ssh agent socket changed while it was tightened")
+	}
+	if os.FileMode(after.Mode).Perm() != credentialFileMode || int(after.Uid) != uid {
+		return errors.New("ssh agent socket owner does not match the agent user")
 	}
 	return nil
 }
@@ -238,27 +270,6 @@ func listenSocket(path string) (net.Listener, error) {
 	old := unix.Umask(0o077)
 	defer unix.Umask(old)
 	return net.Listen("unix", path)
-}
-
-func verifySocket(path string, uid int) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 {
-		return errors.New("ssh agent listener is not a socket")
-	}
-	if info.Mode().Perm() != credentialFileMode {
-		return fmt.Errorf("ssh agent socket permissions are %o", info.Mode().Perm())
-	}
-	owner, err := fileUID(info)
-	if err != nil {
-		return err
-	}
-	if owner != uid {
-		return errors.New("ssh agent socket owner does not match the agent user")
-	}
-	return nil
 }
 
 func peerUID(conn net.Conn) (int, error) {

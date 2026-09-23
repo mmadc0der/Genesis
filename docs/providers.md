@@ -165,11 +165,21 @@ private keys. A non-root `launch` cannot open the store, so its plan stays
 unsupported and no key is written.
 
 `genesis launch` as root takes `-credentials` (default `genesis-credentials`,
-`/var/lib/genesis/credentials` in the image). The directory is mode `0700`
-and owned by root. It must not be a symlink, and it must not overlap
-`agents.d`, `rules.d`, `repos.d`, `providers.d`, the data directory, the
-designer config root, or `/home`. Compose mounts it on the root listener
-service only. Control does not receive the mount.
+`/var/lib/genesis/credentials` in the image). The directory is owned by
+root. Its parent must be owned by root or the coordinator, and must not be
+group- or world-writable unless that parent is sticky, so another user
+cannot rename the store onto a symlink. The image keeps `/var/lib/genesis`
+as `root:root` mode `0755`. When launch is root the store root is mode
+`0711`: other users can traverse it and cannot list or create entries.
+`grants/` and `locks/` stay mode `0700`. The entrypoint first locks the
+tree to `0700`; root launch then sets the store root to `0711` so a
+dedicated user can reach `sockets/` without reading a private key. The
+store must not be a symlink, and it must not overlap `agents.d`,
+`rules.d`, `repos.d`, `providers.d`, the data directory, the designer
+config root, or `/home`. Compose mounts it on the root listener service
+only. Control does not receive the mount. Key and state files are opened
+from a directory file descriptor with `O_NOFOLLOW`, so replacing the store
+path after open does not redirect a write.
 
 For a grant whose credential is not public-read and whose git access is
 `read` or `write`, root generates one Ed25519 key per
@@ -193,11 +203,13 @@ registrar reports `ready`.
 
 When a dedicated agent's current grant is ready, root serves one sealed
 ssh-agent on a per-run socket. The socket holds only that grant key, is
-mode `0600`, and is owned by the agent uid. The child environment gains
-`SSH_AUTH_SOCK` and not the key path, `SSH_AGENT_PID`, or `GIT_SSH`. The
-agent is stopped and the socket removed on exit, spawn failure, and
-cancel. Shared-UID processes never receive it. The image does not install
-OpenSSH; the agent protocol is in-process.
+mode `0600`, and is owned by the agent uid. Every directory from the store
+root to that socket is traversable and not listable. The child environment
+gains `SSH_AUTH_SOCK` and not the key path, `SSH_AGENT_PID`, or `GIT_SSH`.
+Stop clears the in-memory key and removes the socket on exit, spawn
+failure, and cancel. A uid that already holds a socket for a different
+grant does not receive a second one. Shared-UID processes never receive
+it. The image does not install OpenSSH; the agent protocol is in-process.
 
 Live GitHub registration remains pending until stage 3. This stage does
 not mint an App JWT, an installation token, or `GH_TOKEN`, and it does not

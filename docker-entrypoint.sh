@@ -166,6 +166,15 @@ lock_credentials() {
 			;;
 	esac
 	mkdir -p "$path"
+	parent=$(dirname "$path")
+	if [ "$(id -u)" = 0 ] && [ "$parent" = "/var/lib/genesis" ]; then
+		if [ -L "$parent" ]; then
+			echo "genesis: credential parent must not be a symlink: $parent" >&2
+			exit 1
+		fi
+		chown root:root "$parent"
+		chmod 0755 "$parent"
+	fi
 	if [ -L "$path" ] || [ ! -d "$path" ]; then
 		echo "genesis: credentials path is not a directory: $path" >&2
 		exit 1

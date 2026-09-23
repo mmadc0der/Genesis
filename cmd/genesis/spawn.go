@@ -63,6 +63,12 @@ type privilegedState struct {
 	credentials *credentialStore
 	registrar   grantRegistrar
 	held        map[string]heldGrant
+	uidGrants   map[uint32]*uidGrantHold
+}
+
+type uidGrantHold struct {
+	grantID string
+	refs    int
 }
 
 func newPrivilegedState(logger *slog.Logger, pythonPath, source, listenerUser, dataDir string) *privilegedState {
@@ -322,12 +328,59 @@ func (s *privilegedState) deliverGrantSocket(req spawnRequest, identity reconcil
 	if !ok || s.credentials == nil {
 		return nil, nil
 	}
+	if err := s.reserveGrantUID(identity.UID, held.ID); err != nil {
+		return nil, err
+	}
 	private, _, err := s.credentials.privateKeyForGrant(held.ID)
 	if err != nil {
+		s.releaseGrantUID(identity.UID)
 		return nil, err
 	}
 	runID := filepath.Base(filepath.Clean(req.RunDir))
-	return startRunSSHAgent(s.credentials.root, runID, int(identity.UID), int(identity.GID), private, identity.Home)
+	agent, err := startRunSSHAgent(s.credentials, runID, int(identity.UID), int(identity.GID), private, identity.Home)
+	if err != nil {
+		s.releaseGrantUID(identity.UID)
+		return nil, err
+	}
+	agent.release = func() { s.releaseGrantUID(identity.UID) }
+	return agent, nil
+}
+
+func (s *privilegedState) reserveGrantUID(uid uint32, grantID string) error {
+	if s == nil || grantID == "" {
+		return errors.New("grant socket is incomplete")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.uidGrants == nil {
+		s.uidGrants = map[uint32]*uidGrantHold{}
+	}
+	hold := s.uidGrants[uid]
+	if hold == nil {
+		s.uidGrants[uid] = &uidGrantHold{grantID: grantID, refs: 1}
+		return nil
+	}
+	if hold.grantID != grantID {
+		return errors.New("shared uid cannot receive a second grant socket")
+	}
+	hold.refs++
+	return nil
+}
+
+func (s *privilegedState) releaseGrantUID(uid uint32) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hold := s.uidGrants[uid]
+	if hold == nil {
+		return
+	}
+	hold.refs--
+	if hold.refs <= 0 {
+		delete(s.uidGrants, uid)
+	}
 }
 
 func (c *ipcCoordinator) Spawn(ctx context.Context, req spawnRequest, stdin, stdout, stderr *os.File) (int, error) {

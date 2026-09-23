@@ -58,6 +58,7 @@ type credentialBounds struct {
 
 type credentialStore struct {
 	root   string
+	dir    *os.File
 	bounds credentialBounds
 }
 
@@ -134,26 +135,47 @@ func openCredentialStore(root string, bounds credentialBounds) (*credentialStore
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyDir(info, credentialDirMode); err != nil {
-		return nil, fmt.Errorf("credential store: %w", err)
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, errors.New("credential store is not a real directory")
 	}
-	if err := os.Chmod(cleaned, credentialDirMode); err != nil {
+	uid, err := fileUID(info)
+	if err != nil {
 		return nil, err
 	}
-	for _, name := range []string{"grants", "locks"} {
-		path := filepath.Join(cleaned, name)
-		if err := mkdirExclusive(path, credentialDirMode); err != nil {
-			return nil, err
-		}
+	if uid != os.Geteuid() {
+		return nil, fmt.Errorf("credential store owner %d is not the coordinator uid %d", uid, os.Geteuid())
+	}
+	if !acceptableRootPerm(info.Mode().Perm()) {
+		return nil, fmt.Errorf("credential store permissions are %o", info.Mode().Perm())
+	}
+	if err := rejectStoreParent(cleaned); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(cleaned, storeRootMode(os.Geteuid())); err != nil {
+		return nil, err
+	}
+	if err := store.pin(); err != nil {
+		return nil, err
 	}
 	socketMode := os.FileMode(credentialDirMode)
 	if os.Geteuid() == 0 {
 		socketMode = credentialSocketDirMode
 	}
-	if err := mkdirMode(filepath.Join(cleaned, "sockets"), socketMode); err != nil {
-		return nil, err
+	for _, sub := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{name: "grants", mode: credentialDirMode},
+		{name: "locks", mode: credentialDirMode},
+		{name: "sockets", mode: socketMode},
+	} {
+		if err := store.mkdirRel(sub.name, sub.mode); err != nil {
+			_ = store.dir.Close()
+			return nil, err
+		}
 	}
 	if err := store.sweepSockets(); err != nil {
+		_ = store.dir.Close()
 		return nil, err
 	}
 	return store, nil
@@ -199,128 +221,18 @@ func (s *credentialStore) rejectOverlap() error {
 }
 
 func (s *credentialStore) sweepSockets() error {
-	sockets := filepath.Join(s.root, "sockets")
-	entries, err := os.ReadDir(sockets)
+	entries, err := s.readDir("sockets")
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		path := filepath.Join(sockets, entry.Name())
-		info, err := os.Lstat(path)
-		if err != nil {
+		name := entry.Name()
+		if name == "." || name == ".." || strings.Contains(name, "/") || strings.Contains(name, "..") {
+			return fmt.Errorf("unexpected socket entry %s", name)
+		}
+		if err := s.removeTree("sockets/" + name); err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			if err := os.Remove(path); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := removeTreeNoFollow(path); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func mkdirMode(path string, mode os.FileMode) error {
-	if err := rejectSymlinkPath(path); err != nil {
-		return err
-	}
-	if err := os.Mkdir(path, mode); err != nil && !os.IsExist(err) {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("%s must be a real directory", path)
-	}
-	uid, err := fileUID(info)
-	if err != nil {
-		return err
-	}
-	if uid != os.Geteuid() {
-		return fmt.Errorf("%s owner %d is not the coordinator uid %d", path, uid, os.Geteuid())
-	}
-	perm := info.Mode().Perm()
-	if perm != credentialDirMode && perm != mode {
-		if perm&0o022 != 0 {
-			return fmt.Errorf("%s permissions are %o", path, perm)
-		}
-	}
-	return os.Chmod(path, mode)
-}
-
-func mkdirExclusive(path string, mode os.FileMode) error {
-	if err := rejectSymlinkPath(path); err != nil {
-		return err
-	}
-	err := os.Mkdir(path, mode)
-	if err != nil && !os.IsExist(err) {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink", path)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", path)
-	}
-	if err := verifyDir(info, mode); err != nil && mode == credentialDirMode {
-		perm := info.Mode().Perm()
-		if perm&0o077 != 0 {
-			return fmt.Errorf("%s permissions are %o", path, perm)
-		}
-	}
-	return os.Chmod(path, mode)
-}
-
-func verifyDir(info os.FileInfo, mode os.FileMode) error {
-	if info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("directory is a symlink")
-	}
-	if !info.IsDir() {
-		return errors.New("path is not a directory")
-	}
-	perm := info.Mode().Perm()
-	if mode == credentialDirMode && perm&0o077 != 0 {
-		return fmt.Errorf("directory permissions are %o", perm)
-	}
-	uid, err := fileUID(info)
-	if err != nil {
-		return err
-	}
-	if uid != os.Geteuid() {
-		return fmt.Errorf("directory owner %d is not the coordinator uid %d", uid, os.Geteuid())
-	}
-	return nil
-}
-
-func verifyPrivateFile(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink", path)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", path)
-	}
-	if info.Mode().Perm() != credentialFileMode {
-		return fmt.Errorf("%s permissions are %o", path, info.Mode().Perm())
-	}
-	uid, err := fileUID(info)
-	if err != nil {
-		return err
-	}
-	if uid != os.Geteuid() {
-		return fmt.Errorf("%s owner %d is not the coordinator uid %d", path, uid, os.Geteuid())
 	}
 	return nil
 }
@@ -363,41 +275,40 @@ func stableGrantID(agent, repository, identity, gitAccess string, permissions ma
 	return "g" + hex.EncodeToString(sum.Sum(nil)[:16]), nil
 }
 
-func (s *credentialStore) grantDir(id string) (string, error) {
-	if !grantIDPattern.MatchString(id) {
-		return "", errors.New("grant id is invalid")
-	}
-	return filepath.Join(s.root, "grants", id), nil
-}
-
 func (s *credentialStore) withGrantLock(id string, fn func() error) error {
+	if err := s.confirmBound(); err != nil {
+		return err
+	}
 	if !grantIDPattern.MatchString(id) {
 		return errors.New("grant id is invalid")
 	}
-	lockPath := filepath.Join(s.root, "locks", id+".lock")
-	if err := rejectSymlinkPath(lockPath); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, credentialFileMode)
+	parent, err := s.openDir("locks")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+	defer parent.Close()
+	fd, err := unix.Openat(int(parent.Fd()), id+".lock", unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, credentialFileMode)
+	if err != nil {
 		return err
 	}
-	defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
-	if err := verifyPrivateFile(lockPath); err != nil {
-		info, statErr := os.Lstat(lockPath)
-		if statErr != nil {
-			return err
-		}
-		if info.Mode().Perm() != credentialFileMode {
-			if chmodErr := os.Chmod(lockPath, credentialFileMode); chmodErr != nil {
-				return chmodErr
-			}
-		}
-		if err := verifyPrivateFile(lockPath); err != nil {
+	file := os.NewFile(uintptr(fd), id+".lock")
+	defer file.Close()
+	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer func() { _ = unix.Flock(fd, unix.LOCK_UN) }()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return errors.New("grant lock is not a regular file")
+	}
+	if int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("grant lock owner %d is not the coordinator uid %d", st.Uid, os.Geteuid())
+	}
+	if os.FileMode(st.Mode).Perm() != credentialFileMode {
+		if err := unix.Fchmod(fd, credentialFileMode); err != nil {
 			return err
 		}
 	}
@@ -405,23 +316,23 @@ func (s *credentialStore) withGrantLock(id string, fn func() error) error {
 }
 
 func (s *credentialStore) retained(active map[string]struct{}) ([]string, error) {
-	grants := filepath.Join(s.root, "grants")
-	entries, err := os.ReadDir(grants)
+	if err := s.confirmBound(); err != nil {
+		return nil, err
+	}
+	entries, err := s.readDir("grants")
 	if err != nil {
 		return nil, err
 	}
 	out := make([]string, 0)
 	for _, entry := range entries {
 		name := entry.Name()
-		path := filepath.Join(grants, name)
-		info, err := os.Lstat(path)
-		if err != nil {
-			return nil, err
+		if name == "." || name == ".." || strings.Contains(name, "/") || strings.Contains(name, "..") {
+			return nil, fmt.Errorf("unexpected grant entry %s", name)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if entry.Type()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("grant path %s is a symlink", name)
 		}
-		if !grantIDPattern.MatchString(name) || !info.IsDir() {
+		if !grantIDPattern.MatchString(name) || !entry.IsDir() {
 			return nil, fmt.Errorf("unexpected grant entry %s", name)
 		}
 		if _, ok := active[name]; ok {
@@ -515,20 +426,22 @@ func (s *credentialStore) ensureRegistration(ctx context.Context, intent privile
 }
 
 func (s *credentialStore) ensureLocalKey(intent privilegedIntent, id string) (grantRecord, error) {
-	dir, err := s.grantDir(id)
+	if !grantIDPattern.MatchString(id) {
+		return grantRecord{}, errors.New("grant id is invalid")
+	}
+	if err := s.mkdirRel("grants/"+id, credentialDirMode); err != nil {
+		return grantRecord{}, err
+	}
+	keyRel, err := grantFileRel(id, privateKeyFileName)
 	if err != nil {
 		return grantRecord{}, err
 	}
-	if err := mkdirExclusive(dir, credentialDirMode); err != nil {
-		return grantRecord{}, err
-	}
-	keyPath := filepath.Join(dir, privateKeyFileName)
-	info, err := os.Lstat(keyPath)
+	info, err := s.statRel(keyRel)
 	if err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return grantRecord{}, fmt.Errorf("grant key is not a regular file")
+		if info.Mode&unix.S_IFMT != unix.S_IFREG {
+			return grantRecord{}, errors.New("grant key is not a regular file")
 		}
-		if err := verifyPrivateFile(keyPath); err != nil {
+		if err := privateRegular(info); err != nil {
 			return grantRecord{}, err
 		}
 		existing, err := s.readRecord(id)
@@ -578,7 +491,7 @@ func (s *credentialStore) ensureLocalKey(intent privilegedIntent, id string) (gr
 		return grantRecord{}, err
 	}
 	encoded := pem.EncodeToMemory(block)
-	if err := createExclusiveFile(keyPath, encoded); err != nil {
+	if err := s.createRel(keyRel, encoded); err != nil {
 		return grantRecord{}, err
 	}
 	fingerprint, err := fingerprintOf(private)
@@ -593,15 +506,17 @@ func (s *credentialStore) ensureLocalKey(intent privilegedIntent, id string) (gr
 }
 
 func (s *credentialStore) writeNoKey(intent privilegedIntent, id, material, remote string, generation int) (grantRecord, error) {
-	dir, err := s.grantDir(id)
+	if !grantIDPattern.MatchString(id) {
+		return grantRecord{}, errors.New("grant id is invalid")
+	}
+	if err := s.mkdirRel("grants/"+id, credentialDirMode); err != nil {
+		return grantRecord{}, err
+	}
+	keyRel, err := grantFileRel(id, privateKeyFileName)
 	if err != nil {
 		return grantRecord{}, err
 	}
-	if err := mkdirExclusive(dir, credentialDirMode); err != nil {
-		return grantRecord{}, err
-	}
-	keyPath := filepath.Join(dir, privateKeyFileName)
-	if _, err := os.Lstat(keyPath); err == nil {
+	if _, err := s.statRel(keyRel); err == nil {
 		return grantRecord{}, errGrantRotationRefused
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return grantRecord{}, err
@@ -653,15 +568,11 @@ func mapsClone(permissions map[string]string) map[string]string {
 }
 
 func (s *credentialStore) readRecord(id string) (grantRecord, error) {
-	dir, err := s.grantDir(id)
+	rel, err := grantFileRel(id, grantStateFileName)
 	if err != nil {
 		return grantRecord{}, err
 	}
-	path := filepath.Join(dir, grantStateFileName)
-	if err := verifyPrivateFile(path); err != nil {
-		return grantRecord{}, err
-	}
-	payload, err := os.ReadFile(path)
+	payload, err := s.readRel(rel)
 	if err != nil {
 		return grantRecord{}, err
 	}
@@ -692,10 +603,6 @@ func (s *credentialStore) readRecord(id string) (grantRecord, error) {
 }
 
 func (s *credentialStore) saveRecord(record grantRecord) error {
-	dir, err := s.grantDir(record.GrantID)
-	if err != nil {
-		return err
-	}
 	payload, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -703,25 +610,25 @@ func (s *credentialStore) saveRecord(record grantRecord) error {
 	if bytes.Contains(payload, []byte("PRIVATE KEY")) {
 		return errors.New("refusing to persist key material in grant state")
 	}
-	return writeAtomicNoFollow(filepath.Join(dir, grantStateFileName), payload, credentialFileMode)
+	rel, err := grantFileRel(record.GrantID, grantStateFileName)
+	if err != nil {
+		return err
+	}
+	return s.writeAtomicRel(rel, payload)
 }
 
 func (s *credentialStore) readPrivateKey(id, wantFingerprint string) (ed25519.PrivateKey, error) {
-	dir, err := s.grantDir(id)
+	rel, err := grantFileRel(id, privateKeyFileName)
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, privateKeyFileName)
-	if err := verifyPrivateFile(path); err != nil {
-		return nil, err
-	}
-	payload, err := os.ReadFile(path)
+	payload, err := s.readRel(rel)
 	if err != nil {
 		return nil, err
 	}
 	parsed, err := ssh.ParseRawPrivateKey(payload)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("grant key is not a usable ed25519 private key")
 	}
 	var private ed25519.PrivateKey
 	switch key := parsed.(type) {
@@ -795,85 +702,10 @@ func (record grantRecord) observation() grantObservation {
 	}
 }
 
-func createExclusiveFile(path string, data []byte) error {
-	if err := rejectSymlinkPath(path); err != nil {
-		return err
-	}
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW, credentialFileMode)
-	if err != nil {
-		return err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	success := false
-	defer func() {
-		file.Close()
-		if !success {
-			_ = os.Remove(path)
-		}
-	}()
-	if err := unix.Fchmod(fd, credentialFileMode); err != nil {
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := verifyPrivateFile(path); err != nil {
-		return err
-	}
-	success = true
-	return nil
-}
-
-func writeAtomicNoFollow(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := rejectSymlinkPath(dir); err != nil {
-		return err
-	}
-	tmp := filepath.Join(dir, ".tmp-"+randomToken())
-	if err := createExclusiveFile(tmp, data); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, mode); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return verifyPrivateFile(path)
-}
-
 func randomToken() string {
 	var buf [8]byte
 	_, _ = rand.Read(buf[:])
 	return hex.EncodeToString(buf[:])
-}
-
-func removeTreeNoFollow(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return os.Remove(path)
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if err := removeTreeNoFollow(filepath.Join(path, entry.Name())); err != nil {
-			return err
-		}
-	}
-	return os.Remove(path)
 }
 
 func (s *privilegedState) grantDriver() grantRegistrar {

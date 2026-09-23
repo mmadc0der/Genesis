@@ -38,8 +38,9 @@ RUN chmod 0755 /usr/local/bin/genesis /usr/local/bin/docker-entrypoint.sh \
 	&& chown root:genesis /etc/genesis/providers.d \
 	&& chmod 0755 /etc/genesis \
 	&& chmod 0750 /etc/genesis/providers.d \
-	&& chown -R genesis:genesis /var/lib/genesis \
-	&& chown root:root /var/lib/genesis/credentials \
+	&& chown -R genesis:genesis /var/lib/genesis/config /var/lib/genesis/data \
+	&& chown root:root /var/lib/genesis /var/lib/genesis/credentials \
+	&& chmod 0755 /var/lib/genesis \
 	&& chmod 0700 /var/lib/genesis/credentials
 ENV PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 ENV GENESIS_LISTENER_USER=genesis

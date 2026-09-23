@@ -18,6 +18,18 @@ const (
 
 var privateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 
+func sanitizeIPCReply(reply *ipcEnvelope) {
+	if reply == nil {
+		return
+	}
+	if reply.Error != "" {
+		reply.Error = string(redactPrivateKeys([]byte(reply.Error)))
+	}
+	if len(reply.Payload) != 0 {
+		reply.Payload = redactPrivateKeys(reply.Payload)
+	}
+}
+
 func redactPrivateKeys(input []byte) []byte {
 	if len(input) == 0 || !bytes.Contains(input, []byte("PRIVATE KEY")) {
 		return input
