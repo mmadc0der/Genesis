@@ -140,8 +140,7 @@ desired YAML still returns the active cache and `desired_error`.
 
 Repository apply is still not implemented. Provider identity files and
 agent-to-repository grants are specified in [providers.md](providers.md).
-That stage plans local grant and credential intents and leaves key material
-pending. Stage 2B is the seam that may mint an App JWT or installation
-token and register a remote key. It must not run as part of repository
-apply, and `credential_active` stays false until a child actually receives
-a usable credential.
+Stage 2B stores SSH grant material on the root coordinator and leaves live
+GitHub registration pending until stage 3. It does not mint an App JWT or
+installation token, it does not run as part of repository apply, and
+`credential_active` stays false.

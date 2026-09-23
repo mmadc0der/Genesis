@@ -37,13 +37,19 @@ func TestSuperviseListenerPropagatesExitCode(t *testing.T) {
 func TestLaunchChildEnvOverridesInheritedFds(t *testing.T) {
 	t.Setenv(privilegedFDEnv, "9")
 	t.Setenv(syncTokenEnv, "old")
+	t.Setenv(sshAuthSockEnv, "/tmp/operator-agent.sock")
+	t.Setenv("LEAKED_KEY", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")
 	env := launchChildEnv("fresh-token", nil)
 	foundToken := false
 	foundFD := false
 	for _, item := range env {
 		switch item {
-		case syncTokenEnv + "=old", privilegedFDEnv + "=9":
+		case syncTokenEnv + "=old", privilegedFDEnv + "=9", sshAuthSockEnv + "=/tmp/operator-agent.sock":
 			t.Fatalf("leaked parent value %s", item)
+		default:
+			if strings.Contains(item, "PRIVATE KEY") {
+				t.Fatalf("leaked key material %s", item)
+			}
 		case syncTokenEnv + "=fresh-token":
 			foundToken = true
 		case privilegedFDEnv + "=3":

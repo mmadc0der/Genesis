@@ -38,6 +38,7 @@ var (
 		"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc",
 		"/sys", "/dev", "/root", "/boot", "/run", "/app",
 		"/var/lib/genesis/config", "/var/lib/genesis/data",
+		"/var/lib/genesis/credentials",
 	}
 )
 
@@ -123,6 +124,8 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 	}
 	seenUsers := map[string]struct{}{}
 	sawAgentLayer := false
+	activeGrants := map[string]struct{}{}
+	observations := map[string]grantObservation{}
 	for _, intent := range plan.Intents {
 		switch intent.Kind {
 		case intentEnsureAgentUser:
@@ -156,17 +159,58 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 				Reason: "env is a process map, not a package graph; Genesis does not install runtimes or packages",
 			})
 		default:
-			if change, ok := classifyGrantIntent(intent); ok {
-				result.Unsupported = append(result.Unsupported, change)
-				continue
+			if !isGrantIntent(intent.Kind) {
+				return coordinateResult{}, fmt.Errorf("unknown privileged intent kind %q", intent.Kind)
 			}
-			return coordinateResult{}, fmt.Errorf("unknown privileged intent kind %q", intent.Kind)
+			decision, err := s.consumeGrantIntent(intent)
+			if err != nil {
+				return coordinateResult{}, err
+			}
+			if decision.Applied != "" {
+				result.Applied = append(result.Applied, decision.Applied)
+			}
+			if decision.Unsupported != nil {
+				result.Unsupported = append(result.Unsupported, *decision.Unsupported)
+			}
+			if decision.GrantID != "" {
+				activeGrants[decision.GrantID] = struct{}{}
+			}
+			if decision.Observation != nil {
+				observations[decision.GrantID] = *decision.Observation
+			}
 		}
 	}
 	if sawAgentLayer || plan.Agents {
 		result.Retained = s.retained(seenUsers)
 	}
+	if plan.Agents && s.credentials != nil {
+		retained, err := s.credentials.retained(activeGrants)
+		if err != nil {
+			return coordinateResult{}, err
+		}
+		result.RetainedGrants = retained
+		result.Grants = sortedObservations(observations)
+		held, err := readyGrants(result.Grants)
+		if err != nil {
+			return coordinateResult{}, err
+		}
+		s.replaceHeld(held)
+	}
 	return result, nil
+}
+
+func readyGrants(observations []grantObservation) (map[string]heldGrant, error) {
+	held := map[string]heldGrant{}
+	for _, obs := range observations {
+		if obs.KeyMaterial != keyMaterialLocal || obs.RemoteStatus != remoteStatusReady {
+			continue
+		}
+		if previous, ok := held[obs.Agent]; ok && previous.ID != obs.GrantID {
+			return nil, fmt.Errorf("agent %s has more than one ready grant", obs.Agent)
+		}
+		held[obs.Agent] = heldGrant{ID: obs.GrantID, Ready: true}
+	}
+	return held, nil
 }
 
 func (s *privilegedState) remember(identity reconciledIdentity) {

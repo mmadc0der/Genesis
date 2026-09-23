@@ -7,7 +7,7 @@
 # Default keeps named volumes (non-destructive). Missing image defaults such
 # as designer.yaml are copied; existing volume files are not overwritten.
 # --reset-volumes is the explicit destructive path: docker compose down -v
-# before up, which deletes genesis-config and genesis-data.
+# before up, which deletes genesis-config, genesis-data, and genesis-credentials.
 set -eu
 
 cd "$(dirname "$0")/.."

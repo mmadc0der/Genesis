@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,7 +32,7 @@ const (
 	grantLocalOnlyReason     = "repository grant is a local intent only; Genesis did not activate a credential or call GitHub"
 	keyMaterialPendingReason = "key material is pending; Genesis did not mint an App JWT, installation access token, or SSH private key"
 	keyMaterialNoneReason    = "no key material is required; Genesis did not activate a credential"
-	remoteRegistrationReason = "remote registration is unsupported; Genesis did not call GitHub or register a key"
+	remoteRegistrationReason = "remote registration is unsupported until stage 3; Genesis did not call GitHub or register a key"
 )
 
 // agentGitHub is an optional capability on an agent. Identity is a provider
@@ -64,6 +65,8 @@ type grantPlan struct {
 	RemoteRegistration string             `json:"remote_registration"`
 	Intents            []grantIntent      `json:"intents"`
 	Unsupported        []grantUnsupported `json:"unsupported"`
+	Material           []grantObservation `json:"material,omitempty"`
+	RetainedMaterial   []string           `json:"retained_material,omitempty"`
 }
 
 type grantIntent struct {
@@ -599,6 +602,33 @@ func providerUTF8(providers map[string]providerDefinition) error {
 		}
 	}
 	return nil
+}
+
+func attachGrantMaterial(plan grantPlan, result coordinateResult) grantPlan {
+	plan.CredentialActive = false
+	if len(result.Grants) == 0 && len(result.RetainedGrants) == 0 {
+		return plan
+	}
+	plan.Material = append([]grantObservation(nil), result.Grants...)
+	plan.RetainedMaterial = append([]string(nil), result.RetainedGrants...)
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		plan.Material = nil
+		plan.RetainedMaterial = nil
+		return plan
+	}
+	redacted := redactPrivateKeys(payload)
+	if bytes.Equal(redacted, payload) {
+		return plan
+	}
+	var cleaned grantPlan
+	if err := json.Unmarshal(redacted, &cleaned); err != nil {
+		plan.Material = nil
+		plan.RetainedMaterial = nil
+		return plan
+	}
+	cleaned.CredentialActive = false
+	return cleaned
 }
 
 func grantPlanExposes(plan grantPlan, forbidden ...string) error {

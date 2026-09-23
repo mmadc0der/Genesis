@@ -1,8 +1,9 @@
 # Provider identities and repository grants
 
-Stage 2A records who could act on a declared repository. It does not call
-GitHub, mint an App JWT or installation token, generate an SSH key, inject a
-credential, or register a key remotely.
+Stage 2A records who could act on a declared repository. Loading providers
+does not call GitHub, mint an App JWT or installation token, or register a
+key remotely. Stage 2B, below, may store an SSH identity on the root
+coordinator. That identity is not a live GitHub credential.
 
 `providers.d` is a root-owned directory outside the designer-writable config
 volume. Listener, launch, and control take `-providers` (default
@@ -121,9 +122,9 @@ after that agent's host intents:
 
 | Kind | Meaning | Result in this stage |
 |---|---|---|
-| `ensure_repository_grant` | Local semantic grant: agent, repository, git access, allowlisted permissions | unsupported; not activated |
-| `ensure_credential` | Credential material for that grant | `pending` when the identity has a secret reference, `none` for public read. No JWT, installation token, or SSH key is minted |
-| `ensure_remote_registration` | Remote key or App registration | unsupported. Genesis does not call GitHub |
+| `ensure_repository_grant` | Local semantic grant: agent, repository, git access, allowlisted permissions | applied by the root coordinator as a local record. Not sent to GitHub |
+| `ensure_credential` | Credential material for that grant | root stores one Ed25519 identity for a non-public git read/write grant, or records `none` for public read. No App JWT or installation token is minted |
+| `ensure_remote_registration` | Remote key or App registration | unsupported until stage 3. The production driver does not call GitHub |
 
 The privileged plan sent across the coordinator socket includes the identity
 name so a later stage can bind it. HTTP, the control UI, and logs do not.
@@ -143,34 +144,61 @@ secret references:
 }
 ```
 
-`credential_active` is always false. `key_material` is `pending` or `none`.
-`remote_registration` is `unsupported` when any grant exists, otherwise
-`none`. Root apply records the same unsupported results and does not create
-a key file, a user, or a token. Rules-only sync does not emit grant intents.
+`credential_active` is always false. `key_material` on this HTTP plan stays
+`pending` or `none`, and `remote_registration` stays `unsupported` or
+`none`. Those fields describe the live grant, which stage 3 has not
+registered. When launch is root, the coordinator may also return
+`material`: stable grant id, fingerprint, generation, and remote key
+id/status. That block has no private key, public key body, provider
+identity, or secret reference. Rules-only sync does not emit grant intents.
 
 Control serves the agent grant as repository, git access, permissions, and
 `credential` `pending` or `none`. It does not serve provider files. There is
 no provider route. Secret references and provider identity records are not
 in `/generation`, `/api/agents`, `/api/state`, or sync logs.
 
-## Stage 2B seam
+## Stage 2B: root-held SSH material
 
-Stage 2B is the first stage that may turn these intents into material. It
-should consume the same three kinds from the privileged plan:
+Stage 2B consumes the three grant intents in the root coordinator only.
+The listener still builds the inactive `grant_plan` above. It never sees
+private keys. A non-root `launch` cannot open the store, so its plan stays
+unsupported and no key is written.
 
-1. Resolve `ensure_credential` only inside the root coordinator, using the
-   secret reference as a lookup key in a root-only store. Do not put the
-   reference or the value into agent YAML, the control API, or the child
-   environment until a real credential exists.
-2. Mint an App JWT and a repo-scoped installation token, or register a
-   remote key, only while handling `ensure_credential` and
-   `ensure_remote_registration`. Public-read grants stay `credential: none`
-   and must not grow a token.
-3. Flip `key_material` away from `pending` and `remote_registration` away
-   from `unsupported` only after that work succeeds. `credential_active`
-   stays false until the child is actually given a usable, expiring
-   credential. Stage 2A never sets it true.
+`genesis launch` as root takes `-credentials` (default `genesis-credentials`,
+`/var/lib/genesis/credentials` in the image). The directory is mode `0700`
+and owned by root. It must not be a symlink, and it must not overlap
+`agents.d`, `rules.d`, `repos.d`, `providers.d`, the data directory, the
+designer config root, or `/home`. Compose mounts it on the root listener
+service only. Control does not receive the mount.
 
-Repository apply (`ensure_repository` and the rest of the repository plan)
-is still a separate seam. Stage 2B does not need to create the GitHub
-repository. It also must not inject `GH_TOKEN` as a side effect of planning.
+For a grant whose credential is not public-read and whose git access is
+`read` or `write`, root generates one Ed25519 key per
+`(agent, repository, identity, git access, permissions)`. The private key
+is an OpenSSH file, mode `0600`, created with `O_EXCL` under the grant
+directory. Public-read grants and `git: none` grants do not get a key.
+`git: none` stays pending because an installation token is stage 3 work.
+The App secret reference is not resolved.
+
+Observed state is `state.json` in that directory: stable grant id,
+fingerprint, generation `1`, remote key id, and remote status. Generation
+does not increment. A changed access tuple is a new grant id. The previous
+key stays on disk. Removing the YAML does not delete or rotate material;
+the sync result lists `retained_material`. A world-readable key, a symlink,
+or a fingerprint mismatch fails closed.
+
+The production registrar is `github` and always returns `unsupported`. It
+does not call GitHub. Tests inject a fake registrar. `credential_active`
+stays false either way. Root does not create `SSH_AUTH_SOCK` until the
+registrar reports `ready`.
+
+When a dedicated agent's current grant is ready, root serves one sealed
+ssh-agent on a per-run socket. The socket holds only that grant key, is
+mode `0600`, and is owned by the agent uid. The child environment gains
+`SSH_AUTH_SOCK` and not the key path, `SSH_AGENT_PID`, or `GIT_SSH`. The
+agent is stopped and the socket removed on exit, spawn failure, and
+cancel. Shared-UID processes never receive it. The image does not install
+OpenSSH; the agent protocol is in-process.
+
+Live GitHub registration remains pending until stage 3. This stage does
+not mint an App JWT, an installation token, or `GH_TOKEN`, and it does not
+mutate a remote. Repository apply is still a separate seam.

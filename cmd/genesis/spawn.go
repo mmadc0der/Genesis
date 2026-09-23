@@ -45,6 +45,7 @@ type spawnedChild struct {
 	cmd  *exec.Cmd
 	done chan struct{}
 	err  error
+	ssh  *runSSHAgent
 }
 
 type privilegedState struct {
@@ -56,9 +57,12 @@ type privilegedState struct {
 	listenerUser string
 	dataDir      string
 
-	mu      sync.Mutex
-	users   map[string]reconciledIdentity
-	spawned map[int]*spawnedChild
+	mu          sync.Mutex
+	users       map[string]reconciledIdentity
+	spawned     map[int]*spawnedChild
+	credentials *credentialStore
+	registrar   grantRegistrar
+	held        map[string]heldGrant
 }
 
 func newPrivilegedState(logger *slog.Logger, pythonPath, source, listenerUser, dataDir string) *privilegedState {
@@ -107,10 +111,17 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 	if err := prepareSpawnDirs(s.host, s.dataDir, req, identity); err != nil {
 		return 0, err
 	}
+	sshAgent, err := s.deliverGrantSocket(req, identity)
+	if err != nil {
+		return 0, err
+	}
 
 	command := exec.Command(s.pythonPath, "-c", s.source)
 	command.Dir = identity.Cwd
 	command.Env = spawnEnv(identity, req.Env)
+	if sshAgent != nil {
+		command.Env = appendAuthSock(command.Env, sshAgent.Socket())
+	}
 	command.Stdin = stdin
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -124,9 +135,12 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 		command.SysProcAttr.Credential = cred
 	}
 	if err := command.Start(); err != nil {
+		if sshAgent != nil {
+			sshAgent.stop()
+		}
 		return 0, err
 	}
-	child := &spawnedChild{cmd: command, done: make(chan struct{})}
+	child := &spawnedChild{cmd: command, done: make(chan struct{}), ssh: sshAgent}
 	s.mu.Lock()
 	if s.spawned == nil {
 		s.spawned = map[int]*spawnedChild{}
@@ -148,6 +162,9 @@ func (s *privilegedState) wait(pid int) (int, error) {
 		return -1, fmt.Errorf("unknown spawned pid %d", pid)
 	}
 	<-child.done
+	if child.ssh != nil {
+		child.ssh.stop()
+	}
 	s.mu.Lock()
 	delete(s.spawned, pid)
 	s.mu.Unlock()
@@ -165,6 +182,9 @@ func (s *privilegedState) killAll() {
 	}
 	s.mu.Unlock()
 	for _, child := range children {
+		if child.ssh != nil {
+			child.ssh.stop()
+		}
 		if child.cmd != nil && child.cmd.Process != nil {
 			_ = child.cmd.Process.Kill()
 		}
@@ -260,10 +280,13 @@ func spawnEnv(identity reconciledIdentity, extra map[string]string) []string {
 		"PATH":    "/usr/local/bin:/usr/bin:/bin",
 	}
 	for key, value := range extra {
-		if key == privilegedFDEnv || key == syncTokenEnv || key == listenerUserEnv {
+		if key == privilegedFDEnv || key == syncTokenEnv || key == listenerUserEnv || droppedChildEnv(key) {
 			continue
 		}
 		if key == "" || strings.Contains(key, "=") || strings.ContainsRune(key, '\x00') {
+			continue
+		}
+		if containsPrivateKey(value) {
 			continue
 		}
 		env[key] = value
@@ -277,6 +300,34 @@ func spawnEnv(identity reconciledIdentity, extra map[string]string) []string {
 		out = append(out, key+"="+value)
 	}
 	return out
+}
+
+func appendAuthSock(env []string, socket string) []string {
+	filtered := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		key, _, _ := strings.Cut(item, "=")
+		if key == sshAuthSockEnv {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	if socket != "" {
+		filtered = append(filtered, sshAuthSockEnv+"="+socket)
+	}
+	return filtered
+}
+
+func (s *privilegedState) deliverGrantSocket(req spawnRequest, identity reconciledIdentity) (*runSSHAgent, error) {
+	held, ok := s.readyHeld(req.Agent)
+	if !ok || s.credentials == nil {
+		return nil, nil
+	}
+	private, _, err := s.credentials.privateKeyForGrant(held.ID)
+	if err != nil {
+		return nil, err
+	}
+	runID := filepath.Base(filepath.Clean(req.RunDir))
+	return startRunSSHAgent(s.credentials.root, runID, int(identity.UID), int(identity.GID), private, identity.Home)
 }
 
 func (c *ipcCoordinator) Spawn(ctx context.Context, req spawnRequest, stdin, stdout, stderr *os.File) (int, error) {
