@@ -157,11 +157,14 @@ then:
 1. `GET /repos/{org}/{name}` and require the owner login, name, and
    `full_name` to match the declaration exactly, including case.
 2. Remint the token by the numeric repository id and `GET` the repository
-   again. The id and `node_id` must match the first read.
+   again. The id, `node_id`, owner, name, and `full_name` must match the
+   first read and the declaration. `full_name` must be `owner/name`.
 3. `GET` Actions permissions, and selected-actions when the allowed policy
    is `selected`.
 4. `GET` repository rulesets, following at most 10 pages, then each ruleset.
-5. When `default_branch` is non-empty, `GET /repos/{org}/{name}/rules/branches/{branch}`.
+5. When `default_branch` is one safe path segment, `GET /repos/{org}/{name}/rules/branches/{branch}`.
+   An empty name, or a name containing `/`, `\`, or `..`, is `unobservable`
+   and is not requested.
 
 The first successful read persists `repository_id` and `node_id` on the
 genesis file id. A later read that returns a different id or node id fails
@@ -187,10 +190,12 @@ readable settings are `drift`. These fields are classified and not applied:
 | `identities` | `unsupported` | not a repository setting; no collaborator or agent-token change |
 | `lifecycle.remove` | `unsupported` | `retain` does not archive or delete |
 | `lifecycle.existing` when `refuse` | `unsupported` | no GitHub call |
-| Actions or rules when the endpoint is unavailable | `unobservable` | optional on this permission set |
 | extra repository rulesets | `unsupported` | observed and left in place |
-| Actions SHA pinning, GitHub-owned or verified allowances | `unobservable` | the declaration cannot express them |
-| extra review requirements | `unobservable` | the declaration cannot express them |
+| Actions SHA pinning when enabled or absent | `unobservable` | the declaration cannot express it, and a missing field is not treated as off |
+| GitHub-owned or verified action allowances | `unobservable` | the declaration cannot express them |
+| extra review requirements or other ruleset rule types | `unobservable` | the declaration cannot express them |
+| dismiss-stale when the ruleset omits it | `unobservable` | a missing boolean is not treated as false |
+| ruleset or branch endpoint unavailable, including when no ruleset is declared | `unobservable` | optional on this permission set |
 
 When the reconciler is missing, observation is `unavailable`, no HTTP call
 is made, and every intent stays unsupported with `repository apply is not
@@ -206,8 +211,12 @@ Failure does not swap the listener generation and does not replace the
 journal. Closed failures are: repository `404`, owner/name/id mismatch,
 transfer or rename, pagination past 10 pages or a truncated page, an
 installation token whose permissions are not exactly the requested read
-set, rate limit, a malformed body, a secret-shaped description, or a
-desired-state change during the read.
+set, rate limit, a malformed or non-200 body including `304`, a
+secret-shaped description, a desired-state change during the read, or a
+journal body larger than 1 MiB. A failed journal write leaves both the
+previous journal and the previous generation in place. The journal is
+written only after the grant plan is confirmed inactive. Observation
+requests do not send conditional `ETag` headers.
 
 The listener writes
 `{data}/observations/repositories.json` only after a successful
@@ -217,6 +226,8 @@ version `1` and holds bindings, observed fields, and the digest. It does
 not hold a PEM, App JWT, installation token, secret value, or programmer
 key. A corrupt or unknown journal fails closed. Control omits the observed
 view when the journal digest does not match the active repository list.
+A draft whose org or name differs from the active repository does not
+inherit that repository's observed id.
 
 `GET /generation` includes `repositories` and `repositories_active`.
 Control reads the same files and serves `GET /api/repositories` and

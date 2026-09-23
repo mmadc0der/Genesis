@@ -766,7 +766,7 @@ func (c *controlServer) annotateRepositoryObservation(listed []listedRepository,
 	}
 	for i := range listed {
 		definition, ok := activeByID[listed[i].ID]
-		if !ok {
+		if !ok || listed[i].Org != definition.Org || listed[i].Name != definition.Name {
 			continue
 		}
 		if observed, found := byID[definition.ID]; found {

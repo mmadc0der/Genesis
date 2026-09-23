@@ -484,6 +484,7 @@ export function App() {
             <section>
               <h3>{repositoryLabel(repository)}</h3>
               <p>{repositoryObservationSummary(repository)}</p>
+              <p class="notice">Catalog entry is {presenceLabel(repository.presence)}. Drift compares the active generation with the last observation.</p>
               <dl>
                 <dt>Id</dt>
                 <dd class="mono">{repository.id}</dd>
@@ -513,6 +514,8 @@ export function App() {
                 <>
                   <h3>Observed</h3>
                   <dl>
+                    <dt>Repository</dt>
+                    <dd class="mono">{repository.observed.org}/{repository.observed.name}</dd>
                     <dt>Repo id</dt>
                     <dd class="mono">{repository.observed.repository_id}</dd>
                     <dt>Node</dt>

@@ -47,8 +47,12 @@ const (
 	reasonNoDefaultBranch       = "the repository has no default branch, so branch rules were not evaluated"
 	reasonExtraRulesets         = "additional repository rulesets are observed and were not changed"
 	reasonSHAPinning            = "actions sha pinning is enabled and this declaration cannot express it"
+	reasonSHAPinningUnknown     = "actions sha pinning was not reported; Genesis did not assume it is off"
 	reasonExtraActions          = "actions policy allows categories this declaration cannot express"
 	reasonExtraReview           = "the ruleset has review requirements this declaration cannot express"
+	reasonUnmodeledRules        = "rules this declaration cannot express were observed and were not changed"
+	reasonDismissUnknown        = "dismiss stale reviews was not reported"
+	reasonBranchName            = "the default branch name is not a single segment; Genesis did not request branch rules"
 )
 
 var (
@@ -97,6 +101,7 @@ type observedRuleset struct {
 	AdditionalReview         bool     `json:"additional_review,omitempty"`
 	HasPullRequest           bool     `json:"has_pull_request"`
 	HasStatusChecks          bool     `json:"has_status_checks"`
+	Unmodeled                bool     `json:"unmodeled,omitempty"`
 }
 
 type repositoryObserved struct {
@@ -119,6 +124,7 @@ type repositoryObserved struct {
 	ActionsSelected []string           `json:"actions_selected,omitempty"`
 	SelectedKnown   bool               `json:"selected_known,omitempty"`
 	SHAPinning      bool               `json:"sha_pinning,omitempty"`
+	SHAPinningKnown bool               `json:"sha_pinning_known,omitempty"`
 	ActionsExtra    bool               `json:"actions_extra,omitempty"`
 	RulesetStatus   string             `json:"ruleset_status"`
 	RulesetReason   string             `json:"ruleset_reason,omitempty"`
@@ -390,7 +396,10 @@ func (g githubRegistrar) observeRepository(ctx context.Context, definition repos
 	if err != nil {
 		return repositoryObserved{}, err
 	}
-	if confirmed.ID != document.ID || confirmed.NodeID != document.NodeID || confirmed.FullName != document.FullName {
+	if err := confirmed.matchesDeclaration(definition); err != nil {
+		return repositoryObserved{}, err
+	}
+	if confirmed.ID != document.ID || confirmed.NodeID != document.NodeID || confirmed.FullName != document.FullName || confirmed.Owner != document.Owner || confirmed.Name != document.Name {
 		return repositoryObserved{}, errRepositoryIdentity
 	}
 	document = confirmed
@@ -405,6 +414,7 @@ func (g githubRegistrar) observeRepository(ctx context.Context, definition repos
 		observed.ActionsSelected = actions.Selected
 		observed.SelectedKnown = actions.SelectedKnown
 		observed.SHAPinning = actions.Pinning
+		observed.SHAPinningKnown = actions.PinningKnown
 		observed.ActionsExtra = actions.Extra
 	case errors.Is(actionsErr, errFeatureUnavailable):
 		observed.ActionsStatus = driftUnobservable
@@ -426,6 +436,9 @@ func (g githubRegistrar) observeRepository(ctx context.Context, definition repos
 	if observed.DefaultBranch == "" {
 		observed.BranchStatus = driftUnobservable
 		observed.BranchReason = reasonNoDefaultBranch
+	} else if !branchNameObservable(observed.DefaultBranch) {
+		observed.BranchStatus = driftUnobservable
+		observed.BranchReason = reasonBranchName
 	} else {
 		branch, branchErr := client.getBranchRules(ctx, &pinned, observed.DefaultBranch)
 		switch {
@@ -604,6 +617,9 @@ func parseObservedRepo(body []byte) (observedRepoDocument, error) {
 	if err != nil {
 		return observedRepoDocument{}, githubErr("partial")
 	}
+	if fullName != owner.Login+"/"+name {
+		return observedRepoDocument{}, githubErr("partial")
+	}
 	return observedRepoDocument{
 		ID: id, NodeID: nodeID, Name: name, FullName: fullName, Owner: owner.Login,
 		Visibility: visibility, Description: description, DefaultBranch: branch, Archived: archived,
@@ -618,6 +634,7 @@ type actionsPolicy struct {
 	Selected      []string
 	SelectedKnown bool
 	Pinning       bool
+	PinningKnown  bool
 	Extra         bool
 }
 
@@ -645,13 +662,15 @@ func (c *githubClient) getActionsPolicy(ctx context.Context, tok *tokenResult) (
 		return actionsPolicy{}, githubErr("partial")
 	}
 	pinning := false
+	pinningKnown := false
 	if value, ok := raw["sha_pinning_required"]; ok && string(value) != "null" {
 		pinning, err = jsonBool(value)
 		if err != nil {
 			return actionsPolicy{}, githubErr("partial")
 		}
+		pinningKnown = true
 	}
-	policy := actionsPolicy{Enabled: enabled, Allowed: allowed, Pinning: pinning, SelectedKnown: true}
+	policy := actionsPolicy{Enabled: enabled, Allowed: allowed, Pinning: pinning, PinningKnown: pinningKnown, SelectedKnown: true}
 	if allowed != actionsAllowedSelected {
 		return policy, nil
 	}
@@ -871,6 +890,8 @@ func parseRulesetDetail(body []byte, defaultBranch string) (observedRuleset, err
 			observed.HasStatusChecks = true
 			observed.RequiredChecks = checks
 			observed.StrictChecks = params.Strict
+		default:
+			observed.Unmodeled = true
 		}
 	}
 	if value, ok := raw["conditions"]; ok && string(value) != "null" {
@@ -1078,7 +1099,7 @@ func compareAdopted(definition repositoryDefinition, observed repositoryObserved
 		drift = append(drift, repositoryDrift{ID: definition.ID, Field: "settings.archived", Desired: "false", Observed: "true", Status: driftDrift})
 	}
 	if observed.ActionsStatus != observationObserved {
-		for _, field := range []string{"actions.enabled", "actions.allowed", "actions.selected"} {
+		for _, field := range []string{"actions.enabled", "actions.allowed", "actions.selected", "actions.sha_pinning"} {
 			drift = append(drift, repositoryDrift{ID: definition.ID, Field: field, Status: driftUnobservable, Reason: observed.ActionsReason})
 		}
 	} else {
@@ -1093,7 +1114,9 @@ func compareAdopted(definition repositoryDefinition, observed repositoryObserved
 			slices.Sort(observedSelected)
 			addString(&drift, definition.ID, "actions.selected", strings.Join(desiredSelected, ","), strings.Join(observedSelected, ","))
 		}
-		if observed.SHAPinning {
+		if !observed.SHAPinningKnown {
+			drift = append(drift, repositoryDrift{ID: definition.ID, Field: "actions.sha_pinning", Status: driftUnobservable, Reason: reasonSHAPinningUnknown})
+		} else if observed.SHAPinning {
 			drift = append(drift, repositoryDrift{ID: definition.ID, Field: "actions.sha_pinning", Desired: "false", Observed: "true", Status: driftUnobservable, Reason: reasonSHAPinning})
 		}
 		if observed.ActionsExtra {
@@ -1119,10 +1142,12 @@ func compareAdopted(definition repositoryDefinition, observed repositoryObserved
 
 func compareProtection(definition repositoryDefinition, observed repositoryObserved) []repositoryDrift {
 	drift := make([]repositoryDrift, 0)
+	desiredRuleset := ""
+	if definition.Protection != nil {
+		desiredRuleset = definition.Protection.Ruleset.Name
+	}
 	if observed.RulesetStatus != observationObserved {
-		if definition.Protection != nil {
-			drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.ruleset", Desired: definition.Protection.Ruleset.Name, Status: driftUnobservable, Reason: observed.RulesetReason})
-		}
+		drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.ruleset", Desired: desiredRuleset, Status: driftUnobservable, Reason: observed.RulesetReason})
 	} else if definition.Protection != nil {
 		wanted := definition.Protection.Ruleset
 		var match *observedRuleset
@@ -1153,8 +1178,13 @@ func compareProtection(definition repositoryDefinition, observed repositoryObser
 			} else if intValue(wanted.RequiredApprovingReviews) != intValue(match.RequiredApprovingReviews) {
 				drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.ruleset.required_approving_reviews", Desired: strconv.Itoa(intValue(wanted.RequiredApprovingReviews)), Observed: strconv.Itoa(intValue(match.RequiredApprovingReviews)), Status: driftDrift})
 			}
-			if match.HasPullRequest && match.DismissStaleReviews != nil && boolValue(wanted.DismissStaleReviews) != boolValue(match.DismissStaleReviews) {
+			if match.HasPullRequest && match.DismissStaleReviews == nil {
+				drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.ruleset.dismiss_stale_reviews", Desired: formatBoolPtr(wanted.DismissStaleReviews), Status: driftUnobservable, Reason: reasonDismissUnknown})
+			} else if match.HasPullRequest && boolValue(wanted.DismissStaleReviews) != boolValue(match.DismissStaleReviews) {
 				drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.ruleset.dismiss_stale_reviews", Desired: formatBoolPtr(wanted.DismissStaleReviews), Observed: formatBoolPtr(match.DismissStaleReviews), Status: driftDrift})
+			}
+			if match.Unmodeled {
+				drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.ruleset.additional_rules", Status: driftUnobservable, Reason: reasonUnmodeledRules})
 			}
 			if match.AdditionalReview {
 				drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.ruleset.additional_review", Status: driftUnobservable, Reason: reasonExtraReview})
@@ -1188,10 +1218,14 @@ func compareProtection(definition repositoryDefinition, observed repositoryObser
 		}
 	}
 	if observed.BranchStatus != observationObserved {
-		if definition.Protection != nil {
-			drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.branch", Status: driftUnobservable, Reason: observed.BranchReason})
-		}
+		drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.branch", Status: driftUnobservable, Reason: observed.BranchReason})
 		return drift
+	}
+	for _, branch := range observed.BranchRules {
+		if branch.Unmodeled {
+			drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.branch.additional_rules", Status: driftUnobservable, Reason: reasonUnmodeledRules})
+			break
+		}
 	}
 	if definition.Protection == nil {
 		if len(observed.BranchRules) > 0 {
@@ -1204,15 +1238,39 @@ func compareProtection(definition repositoryDefinition, observed repositoryObser
 		return drift
 	}
 	branch := observed.BranchRules[0]
-	if intValue(definition.Protection.Ruleset.RequiredApprovingReviews) != intValue(branch.RequiredApprovingReviews) {
+	wanted := definition.Protection.Ruleset
+	if intValue(wanted.RequiredApprovingReviews) != intValue(branch.RequiredApprovingReviews) {
 		drift = append(drift, repositoryDrift{
 			ID: definition.ID, Field: "protection.branch.required_approving_reviews",
-			Desired:  strconv.Itoa(intValue(definition.Protection.Ruleset.RequiredApprovingReviews)),
+			Desired:  strconv.Itoa(intValue(wanted.RequiredApprovingReviews)),
 			Observed: strconv.Itoa(intValue(branch.RequiredApprovingReviews)),
 			Status:   driftDrift,
 		})
 	}
+	if branch.DismissStaleReviews == nil {
+		drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.branch.dismiss_stale_reviews", Desired: formatBoolPtr(wanted.DismissStaleReviews), Status: driftUnobservable, Reason: reasonDismissUnknown})
+	} else if boolValue(wanted.DismissStaleReviews) != boolValue(branch.DismissStaleReviews) {
+		drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.branch.dismiss_stale_reviews", Desired: formatBoolPtr(wanted.DismissStaleReviews), Observed: formatBoolPtr(branch.DismissStaleReviews), Status: driftDrift})
+	}
+	desiredChecks := append([]string(nil), wanted.RequiredChecks...)
+	slices.Sort(desiredChecks)
+	if !branch.HasStatusChecks {
+		if len(desiredChecks) > 0 || boolValue(wanted.StrictChecks) {
+			drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.branch.required_checks", Desired: strings.Join(desiredChecks, ","), Observed: "absent", Status: driftDrift})
+		}
+	} else if strings.Join(desiredChecks, ",") != strings.Join(branch.RequiredChecks, ",") {
+		drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.branch.required_checks", Desired: strings.Join(desiredChecks, ","), Observed: strings.Join(branch.RequiredChecks, ","), Status: driftDrift})
+	} else if boolValue(wanted.StrictChecks) != boolValue(branch.StrictChecks) {
+		drift = append(drift, repositoryDrift{ID: definition.ID, Field: "protection.branch.strict_checks", Desired: formatBoolPtr(wanted.StrictChecks), Observed: formatBoolPtr(branch.StrictChecks), Status: driftDrift})
+	}
 	return drift
+}
+
+func branchNameObservable(branch string) bool {
+	if branch == "" || len(branch) > 250 || strings.Contains(branch, "..") {
+		return false
+	}
+	return !strings.ContainsAny(branch, "/\\ \t\r\n?#")
 }
 
 func unsupportedAdopted(definition repositoryDefinition, observed repositoryObserved) []repositoryUnsupported {
@@ -1305,7 +1363,10 @@ func bindingFor(bindings []repositoryBinding, id string) *repositoryBinding {
 
 func mergeRepositoryBinding(bindings []repositoryBinding, definition repositoryDefinition, observed repositoryObserved) ([]repositoryBinding, error) {
 	for _, binding := range bindings {
-		if binding.RepositoryID == observed.RepositoryID && binding.ID != definition.ID {
+		if binding.ID == definition.ID {
+			continue
+		}
+		if binding.RepositoryID == observed.RepositoryID || binding.NodeID == observed.NodeID {
 			return nil, errRepositoryPersisted
 		}
 	}
@@ -1353,6 +1414,7 @@ func (j *repositoryJournal) normalize() error {
 	})
 	seen := map[string]struct{}{}
 	ids := map[int64]struct{}{}
+	nodes := map[string]struct{}{}
 	for _, binding := range j.Bindings {
 		if binding.ID == "" || binding.RepositoryID <= 0 || !validNodeID(binding.NodeID) {
 			return errRepositoryMalformed
@@ -1363,8 +1425,12 @@ func (j *repositoryJournal) normalize() error {
 		if _, dup := ids[binding.RepositoryID]; dup {
 			return errRepositoryMalformed
 		}
+		if _, dup := nodes[binding.NodeID]; dup {
+			return errRepositoryMalformed
+		}
 		seen[binding.ID] = struct{}{}
 		ids[binding.RepositoryID] = struct{}{}
+		nodes[binding.NodeID] = struct{}{}
 	}
 	return nil
 }
@@ -1468,7 +1534,7 @@ func writeRepositoryJournal(dataDir string, journal repositoryJournal) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	if privateKeyPattern.Match(payload) || githubTokenPattern.Match(payload) || jwtPattern.Match(payload) {
+	if len(payload) > 1<<20 || privateKeyPattern.Match(payload) || githubTokenPattern.Match(payload) || jwtPattern.Match(payload) {
 		return errRepositoryMalformed
 	}
 	parent := filepath.Join(dataDir, observationDirName)
@@ -1487,6 +1553,9 @@ func writeRepositoryJournal(dataDir string, journal repositoryJournal) error {
 		return err
 	}
 	defer unix.Close(dir)
+	if err := unix.Fchmod(dir, uint32(observationDirMode)); err != nil {
+		return err
+	}
 	tempName := ".repositories.json.tmp"
 	fd, err := unix.Openat(dir, tempName, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, observationFileMode)
 	if err != nil {
@@ -1510,6 +1579,9 @@ func writeRepositoryJournal(dataDir string, journal repositoryJournal) error {
 		_ = unix.Unlinkat(dir, tempName, 0)
 		return err
 	}
+	// The rename is already visible. A directory sync failure must not make
+	// the caller keep the previous generation against this new journal.
+	_ = unix.Fsync(dir)
 	return nil
 }
 

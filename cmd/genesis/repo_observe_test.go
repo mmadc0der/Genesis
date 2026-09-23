@@ -101,6 +101,10 @@ func TestRepositoryObservationFailClosed(t *testing.T) {
 		{name: "rate", prepare: func(f *observationFake) { f.rate = true }, want: errRepositoryRate.Error()},
 		{name: "truncated", prepare: func(f *observationFake) { f.truncateRules = true }, want: errRepositoryTruncated.Error()},
 		{name: "secret description", prepare: func(f *observationFake) { f.description = "token ghp_abcdefghijklmnopqrstuvwxyz" }, want: errRepositoryMalformed.Error()},
+		{name: "forbidden", prepare: func(f *observationFake) { f.repoStatus = http.StatusForbidden }, want: errRepositoryAuthScope.Error()},
+		{name: "not modified", prepare: func(f *observationFake) { f.repoStatus = http.StatusNotModified }, want: errRepositoryMalformed.Error()},
+		{name: "truncated body", prepare: func(f *observationFake) { f.repoBody = `{"id":` }, want: errRepositoryMalformed.Error()},
+		{name: "pinned identity", prepare: func(f *observationFake) { f.secondMismatch = true }, want: errRepositoryMalformed.Error()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -300,6 +304,17 @@ func TestRepositoryObservationControlView(t *testing.T) {
 	if len(drift) == 0 {
 		t.Fatal("drift was not exposed")
 	}
+	for _, method := range fake.methods {
+		if strings.Contains(method, "/keys") || strings.Contains(method, "PATCH") || strings.Contains(method, "PUT") || strings.Contains(method, "DELETE") {
+			t.Fatalf("repos sync reached a mutation route: %s", method)
+		}
+	}
+
+	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("other-org", "lab-widget"))
+	retarget := getJSON[listedRepository](t, panel.URL+"/api/repositories/lab")
+	if retarget.Presence != presenceDraft || retarget.Org != "other-org" || retarget.Observed != nil || retarget.Observation != "" {
+		t.Fatalf("retargeted draft kept the previous identity: %#v", retarget)
+	}
 }
 
 func TestRepositoryObservationRefuseDoesNotCallGitHub(t *testing.T) {
@@ -436,6 +451,12 @@ type observationFake struct {
 	rate            bool
 	truncateRules   bool
 	blockRepo       func()
+	secondMismatch  bool
+	defaultBranch   string
+	omitPinning     bool
+	extraRule       bool
+	omitDismiss     bool
+	repoBody        string
 }
 
 func newObservationFake(t *testing.T, now time.Time) *observationFake {
@@ -450,6 +471,12 @@ func (f *observationFake) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.methods = append(f.methods, r.Method+" "+r.URL.Path)
 	f.mu.Unlock()
+	if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+		f.t.Errorf("conditional github request %s", r.URL.Path)
+	}
+	if r.Method == http.MethodGet && r.ContentLength > 0 {
+		f.t.Errorf("github GET included a body %s", r.URL.Path)
+	}
 	switch r.Method {
 	case http.MethodGet:
 	case http.MethodPost:
@@ -487,7 +514,11 @@ func (f *observationFake) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(f.actionsStatus)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": true, "allowed_actions": "selected", "sha_pinning_required": false})
+		body := map[string]any{"enabled": true, "allowed_actions": "selected"}
+		if !f.omitPinning {
+			body["sha_pinning_required"] = false
+		}
+		_ = json.NewEncoder(w).Encode(body)
 	case r.URL.Path == "/repos/octo-org/lab-widget/actions/permissions/selected-actions":
 		_ = json.NewEncoder(w).Encode(map[string]any{"github_owned_allowed": false, "verified_allowed": false, "patterns_allowed": []string{"actions/checkout@v4"}})
 	case r.URL.Path == "/repos/octo-org/lab-widget/rulesets":
@@ -507,13 +538,21 @@ func (f *observationFake) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Link", "<"+f.server.URL+r.URL.Path+"?per_page=100&page=2>; rel=\"next\"")
 		_, _ = w.Write([]byte("[]"))
 	case r.URL.Path == "/repos/octo-org/lab-widget/rulesets/9":
+		pull := map[string]any{"required_approving_review_count": 1, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false}
+		if !f.omitDismiss {
+			pull["dismiss_stale_reviews_on_push"] = true
+		}
+		rules := []map[string]any{
+			{"type": "pull_request", "parameters": pull},
+			{"type": "required_status_checks", "parameters": map[string]any{"strict_required_status_checks_policy": true, "required_status_checks": []map[string]any{{"context": "ci"}}}},
+		}
+		if f.extraRule {
+			rules = append(rules, map[string]any{"type": "deletion"})
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": 9, "name": "protect-main", "target": "branch", "source_type": "Repository", "enforcement": "active",
 			"conditions": map[string]any{"ref_name": map[string]any{"include": []string{"refs/heads/main"}, "exclude": []string{}}},
-			"rules": []map[string]any{
-				{"type": "pull_request", "parameters": map[string]any{"required_approving_review_count": 1, "dismiss_stale_reviews_on_push": true, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false}},
-				{"type": "required_status_checks", "parameters": map[string]any{"strict_required_status_checks_policy": true, "required_status_checks": []map[string]any{{"context": "ci"}}}},
-			},
+			"rules":      rules,
 		})
 	case r.URL.Path == "/repos/octo-org/lab-widget/rules/branches/main":
 		if f.branchStatus != 0 {
@@ -522,6 +561,7 @@ func (f *observationFake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"type": "pull_request", "ruleset_source_type": "Repository", "ruleset_id": 9, "parameters": map[string]any{"required_approving_review_count": 1, "dismiss_stale_reviews_on_push": true}},
+			{"type": "required_status_checks", "parameters": map[string]any{"strict_required_status_checks_policy": true, "required_status_checks": []map[string]any{{"context": "ci"}}}},
 		})
 	default:
 		http.NotFound(w, r)
@@ -570,16 +610,29 @@ func (f *observationFake) serveRepo(w http.ResponseWriter) {
 	if id == 0 {
 		id = 4242
 	}
+	branch := f.defaultBranch
+	if branch == "" {
+		branch = "main"
+	}
 	payload := map[string]any{
 		"id": id, "node_id": "R_testNode", "name": name, "full_name": owner + "/" + name,
 		"owner": map[string]any{"login": owner}, "private": true, "visibility": "private",
-		"description": description, "default_branch": "main", "archived": false,
+		"description": description, "default_branch": branch, "archived": false,
 		"has_issues": true, "has_wiki": false, "has_projects": false,
 		"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": false,
 		"delete_branch_on_merge": true,
 	}
 	if f.omitNode {
 		delete(payload, "node_id")
+	}
+	if f.secondMismatch && f.repoCalls.Load() >= 2 {
+		payload["owner"] = map[string]any{"login": "evil-org"}
+		payload["name"] = "other-widget"
+		payload["full_name"] = "octo-org/lab-widget"
+	}
+	if f.repoBody != "" {
+		_, _ = w.Write([]byte(f.repoBody))
+		return
 	}
 	_ = json.NewEncoder(w).Encode(payload)
 }
@@ -588,6 +641,133 @@ type atomicInt struct{ value int64 }
 
 func (a *atomicInt) Add(n int64) { a.value += n }
 func (a *atomicInt) Load() int64 { return a.value }
+
+func TestRepositoryObservationVisibilityGaps(t *testing.T) {
+	frozen := time.Date(2026, 9, 23, 14, 49, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		prepare func(*observationFake)
+		field   string
+		status  string
+		absent  string
+	}{
+		{name: "sha pinning omitted", prepare: func(f *observationFake) { f.omitPinning = true }, field: "actions.sha_pinning", status: driftUnobservable},
+		{name: "unmodeled rule", prepare: func(f *observationFake) { f.extraRule = true }, field: "protection.ruleset.additional_rules", status: driftUnobservable},
+		{name: "dismiss omitted", prepare: func(f *observationFake) { f.omitDismiss = true }, field: "protection.ruleset.dismiss_stale_reviews", status: driftUnobservable},
+		{name: "slash branch", prepare: func(f *observationFake) { f.defaultBranch = "release/1" }, field: "protection.branch", status: driftUnobservable, absent: "/rules/branches/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newObservationFake(t, frozen)
+			tc.prepare(fake)
+			state, reposDir := observationState(t, fake, frozen)
+			writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+			result, err := state.observeDesiredRepositories(context.Background(), mustRepositoryDigest(t, reposDir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, item := range result.Drift {
+				if item.Status == driftDrift && tc.name != "slash branch" && item.Field != "settings.default_branch" && item.Field != "protection.ruleset.target" {
+					t.Fatalf("unexpected drift %#v", item)
+				}
+				if item.Field == tc.field && item.Status == tc.status {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("missing %s %s in %#v", tc.field, tc.status, result.Drift)
+			}
+			for _, method := range fake.methods {
+				if tc.absent != "" && strings.Contains(method, tc.absent) {
+					t.Fatalf("requested %s via %s", tc.absent, method)
+				}
+				verb, _, _ := strings.Cut(method, " ")
+				if verb != http.MethodGet && verb != http.MethodPost {
+					t.Fatalf("method %s", method)
+				}
+			}
+			if fake.mutations.Load() != 0 {
+				t.Fatalf("mutations=%d", fake.mutations.Load())
+			}
+		})
+	}
+}
+
+func TestRepositoryJournalRejectsUnsafeReplacement(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := prepareDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	journal := repositoryJournal{
+		Version: observationVersion, Digest: "abc",
+		Bindings: []repositoryBinding{{ID: "lab", Org: "octo-org", Name: "lab-widget", RepositoryID: 4242, NodeID: "R_testNode"}},
+		Observed: []repositoryObserved{{ID: "lab", Org: "octo-org", Name: "lab-widget", RepositoryID: 4242, NodeID: "R_testNode", Visibility: "private", ActionsStatus: observationObserved, RulesetStatus: observationObserved, BranchStatus: observationObserved}},
+	}
+	if err := writeRepositoryJournal(dir, journal); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, observationDirName, observationFileName)
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.Observed[0].Description = strings.Repeat("a", 1<<20)
+	if err := writeRepositoryJournal(dir, journal); err == nil {
+		t.Fatal("oversized journal was accepted")
+	}
+	second, err := os.ReadFile(path)
+	if err != nil || string(first) != string(second) {
+		t.Fatal("oversized write replaced the journal")
+	}
+	journal.Observed[0].Description = ""
+	journal.Bindings = append(journal.Bindings, repositoryBinding{ID: "other", Org: "octo-org", Name: "other-widget", RepositoryID: 7, NodeID: "R_testNode"})
+	if err := journal.normalize(); err == nil {
+		t.Fatal("duplicate node id was accepted")
+	}
+}
+
+func TestRepositoryJournalWriteFailurePreservesGeneration(t *testing.T) {
+	frozen := time.Date(2026, 9, 23, 14, 49, 0, 0, time.UTC)
+	fake := newObservationFake(t, frozen)
+	server := newSyncTestServer(t, nil)
+	reposDir := filepath.Join(t.TempDir(), "repos.d")
+	if err := os.Mkdir(reposDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server.reposDir = reposDir
+	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+	state, _ := observationState(t, fake, frozen)
+	state.reposDir = reposDir
+	state.dataDir = server.store.dataDir
+	server.coordinator = stateCoordinator{state: state}
+	if response := sendSync(server, "sync-secret", map[string]any{"scope": []string{scopeRepos}}); response.Code != http.StatusOK {
+		t.Fatalf("seed = %d %s", response.Code, response.Body.String())
+	}
+	server.mu.RLock()
+	seeded := server.generation.digest
+	server.mu.RUnlock()
+	journalPath := filepath.Join(server.store.dataDir, observationDirName, observationFileName)
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(server.store.dataDir, observationDirName, ".repositories.json.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRepoFile(t, reposDir, "lab.yaml", strings.ReplaceAll(validRepositoryYAML("octo-org", "lab-widget"), "Lab widget service.", "Should stay inactive."))
+	response := sendSync(server, "sync-secret", map[string]any{"scope": []string{scopeRepos}})
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "repository observation journal failed") {
+		t.Fatalf("blocked journal = %d %s", response.Code, response.Body.String())
+	}
+	server.mu.RLock()
+	kept := server.generation.digest == seeded
+	server.mu.RUnlock()
+	after, err := os.ReadFile(journalPath)
+	if err != nil || !kept || string(before) != string(after) {
+		t.Fatal("failed journal write replaced the generation or the previous journal")
+	}
+}
 
 func TestRepositoryObservationJournalRoundTrip(t *testing.T) {
 	journal := repositoryJournal{
@@ -616,6 +796,10 @@ func TestRepositoryObservationJournalRoundTrip(t *testing.T) {
 	info, err := os.Stat(filepath.Join(dir, observationDirName, observationFileName))
 	if err != nil || info.Mode().Perm() != observationFileMode {
 		t.Fatalf("mode = %v %v", info, err)
+	}
+	dirInfo, err := os.Lstat(filepath.Join(dir, observationDirName))
+	if err != nil || dirInfo.Mode()&os.ModeSymlink != 0 || dirInfo.Mode().Perm() != observationDirMode {
+		t.Fatalf("directory mode = %v %v", dirInfo, err)
 	}
 	_ = io.EOF
 }

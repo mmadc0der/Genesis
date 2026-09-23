@@ -125,7 +125,7 @@ export function repositoryObservationSummary(repository: Pick<Repository, "provi
   if (repository.observation === "observed" && repository.observed) {
     const drifting = (repository.drift ?? []).filter((item) => item.status === "drift").length;
     const fields = drifting === 1 ? "field" : "fields";
-    return `Observed GitHub repository ${repository.observed.repository_id}. ${drifting} drifting ${fields}. Nothing was changed.`;
+    return `Last observation of active ${repository.observed.org}/${repository.observed.name} (${repository.observed.repository_id}). ${drifting} drifting ${fields}. Nothing was changed.`;
   }
   return `Not observed. Genesis did not call ${repository.provider}.`;
 }

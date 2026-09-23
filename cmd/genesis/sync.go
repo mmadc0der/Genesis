@@ -168,6 +168,7 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "privileged coordination failed", http.StatusInternalServerError)
 		return
 	}
+	var journal *repositoryJournal
 	if plan.ObserveRepositories {
 		again, againActive, againErr := loadRepositories(s.reposDir)
 		againDigest := ""
@@ -179,23 +180,13 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "repository desired state changed during observation", http.StatusInternalServerError)
 			return
 		}
-		annotated, journal, applyErr := applyRepositoryObservation(repositoryPlan, result.RepositoryObservation, plan.RepositoryDigest)
+		annotated, nextJournal, applyErr := applyRepositoryObservation(repositoryPlan, result.RepositoryObservation, plan.RepositoryDigest)
 		if applyErr != nil {
 			s.log().Error("sync repository observation", "error", applyErr, "digest", next.digest)
 			http.Error(w, "repository plan is invalid", http.StatusInternalServerError)
 			return
 		}
-		if journal != nil {
-			dataDir := ""
-			if s.store != nil {
-				dataDir = s.store.dataDir
-			}
-			if writeErr := writeRepositoryJournal(dataDir, *journal); writeErr != nil {
-				s.log().Error("sync repository observation", "error", writeErr, "digest", next.digest)
-				http.Error(w, "repository observation journal failed", http.StatusInternalServerError)
-				return
-			}
-		}
+		journal = nextJournal
 		repositoryPlan = annotated
 	}
 	grants = attachGrantMaterial(grants, result)
@@ -203,6 +194,17 @@ func (s *eventServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		s.log().Error("sync grant plan", "error", err, "digest", next.digest)
 		http.Error(w, "grant plan is invalid", http.StatusInternalServerError)
 		return
+	}
+	if journal != nil {
+		dataDir := ""
+		if s.store != nil {
+			dataDir = s.store.dataDir
+		}
+		if writeErr := writeRepositoryJournal(dataDir, *journal); writeErr != nil {
+			s.log().Error("sync repository observation", "error", writeErr, "digest", next.digest)
+			http.Error(w, "repository observation journal failed", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	s.mu.Lock()

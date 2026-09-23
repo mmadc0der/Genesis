@@ -160,6 +160,29 @@ describe("control panel model", () => {
       "was not applied",
     );
     expect(repositoryObservationSummary(previousRepository)).toContain("did not call github");
+    expect(
+      repositoryObservationSummary({
+        provider: "github",
+        observation: "observed",
+        observed: {
+          id: "lab",
+          org: "octo-org",
+          name: "lab-widget",
+          repository_id: 4242,
+          node_id: "R_testNode",
+          visibility: "private",
+          description: "",
+          default_branch: "main",
+          archived: false,
+          features: { issues: true, wiki: false, projects: false },
+          merge: { allow_squash: true, allow_merge_commit: false, allow_rebase: false, delete_branch_on_merge: true },
+          actions_status: "observed",
+          ruleset_status: "observed",
+          branch_status: "observed",
+        },
+        drift: [{ id: "lab", field: "settings.visibility", desired: "private", observed: "public", status: "drift" }],
+      }),
+    ).toBe("Last observation of active octo-org/lab-widget (4242). 1 drifting field. Nothing was changed.");
     expect(driftLine({ field: "settings.visibility", status: "drift", desired: "private", observed: "public" })).toContain(
       "private → public",
     );
