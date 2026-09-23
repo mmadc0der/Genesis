@@ -16,7 +16,11 @@ const (
 	gitSSHCommand  = "GIT_SSH_COMMAND"
 )
 
-var privateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+var (
+	privateKeyPattern  = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	githubTokenPattern = regexp.MustCompile(`(?:gh[opusr]_|github_pat_)[A-Za-z0-9_]+`)
+	jwtPattern         = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)
+)
 
 func sanitizeIPCReply(reply *ipcEnvelope) {
 	if reply == nil {
@@ -31,10 +35,19 @@ func sanitizeIPCReply(reply *ipcEnvelope) {
 }
 
 func redactPrivateKeys(input []byte) []byte {
-	if len(input) == 0 || !bytes.Contains(input, []byte("PRIVATE KEY")) {
+	if len(input) == 0 {
 		return input
 	}
-	return privateKeyPattern.ReplaceAll(input, []byte(redactedSecret))
+	if bytes.Contains(input, []byte("PRIVATE KEY")) {
+		input = privateKeyPattern.ReplaceAll(input, []byte(redactedSecret))
+	}
+	if bytes.Contains(input, []byte("gh")) || bytes.Contains(input, []byte("github_pat_")) {
+		input = githubTokenPattern.ReplaceAll(input, []byte(redactedSecret))
+	}
+	if bytes.Contains(input, []byte("eyJ")) {
+		input = jwtPattern.ReplaceAll(input, []byte(redactedSecret))
+	}
+	return input
 }
 
 func containsPrivateKey(value string) bool {

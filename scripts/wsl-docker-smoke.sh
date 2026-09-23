@@ -7,7 +7,8 @@
 # Default keeps named volumes (non-destructive). Missing image defaults such
 # as designer.yaml are copied; existing volume files are not overwritten.
 # --reset-volumes is the explicit destructive path: docker compose down -v
-# before up, which deletes genesis-config, genesis-data, and genesis-credentials.
+# before up, which deletes genesis-config, genesis-data, genesis-credentials,
+# and genesis-secrets.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -58,7 +59,7 @@ smoke_rule=/var/lib/genesis/config/rules.d/wsl-smoke.yaml
 canary_rule=/var/lib/genesis/config/rules.d/operator-canary.yaml
 
 if [ "$reset_volumes" = 1 ]; then
-  echo "DESTRUCTIVE: docker compose down -v (removes genesis-config and genesis-data)" >&2
+  echo "DESTRUCTIVE: docker compose down -v (removes genesis-config, genesis-data, genesis-credentials, and genesis-secrets)" >&2
   docker compose down -v
 fi
 

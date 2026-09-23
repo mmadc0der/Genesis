@@ -26,6 +26,17 @@ func TestRedactorValueRedactsNestedJSON(t *testing.T) {
 	}
 }
 
+func TestRedactorStripsTokensAndJWTs(t *testing.T) {
+	input := "token ghs_exampletokenvalue jwt eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxIn0.signaturevalue"
+	got := redactPrivateKeys([]byte(input))
+	if bytes.Contains(got, []byte("ghs_")) || bytes.Contains(got, []byte("eyJ")) {
+		t.Fatalf("credential remained: %s", got)
+	}
+	if !bytes.Contains(got, []byte(redactedSecret)) {
+		t.Fatalf("marker missing: %s", got)
+	}
+}
+
 func TestRedactorStripsPrivateKeyBlocks(t *testing.T) {
 	block := "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecret\n-----END OPENSSH PRIVATE KEY-----"
 	got := newRedactor(nil).text("before " + block + " after")

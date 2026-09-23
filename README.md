@@ -50,7 +50,9 @@ uv run --locked ./bin/genesis launch \
 the supervisor: it inherits no extra HTTP port and keeps a private socketpair
 for privileged coordination. `-data` (default `genesis-data`) is the per-run
 journal root; an invalid path refuses to listen. Root `launch` also takes
-`-credentials` (default `genesis-credentials`) for SSH grant material. An
+`-credentials` (default `genesis-credentials`) for SSH grant material and
+`-secrets` (default `genesis-secrets`) for the reconciler App private key.
+An
 empty `-sync-token` / `GENESIS_SYNC_TOKEN` disables `POST /sync` (`401`
 `sync is disabled`); set a token to activate filesystem edits. When `launch` runs as root it requires
 `-listener-user` / `GENESIS_LISTENER_USER` and execs the listener as that
@@ -189,14 +191,16 @@ and allowlisted API permissions. The designer agent cannot. Reconciler
 identities, administration, secrets, and unsafe role combinations fail
 closed. Public read can use a reader identity with `credential: none`.
 
-Sync returns a `grant_plan` whose `credential_active` is false. The live
-grant stays `pending` or `none`, and remote registration stays
-`unsupported`, until stage 3. Root `launch` may store an Ed25519 identity
-per non-public git grant under `-credentials`. Private keys stay out of
-agent homes, generation digests, logs, and APIs. No socket is delivered
-until a registrar reports ready, which the production GitHub driver never
-does. Genesis does not mint an App JWT or installation token and does not
-call GitHub. See [docs/providers.md](docs/providers.md).
+Sync returns a `grant_plan` whose `credential_active` is false. Root
+`launch` stores an Ed25519 identity per non-public git grant under
+`-credentials` and, when `-secrets` holds the reconciler App key, registers
+that public key as a repository deploy key. The listener summary stays
+`pending` or `none`; the root result is `material.remote_status`. No socket
+is delivered until that status is `ready`, and a changed, removed, or refused
+grant drops the socket immediately. Public-read and `git: none`
+grants do not call GitHub. App tokens are not given to agents. Private
+keys, App JWTs, and installation tokens stay out of logs and APIs. See
+[docs/providers.md](docs/providers.md).
 
 The policy header looks like this. The complete file, including settings,
 bootstrap, Actions, secret names, ruleset intent, and runtime identities, is

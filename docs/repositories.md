@@ -140,7 +140,6 @@ desired YAML still returns the active cache and `desired_error`.
 
 Repository apply is still not implemented. Provider identity files and
 agent-to-repository grants are specified in [providers.md](providers.md).
-Stage 2B stores SSH grant material on the root coordinator and leaves live
-GitHub registration pending until stage 3. It does not mint an App JWT or
-installation token, it does not run as part of repository apply, and
-`credential_active` stays false.
+Root launch can register an SSH deploy key for a git read or write grant.
+That path does not create the repository, change settings, rulesets,
+Actions, or webhooks, and `credential_active` stays false.

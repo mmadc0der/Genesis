@@ -42,10 +42,12 @@ type privilegedSpawner interface {
 }
 
 type spawnedChild struct {
-	cmd  *exec.Cmd
-	done chan struct{}
-	err  error
-	ssh  *runSSHAgent
+	cmd     *exec.Cmd
+	done    chan struct{}
+	err     error
+	ssh     *runSSHAgent
+	agent   string
+	grantID string
 }
 
 type privilegedState struct {
@@ -57,13 +59,18 @@ type privilegedState struct {
 	listenerUser string
 	dataDir      string
 
-	mu          sync.Mutex
-	users       map[string]reconciledIdentity
-	spawned     map[int]*spawnedChild
-	credentials *credentialStore
-	registrar   grantRegistrar
-	held        map[string]heldGrant
-	uidGrants   map[uint32]*uidGrantHold
+	mu           sync.Mutex
+	users        map[string]reconciledIdentity
+	spawned      map[int]*spawnedChild
+	credentials  *credentialStore
+	secrets      *secretStore
+	agentsDir    string
+	rulesDir     string
+	reposDir     string
+	providersDir string
+	registrar    grantRegistrar
+	held         map[string]heldGrant
+	uidGrants    map[uint32]*uidGrantHold
 }
 
 type uidGrantHold struct {
@@ -117,7 +124,7 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 	if err := prepareSpawnDirs(s.host, s.dataDir, req, identity); err != nil {
 		return 0, err
 	}
-	sshAgent, err := s.deliverGrantSocket(req, identity)
+	sshAgent, grantID, err := s.deliverGrantSocket(req, identity)
 	if err != nil {
 		return 0, err
 	}
@@ -146,13 +153,21 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 		}
 		return 0, err
 	}
-	child := &spawnedChild{cmd: command, done: make(chan struct{}), ssh: sshAgent}
+	child := &spawnedChild{cmd: command, done: make(chan struct{}), ssh: sshAgent, agent: req.Agent, grantID: grantID}
 	s.mu.Lock()
 	if s.spawned == nil {
 		s.spawned = map[int]*spawnedChild{}
 	}
 	s.spawned[command.Process.Pid] = child
+	revoke := false
+	if sshAgent != nil {
+		current, ok := s.held[req.Agent]
+		revoke = !ok || !current.Ready || current.ID != grantID
+	}
 	s.mu.Unlock()
+	if revoke {
+		sshAgent.stop()
+	}
 	go func() {
 		child.err = command.Wait()
 		close(child.done)
@@ -323,27 +338,27 @@ func appendAuthSock(env []string, socket string) []string {
 	return filtered
 }
 
-func (s *privilegedState) deliverGrantSocket(req spawnRequest, identity reconciledIdentity) (*runSSHAgent, error) {
+func (s *privilegedState) deliverGrantSocket(req spawnRequest, identity reconciledIdentity) (*runSSHAgent, string, error) {
 	held, ok := s.readyHeld(req.Agent)
 	if !ok || s.credentials == nil {
-		return nil, nil
+		return nil, "", nil
 	}
 	if err := s.reserveGrantUID(identity.UID, held.ID); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	private, _, err := s.credentials.privateKeyForGrant(held.ID)
 	if err != nil {
 		s.releaseGrantUID(identity.UID)
-		return nil, err
+		return nil, "", err
 	}
 	runID := filepath.Base(filepath.Clean(req.RunDir))
 	agent, err := startRunSSHAgent(s.credentials, runID, int(identity.UID), int(identity.GID), private, identity.Home)
 	if err != nil {
 		s.releaseGrantUID(identity.UID)
-		return nil, err
+		return nil, "", err
 	}
 	agent.release = func() { s.releaseGrantUID(identity.UID) }
-	return agent, nil
+	return agent, held.ID, nil
 }
 
 func (s *privilegedState) reserveGrantUID(uid uint32, grantID string) error {

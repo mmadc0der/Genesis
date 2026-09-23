@@ -106,7 +106,7 @@ never runs an agent-supplied shell snippet.
 | `provision_declared_env` | declared `env` keys (not values) | unsupported: `env` is a process map, not a package graph |
 | `ensure_repository_grant` | local agent-to-repository grant | applied by root as a local record; not sent to GitHub. Without a root credential store the intent stays unsupported |
 | `ensure_credential` | SSH material for that grant | root stores one Ed25519 key for a non-public git read/write grant. Public read stores no key. No App JWT or installation token |
-| `ensure_remote_registration` | remote key registration | unsupported until stage 3. The production driver does not call GitHub. A ready test driver may later open a per-run `SSH_AUTH_SOCK` |
+| `ensure_remote_registration` | deploy-key registration | root launch lists or posts the public deploy key with the reconciler App. Public-read and `git: none` make no call. A `ready` result can open a per-run `SSH_AUTH_SOCK`. A changed, removed, or refused grant closes that socket immediately. Repository settings stay unsupported |
 
 `providers.d` is reloaded with agents or repos, not as its own scope name.
 A missing providers directory stays inactive. Grant intents are omitted from

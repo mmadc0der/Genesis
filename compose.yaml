@@ -20,6 +20,9 @@ services:
       - type: volume
         source: credentials
         target: /var/lib/genesis/credentials
+      - type: volume
+        source: secrets
+        target: /var/lib/genesis/secrets
 
   control:
     image: genesis:local
@@ -62,3 +65,5 @@ volumes:
     name: genesis-data
   credentials:
     name: genesis-credentials
+  secrets:
+    name: genesis-secrets

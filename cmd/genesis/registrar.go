@@ -6,9 +6,9 @@ import (
 )
 
 // grantRegistrar is the provider-driver seam for remote key registration.
-// The production GitHub driver is intentionally unsupported. It does not
-// resolve an App PEM, mint an installation token, call GitHub, or mutate
-// a remote. A fake driver is injected only by tests.
+// githubRegistrar performs that call when a transport and secret resolver
+// are set. The zero value does not resolve an App PEM, mint an installation
+// token, call GitHub, or mutate a remote. Tests inject fakeRegistrar.
 type grantRegistrar interface {
 	Register(ctx context.Context, req grantRegistration) (grantRegistrationResult, error)
 }
@@ -17,22 +17,17 @@ type grantRegistration struct {
 	GrantID     string
 	Agent       string
 	Repository  string
+	Identity    string
 	Fingerprint string
 	PublicKey   string
+	Git         string
+	Permissions map[string]string
+	RemoteKeyID string
 }
 
 type grantRegistrationResult struct {
 	Status      string
 	RemoteKeyID string
-}
-
-type githubRegistrar struct{}
-
-func (githubRegistrar) Register(ctx context.Context, _ grantRegistration) (grantRegistrationResult, error) {
-	if err := ctx.Err(); err != nil {
-		return grantRegistrationResult{}, err
-	}
-	return grantRegistrationResult{Status: remoteRegistrationUnsupported}, nil
 }
 
 // fakeRegistrar lets tests complete the ready path without a network.
@@ -61,7 +56,7 @@ func (f *fakeRegistrar) Register(_ context.Context, req grantRegistration) (gran
 		status = remoteRegistrationUnsupported
 	}
 	switch status {
-	case remoteRegistrationUnsupported, remoteRegistrationNone, remoteStatusReady, remoteStatusPending:
+	case remoteRegistrationUnsupported, remoteRegistrationNone, remoteStatusReady, remoteStatusPending, remoteStatusRefused:
 	default:
 		return grantRegistrationResult{}, errUnknownRegistrationStatus
 	}

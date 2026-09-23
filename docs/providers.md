@@ -39,6 +39,8 @@ identities:
     role: reconciler
     credential: app
     secret: GITHUB_APP_RECONCILER_PEM
+    app_id: "100001"
+    installation_id: "100002"
   - name: programmer
     role: programmer
     credential: app
@@ -60,6 +62,8 @@ identities:
 | `identities[].role` | `reconciler`, `manager`, `programmer`, `reviewer`, `devops`, or `reader`. Unique within the file. `reconciler` is not an agent role. |
 | `identities[].credential` | `app` or `none`. `none` is allowed only for `reader`. |
 | `identities[].secret` | Required for `app`, forbidden for `none`. A name matching `^[A-Z][A-Z0-9_]{0,63}$`. Two identities cannot share a reference. |
+| `identities[].app_id` | Required on `reconciler`, forbidden on every other role. A decimal GitHub App id, not a secret and not a path. |
+| `identities[].installation_id` | Required on `reconciler`, forbidden on every other role. A decimal installation id. |
 
 PEM markers and GitHub token prefixes are rejected in every string. The
 reference is not a path, URL, or file body. Genesis does not read it.
@@ -124,7 +128,7 @@ after that agent's host intents:
 |---|---|---|
 | `ensure_repository_grant` | Local semantic grant: agent, repository, git access, allowlisted permissions | applied by the root coordinator as a local record. Not sent to GitHub |
 | `ensure_credential` | Credential material for that grant | root stores one Ed25519 identity for a non-public git read/write grant, or records `none` for public read. No App JWT or installation token is minted |
-| `ensure_remote_registration` | Remote key or App registration | unsupported until stage 3. The production driver does not call GitHub |
+| `ensure_remote_registration` | Remote deploy-key registration | root launch registers the public key when the reconciler app is configured. The listener plan itself does not call GitHub |
 
 The privileged plan sent across the coordinator socket includes the identity
 name so a later stage can bind it. HTTP, the control UI, and logs do not.
@@ -144,13 +148,16 @@ secret references:
 }
 ```
 
-`credential_active` is always false. `key_material` on this HTTP plan stays
+`credential_active` stays false. Sync does not deliver an App token,
+installation token, or `GH_TOKEN`. `key_material` on this HTTP plan stays
 `pending` or `none`, and `remote_registration` stays `unsupported` or
-`none`. Those fields describe the live grant, which stage 3 has not
-registered. When launch is root, the coordinator may also return
-`material`: stable grant id, fingerprint, generation, and remote key
-id/status. That block has no private key, public key body, provider
-identity, or secret reference. Rules-only sync does not emit grant intents.
+`none` because those summary fields are the listener's classification.
+When launch is root, the coordinator may also return `material`: stable
+grant id, fingerprint, generation, and remote key id/status. That block
+has no private key, public key body, provider identity, App id, or secret
+reference. `remote_status: ready` means the deploy key is registered and a
+later dedicated run can receive `SSH_AUTH_SOCK`. Rules-only sync does not
+emit grant intents.
 
 Control serves the agent grant as repository, git access, permissions, and
 `credential` `pending` or `none`. It does not serve provider files. There is
@@ -186,8 +193,9 @@ For a grant whose credential is not public-read and whose git access is
 `(agent, repository, identity, git access, permissions)`. The private key
 is an OpenSSH file, mode `0600`, created with `O_EXCL` under the grant
 directory. Public-read grants and `git: none` grants do not get a key.
-`git: none` stays pending because an installation token is stage 3 work.
-The App secret reference is not resolved.
+`git: none` stays pending. It does not get an SSH key, an App JWT, or an
+installation token. The reconciler private key is read only while
+registering a git read or write deploy key.
 
 Observed state is `state.json` in that directory: stable grant id,
 fingerprint, generation `1`, remote key id, and remote status. Generation
@@ -196,8 +204,8 @@ key stays on disk. Removing the YAML does not delete or rotate material;
 the sync result lists `retained_material`. A world-readable key, a symlink,
 or a fingerprint mismatch fails closed.
 
-The production registrar is `github` and always returns `unsupported`. It
-does not call GitHub. Tests inject a fake registrar. `credential_active`
+An unconfigured registrar returns `unsupported` and does not call GitHub.
+Root launch with `-secrets` uses the production registrar. `credential_active`
 stays false either way. Root does not create `SSH_AUTH_SOCK` until the
 registrar reports `ready`.
 
@@ -209,8 +217,61 @@ gains `SSH_AUTH_SOCK` and not the key path, `SSH_AGENT_PID`, or `GIT_SSH`.
 Stop clears the in-memory key and removes the socket on exit, spawn
 failure, and cancel. A uid that already holds a socket for a different
 grant does not receive a second one. Shared-UID processes never receive
-it. The image does not install OpenSSH; the agent protocol is in-process.
+it. The image installs `openssh-client` so a ready grant can be used by
+`git` over SSH. It does not install an SSH server. `GIT_SSH` and
+`SSH_AGENT_PID` are still not set.
 
-Live GitHub registration remains pending until stage 3. This stage does
-not mint an App JWT, an installation token, or `GH_TOKEN`, and it does not
-mutate a remote. Repository apply is still a separate seam.
+## Stage 3: deploy-key registration
+
+Root `launch` takes `-secrets` (default `genesis-secrets`,
+`/var/lib/genesis/secrets` in the image). The directory is mode `0700`,
+owned by root, and is not a symlink. It must not overlap agents, rules,
+repos, providers, data, the designer config root, `/home`, or the
+credential store. Compose mounts it on the root service only. The listener
+process, control, and agents do not receive the flag or the mount.
+
+Each file is a regular file whose name is the provider secret reference.
+Genesis opens it from a pinned directory descriptor with `O_NOFOLLOW`.
+Symlinks, extra names, hard links, and group- or world-accessible files
+fail closed. The reconciler file is the GitHub App RSA private key.
+Programmer and reviewer references are not read in this stage. Public-read
+and `git: none` grants make no GitHub calls.
+
+For a non-public git `read` or `write` grant, the root coordinator mints a
+short-lived App JWT (`iat` 60 seconds in the past, `exp` eight minutes
+ahead, `iss` the app id) and repository-scoped installation tokens. It
+discovers `GET /repos/{org}/{name}`, then lists deploy keys with a token
+scoped to that repository id and only `administration: write` plus
+`metadata: read`. The declared agent, identity, git access, and
+permissions must still match the provider organization. A cross-org
+identity cannot register a key. A key whose
+title, SHA256 fingerprint, and `read_only` flag already match is reused.
+Otherwise the public key is posted. `git: write` sends `read_only: false`.
+`git: read` sends `read_only: true`. The title is `genesis-` plus the
+grant id. The numeric key id and `remote_status: ready` are stored on the
+grant. Generation stays 1.
+
+A title that belongs to a different key, or a fingerprint that belongs to
+a different title, fails closed. Another deploy key on the repository is
+left in place, including a key that is not Ed25519, unless it reuses this
+grant's title or recorded key id. Genesis does not delete or rotate keys.
+Auth `401` mints a new JWT and token once. Rate limits and `5xx` retry
+only inside a short bound; a long `Retry-After` fails closed so sync is
+not held open. A grant that was `ready` and no longer matches is stored
+as `refused`. A changed grant id, a removed grant, or that refusal drops
+the held per-run socket immediately, including a socket already given to
+a running process. The listener cannot mark a grant ready over IPC. A
+create that is not confirmed stays unready; the next sync lists and adopts
+an exact match. An installation token must be repository-scoped, name the
+declared owner and repository, expire more than 30 seconds out, and carry
+only the permissions that were requested.
+
+No private key, App JWT, installation token, or secret reference is
+written to logs, IPC errors, or the sync body. Tests inject the HTTP
+transport and clock and use a local fake GitHub API. No real credential
+is required.
+
+Repository creation, settings, rulesets, Actions, webhooks, App-token
+delivery, deletion, and rotation stay unsupported. CI uses a local fake
+GitHub API. The manual WSL checklist, including the real reconciler App
+steps, is [ssh-client-verification.md](ssh-client-verification.md).

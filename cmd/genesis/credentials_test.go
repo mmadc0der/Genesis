@@ -212,6 +212,78 @@ func TestSSHAgentStopDropsKeys(t *testing.T) {
 	}
 }
 
+func TestChangedOrRefusedGrantDropsTheLiveSocket(t *testing.T) {
+	account, identity, dataDir, runDir, dshHome := testSpawnIdentity(t)
+	store := openTestCredentialStore(t)
+	report := filepath.Join(t.TempDir(), "sock")
+	source := "import os,time\nopen(os.environ['REPORT'],'w').write(os.environ.get('SSH_AUTH_SOCK') or 'NONE')\ntime.sleep(60)\n"
+	state := newPrivilegedState(discardLogger(), "/usr/bin/python3", source, account.Username, dataDir)
+	state.host = newMemoryHost()
+	state.mutate = true
+	state.credentials = store
+	fake := &fakeRegistrar{Status: remoteStatusReady, KeyID: "live-key"}
+	state.registrar = fake
+	state.remember(identity)
+	t.Cleanup(func() { state.killAll() })
+	plan := privilegedPlan{Agents: true, Intents: grantTrio(identity.Agent, gitWrite, credentialPending)}
+	if _, err := state.apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	pid, err := state.spawn(spawnRequest{
+		Agent: identity.Agent, User: identity.Username, Cwd: identity.Cwd, Home: identity.Home,
+		RunDir: runDir, DshHome: dshHome, Env: map[string]string{"REPORT": report},
+	}, devNull(t), devNull(t), devNull(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := strings.TrimSpace(waitFile(t, report))
+	if socket == "" || socket == "NONE" {
+		t.Fatalf("socket = %q", socket)
+	}
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if _, err := state.apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	conn, err = net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("idempotent sync dropped the socket: %v", err)
+	}
+	conn.Close()
+	fake.Err = errors.New("github missing")
+	changed := privilegedPlan{Agents: true, Intents: grantTrio(identity.Agent, gitRead, credentialPending)}
+	if _, err := state.apply(changed); err == nil {
+		t.Fatal("changed grant registration succeeded")
+	}
+	if _, ok := state.readyHeld(identity.Agent); ok {
+		t.Fatal("changed grant stayed deliverable")
+	}
+	if _, err := os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("revoked socket remained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err != nil {
+		t.Fatal("child died when the socket was revoked")
+	}
+	again := filepath.Join(t.TempDir(), "again")
+	otherRun := filepath.Join(dataDir, runsDirName, "gen_after")
+	otherDsh := filepath.Join(otherRun, dshHomeDirName)
+	if err := os.MkdirAll(otherDsh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.spawn(spawnRequest{
+		Agent: identity.Agent, User: identity.Username, Cwd: identity.Cwd, Home: identity.Home,
+		RunDir: otherRun, DshHome: otherDsh, Env: map[string]string{"REPORT": again},
+	}, devNull(t), devNull(t), devNull(t)); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(waitFile(t, again)); got != "NONE" {
+		t.Fatalf("replacement spawn received %q", got)
+	}
+}
+
 func TestSharedUIDDoesNotReceiveASecondGrantSocket(t *testing.T) {
 	account, identity, dataDir, runDir, dshHome := testSpawnIdentity(t)
 	store := openTestCredentialStore(t)
