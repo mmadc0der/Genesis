@@ -207,6 +207,12 @@ any `adopt` repository has no usable reconciler, the whole observation is
 `ensure_protection` are unsupported only when those endpoints were
 unobservable. Bootstrap, secrets, identities, and retain stay unsupported.
 
+Root logs each GitHub response as `github call` (`method`, `path`, `status`)
+and each accepted token as `github token scope` (`requested`, `returned`).
+Those lines are permission names and API paths. They do not include a JWT,
+installation token, or PEM. A query string is omitted. A path or permission
+value that looks like a credential is logged as `redacted`.
+
 Failure does not swap the listener generation and does not replace the
 journal. Closed failures are: repository `404`, owner/name/id mismatch,
 transfer or rename, pagination past 10 pages or a truncated page, an

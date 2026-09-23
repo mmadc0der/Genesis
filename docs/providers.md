@@ -286,6 +286,7 @@ App-token delivery, deletion, and rotation stay unsupported. The next
 mutation is Stage 5 `ensure_repository_settings`: a settings PATCH on an
 already-adopted repository, limited to visibility, description, features,
 merge methods, and delete-branch-on-merge. CI uses a local fake GitHub
-API. The manual WSL checklist, including a repos-only read before any
-deploy key is registered, is
+API. The manual read-only probe for an existing App is
+[wsl-readonly-observation.md](wsl-readonly-observation.md). The longer
+deploy-key checklist is
 [ssh-client-verification.md](ssh-client-verification.md).

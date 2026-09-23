@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -82,6 +84,79 @@ func TestRepositoryObservationReadsWithoutMutation(t *testing.T) {
 	}
 	if fake.repoCalls.Load() < 4 {
 		t.Fatalf("expected a second read, calls=%d", fake.repoCalls.Load())
+	}
+}
+
+func TestRepositoryObservationLogsScopeWithoutSecrets(t *testing.T) {
+	var logs bytes.Buffer
+	frozen := time.Date(2026, 9, 23, 14, 49, 0, 0, time.UTC)
+	fake := newObservationFake(t, frozen)
+	state, reposDir := observationState(t, fake, frozen)
+	registrar := state.registrar.(githubRegistrar)
+	registrar.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	state.registrar = registrar
+	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+	if _, err := state.observeDesiredRepositories(context.Background(), mustRepositoryDigest(t, reposDir)); err != nil {
+		t.Fatal(err)
+	}
+	text := logs.String()
+	for _, forbidden := range []string{"ghs_", "ghp_", "github_pat_", "BEGIN ", "eyJ", "PRIVATE KEY"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("log leaked %q: %s", forbidden, text)
+		}
+	}
+	var posts, gets, scopes int
+	for _, line := range strings.Split(text, "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		switch entry["msg"] {
+		case "github call":
+			method, _ := entry["method"].(string)
+			path, _ := entry["path"].(string)
+			switch method {
+			case http.MethodGet:
+				gets++
+			case http.MethodPost:
+				posts++
+				if !strings.HasSuffix(path, "/access_tokens") {
+					t.Fatalf("post %s", path)
+				}
+			default:
+				t.Fatalf("method %s", method)
+			}
+		case "github token scope":
+			scopes++
+			if entry["requested"] != "administration=read,metadata=read" || entry["returned"] != "administration=read,metadata=read" {
+				t.Fatalf("scope = %#v", entry)
+			}
+		default:
+			t.Fatalf("unexpected log %s", line)
+		}
+	}
+	if posts < 2 || gets < 2 || scopes < 2 {
+		t.Fatalf("posts=%d gets=%d scopes=%d logs=%s", posts, gets, scopes, text)
+	}
+}
+
+func TestPermissionLogRedactsUnexpectedValues(t *testing.T) {
+	got := formatPermissionMap(map[string]string{
+		"administration": "read",
+		"metadata":       "write",
+		"contents":       "ghs_abcdefghijklmnopqrstuvwxyz",
+	})
+	if got != "administration=read,contents=redacted,metadata=write" {
+		t.Fatalf("permissions = %s", got)
+	}
+	if redactGitHubPath("/repos/octo-org/lab-widget?per_page=100") != "/repos/octo-org/lab-widget" {
+		t.Fatal("query was kept")
+	}
+	if redactGitHubPath("/repos/octo-org/ghs_abcdefghijklmnopqrstuvwxyz") != "redacted" {
+		t.Fatal("token path was kept")
 	}
 }
 

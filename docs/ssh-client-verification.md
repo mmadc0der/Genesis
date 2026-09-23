@@ -1,5 +1,9 @@
 # WSL Docker and reconciler App checklist
 
+For the existing `genesis-id13-tech/verification` App, use the shorter
+read-only probe in [wsl-readonly-observation.md](wsl-readonly-observation.md).
+This file is the deploy-key checklist. It registers a key in later sections.
+
 Run this from a clone on the WSL filesystem (`~/src/genesis`, not `/mnt/...`),
 in a distro with Docker Desktop integration. Do not run it from PowerShell
 or `cmd.exe`. CI does not perform this check.
