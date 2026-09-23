@@ -52,13 +52,14 @@ missing `ssh` fails the script. This command does not contact GitHub.
 
 An organization repository that already exists is the expected target.
 Do not create a second repository, and do not push a commit, README, or
-branch. An empty repository has no commits and may report
-`default_branch: null`. Genesis does not read that field when it registers
-a deploy key. The `default_branch: main` line in the declaration below is
-not applied.
+branch. An empty repository has no commits, so `size` is `0`.
+`default_branch` may be `null` or `"main"`. Genesis does not read that
+field when it registers a deploy key. The `default_branch: main` line in
+the declaration below is not applied.
 
-Confirm the repository before creating an App. This prints visibility and
-counts, not file contents or credentials:
+Confirm the repository before creating an App. `gh` is the user login from
+`gh auth status`, and that user must be an organization owner. This prints
+visibility and counts, not file contents or credentials:
 
 ```sh
 gh api "/repos/$ORG/$REPO" --jq '{visibility,private,size,default_branch}'
@@ -66,8 +67,9 @@ gh api "/repos/$ORG/$REPO/keys" --jq 'length'
 ```
 
 Expected: `visibility` is `public`, `private` is `false`, `size` is `0`,
-and the key length is `0`. `default_branch` may be `null`. Stop if any
-deploy key is already present.
+and the key length is `0`. `default_branch` is `null` or `"main"`. Stop if
+`size` is not `0`, if `default_branch` is any other name, or if any deploy
+key is already present.
 
 The GitHub UI is required for the App itself. `gh` cannot create the App
 or its private key. As an owner of `$ORG`:
@@ -99,23 +101,41 @@ gh api "/orgs/$ORG/installations" --jq '.installations[] | {id, app_id, app_slug
 ```
 
 Export the `app_id` and `id` of the probe App from that output. Do not paste
-a key or a token.
+a key or a token. A user `gh` login cannot call
+`GET /orgs/{org}/installations/{installation_id}` or
+`GET /orgs/{org}/installations/{installation_id}/repositories`; both return
+404. App permissions stay on the organization installation list.
+Repositories for that installation are read with the same user token:
 
 ```sh
 export APP_ID=
 export INSTALLATION_ID=
-gh api "/orgs/$ORG/installations/$INSTALLATION_ID" --jq '{repository_selection, permissions}'
-gh api "/orgs/$ORG/installations/$INSTALLATION_ID/repositories" --jq '.repositories[] | {name, private}'
-```
-
-Expected: `repository_selection` is `selected`; `permissions` are exactly
-`administration: write` and `metadata: read`; the repository list is only
-`$REPO` with `private: false`.
-
-```sh
 case $APP_ID in ''|*[!0-9]*|0*) echo "APP_ID must be a positive decimal" >&2; exit 1 ;; esac
 case $INSTALLATION_ID in ''|*[!0-9]*|0*) echo "INSTALLATION_ID must be a positive decimal" >&2; exit 1 ;; esac
+gh api "/orgs/$ORG/installations" --jq ".installations[] | select(.id == $INSTALLATION_ID and .app_id == $APP_ID) | {id, app_id, app_slug, repository_selection, permissions}"
+gh api "/user/installations/$INSTALLATION_ID/repositories" --jq '{total_count, repository_selection, repositories: [.repositories[] | {full_name, name, private}]}'
 ```
+
+Expected: one installation object, `repository_selection` is `selected` on
+both responses, `permissions` are exactly `administration: write` and
+`metadata: read`, `total_count` is `1`, and the only repository is
+`$ORG/$REPO` with `private: false`. The per-repository `permissions` hash
+on this user route is the user's access, not the App's. It is not printed.
+
+Every `gh` call in this checklist uses that user token. Do not export
+`GH_TOKEN`, an App JWT, or an installation token.
+
+| Route | User token |
+|---|---|
+| `GET /repos/{org}/{repo}` | public repository metadata |
+| `GET`, `POST`, and `DELETE /repos/{org}/{repo}/keys` | repository admin; an organization owner qualifies |
+| `GET /orgs/{org}/installations` | organization owner; this list carries `permissions` and `repository_selection` |
+| `GET /user/installations/{installation_id}/repositories` | the same user, for repositories that installation exposes to them |
+| `gh repo delete {org}/{repo}` | repository admin |
+
+Do not call `GET /installation/repositories`, `GET /app/installations/{id}`,
+or `GET /orgs/{org}/installation`. Those require an App JWT or an
+installation token.
 
 Then:
 
@@ -603,8 +623,15 @@ docker compose down -v
 
 `down -v` deletes `genesis-config`, `genesis-data`, `genesis-credentials`,
 and `genesis-secrets`, including the generated deploy private key. Do this
-only after the evidence above is copied out. Confirm `gh api
-"/repos/$ORG/$REPO"` is `404` and `$PEM_FILE` is gone.
+only after the evidence above is copied out. Confirm the deleted
+repository and the removed PEM. This `GET` uses the same user token:
+
+```sh
+gh api "/repos/$ORG/$REPO" --jq '.message'
+test ! -e "$PEM_FILE" && echo pem_gone
+```
+
+Expected: `Not Found` and `pem_gone`.
 
 ## Expected evidence
 

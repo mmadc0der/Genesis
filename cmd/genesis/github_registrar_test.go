@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -639,6 +640,53 @@ func TestSSHCheckScriptIsGuarded(t *testing.T) {
 	}
 	if strings.Contains(doc, "-----BEGIN") {
 		t.Fatal("verification checklist contains a PEM block")
+	}
+}
+
+func TestVerificationChecklistGitHubRoutesAreUserTokenRoutes(t *testing.T) {
+	root := repoRoot(t)
+	docBytes, err := os.ReadFile(filepath.Join(root, "docs", "ssh-client-verification.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(docBytes)
+	allowed := map[string]bool{
+		"/repos/$ORG/$REPO":                                 true,
+		"/repos/$ORG/$REPO/keys":                            true,
+		"/repos/$ORG/$REPO/keys/$id":                        true,
+		"/orgs/$ORG/installations":                          true,
+		"/user/installations/$INSTALLATION_ID/repositories": true,
+	}
+	routes := regexp.MustCompile(`gh api(?: --method (?:POST|DELETE))? "([^"]+)"`)
+	matches := routes.FindAllStringSubmatch(doc, -1)
+	if len(matches) == 0 {
+		t.Fatal("checklist has no gh api calls")
+	}
+	seen := map[string]bool{}
+	for _, match := range matches {
+		path := match[1]
+		seen[path] = true
+		if !allowed[path] {
+			t.Fatalf("gh api route is not a user-token route: %s", path)
+		}
+	}
+	for path := range allowed {
+		if !seen[path] {
+			t.Fatalf("checklist missing gh api route %s", path)
+		}
+	}
+	if !strings.Contains(doc, `gh repo delete "$ORG/$REPO"`) {
+		t.Fatal("checklist missing user-token repository delete")
+	}
+	for _, want := range []string{
+		"`default_branch` may be `null` or `\"main\"`",
+		"`default_branch` is `null` or `\"main\"`",
+		"`size` is `0`",
+		"GET /user/installations/{installation_id}/repositories",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("checklist missing %q", want)
+		}
 	}
 }
 
