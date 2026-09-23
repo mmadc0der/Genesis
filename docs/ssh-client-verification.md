@@ -23,8 +23,6 @@ git checkout cursor/github-deploy-registrar-d83c
 
 export ORG=replace-with-org-login
 export REPO=genesis-deploy-probe
-export APP_ID=replace-with-decimal-app-id
-export INSTALLATION_ID=replace-with-decimal-installation-id
 export PEM_FILE=$HOME/genesis-probe-reconciler.pem
 export GENESIS_SYNC_TOKEN=compose-sync-token
 unset GITHUB_TOKEN GH_TOKEN GITHUB_APP_PEM GITHUB_PRIVATE_KEY \
@@ -32,14 +30,13 @@ unset GITHUB_TOKEN GH_TOKEN GITHUB_APP_PEM GITHUB_PRIVATE_KEY \
 
 case $ORG in ''|*[!A-Za-z0-9-]*|*[-] ) echo "ORG is not a GitHub login" >&2; exit 1 ;; esac
 case $REPO in ''|*[!A-Za-z0-9._-]*|*.git) echo "REPO is not a repository name" >&2; exit 1 ;; esac
-case $APP_ID in ''|*[!0-9]*|0*) echo "APP_ID must be a positive decimal" >&2; exit 1 ;; esac
-case $INSTALLATION_ID in ''|*[!0-9]*|0*) echo "INSTALLATION_ID must be a positive decimal" >&2; exit 1 ;; esac
 ```
 
-Replace the four placeholders before continuing. Keep `GH_TOKEN` and
-`GITHUB_TOKEN` unset for every `docker compose` command. `gh` on the host
-must already be logged in as an organization owner (`gh auth status`); that
-login is not passed into the container.
+Set `APP_ID` and `INSTALLATION_ID` only after the App is installed, from
+the `gh` output in the next section. Keep `GH_TOKEN` and `GITHUB_TOKEN`
+unset for every `docker compose` command. `gh` on the host must already be
+logged in as an organization owner (`gh auth status`); that login is not
+passed into the container.
 
 ## 1. No-credential smoke
 
@@ -53,25 +50,74 @@ missing `ssh` fails the script. This command does not contact GitHub.
 
 ## 2. Disposable public repository and App
 
-In the GitHub UI, as an owner of `$ORG`:
+An organization repository that already exists is the expected target.
+Do not create a second repository, and do not push a commit, README, or
+branch. An empty repository has no commits and may report
+`default_branch: null`. Genesis does not read that field when it registers
+a deploy key. The `default_branch: main` line in the declaration below is
+not applied.
 
-1. Create a new **public** repository named `$REPO` in that organization.
-   Initialize it with a `main` branch. Add no ruleset, Actions secret, or
-   webhook. User-owned repositories are not accepted.
-2. Create a GitHub App owned for that organization.
+Confirm the repository before creating an App. This prints visibility and
+counts, not file contents or credentials:
+
+```sh
+gh api "/repos/$ORG/$REPO" --jq '{visibility,private,size,default_branch}'
+gh api "/repos/$ORG/$REPO/keys" --jq 'length'
+```
+
+Expected: `visibility` is `public`, `private` is `false`, `size` is `0`,
+and the key length is `0`. `default_branch` may be `null`. Stop if any
+deploy key is already present.
+
+The GitHub UI is required for the App itself. `gh` cannot create the App
+or its private key. As an owner of `$ORG`:
+
+1. Open `https://github.com/organizations/$ORG/settings/apps/new`.
+   - GitHub App name: a new name used only for this probe.
+   - Homepage URL: `https://github.com/$ORG/$REPO`.
+   - Uncheck **Webhook → Active**. Do not set a webhook URL or secret.
+   - Leave **Request user authorization (OAuth) during installation**
+     unchecked.
    - Repository permission **Administration: Read and write**.
    - Repository permission **Metadata: Read-only** (GitHub requires this).
    - No other repository or organization permissions. Do not grant Contents.
      A minted token is rejected unless its permission set is exact:
      discovery is only `metadata: read`, and the key token is only
      `administration: write` plus `metadata: read`.
-   - Install it on **only** `$ORG/$REPO`. Do not choose all repositories.
-3. Copy the App ID. After install, the installation URL ends in the
-   installation id (`.../installations/<id>`). Both are public decimals.
-4. Generate one App private key and save that download as `$PEM_FILE`
-   before the next command. It must be an RSA PEM (`RSA PRIVATE KEY` or
-   `PRIVATE KEY`). Do not convert it to an OpenSSH key. Do not print the
-   file. Then:
+   - **Where can this GitHub App be installed?** Only on this account.
+2. On the App's settings page, choose **Generate a private key**. The
+   browser downloads one RSA PEM. Do not open it. Move that download onto
+   `$PEM_FILE` without displaying it. It must be `RSA PRIVATE KEY` or
+   `PRIVATE KEY`, not an OpenSSH key.
+3. Choose **Install App**, select only `$ORG/$REPO`, and do not choose
+   all repositories.
+
+Then read the public ids. This does not print a token or a key:
+
+```sh
+gh api "/orgs/$ORG/installations" --jq '.installations[] | {id, app_id, app_slug, repository_selection}'
+```
+
+Export the `app_id` and `id` of the probe App from that output. Do not paste
+a key or a token.
+
+```sh
+export APP_ID=
+export INSTALLATION_ID=
+gh api "/orgs/$ORG/installations/$INSTALLATION_ID" --jq '{repository_selection, permissions}'
+gh api "/orgs/$ORG/installations/$INSTALLATION_ID/repositories" --jq '.repositories[] | {name, private}'
+```
+
+Expected: `repository_selection` is `selected`; `permissions` are exactly
+`administration: write` and `metadata: read`; the repository list is only
+`$REPO` with `private: false`.
+
+```sh
+case $APP_ID in ''|*[!0-9]*|0*) echo "APP_ID must be a positive decimal" >&2; exit 1 ;; esac
+case $INSTALLATION_ID in ''|*[!0-9]*|0*) echo "INSTALLATION_ID must be a positive decimal" >&2; exit 1 ;; esac
+```
+
+Then:
 
 ```sh
 test -f "$PEM_FILE"
