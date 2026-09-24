@@ -487,7 +487,7 @@ func TestMapperAcceptsTrajectoryEvents(t *testing.T) {
 		"sessionId":"session-1",
 		"chunk":{"type":"text-delta","index":0,"text":"hello"}
 	}`))
-	if !ok || eventType != lifecycleTypeChunk || origin != originSDKChunk {
+	if !ok || eventType != lifecycleTypeChunk || origin != "sdk.session.on_chunk" {
 		t.Fatalf("on_chunk mapping = type %q origin %q ok %v", eventType, origin, ok)
 	}
 	if data["frame"] != "chunk" || data["chunk_type"] != "text-delta" || data["attempt_id"] != "a1" {
@@ -607,12 +607,18 @@ func TestTurnEndFailureSkipsWrapperError(t *testing.T) {
 	if chunk["chunk_type"] != "text-delta" {
 		t.Fatalf("chunk = %#v", chunk)
 	}
+	if events[5].Origin != "sdk.session.on_chunk" || events[5].SessionID != "session-1" {
+		t.Fatalf("chunk event origin %q session %q", events[5].Origin, events[5].SessionID)
+	}
 	var usage map[string]any
 	if err := json.Unmarshal(events[6].Data, &usage); err != nil {
 		t.Fatal(err)
 	}
 	if usage["chunk_type"] != "usage" {
 		t.Fatalf("usage chunk = %#v", usage)
+	}
+	if events[6].Origin != "sdk.session.on_chunk" || events[6].SessionID != "session-1" {
+		t.Fatalf("usage chunk event origin %q session %q", events[6].Origin, events[6].SessionID)
 	}
 	var end map[string]any
 	if err := json.Unmarshal(events[len(events)-1].Data, &end); err != nil {
