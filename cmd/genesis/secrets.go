@@ -33,9 +33,10 @@ type secretBounds struct {
 	CredentialsDir string
 }
 
-// secretStore is the root-only directory of GitHub App private keys.
-// Names are secret references, never paths. Listener, control, and agents
-// do not receive this directory.
+// secretStore is the root-only directory of GitHub App private keys and the
+// App webhook secret GITHUB_APP_WEBHOOK_SECRET. Names are secret references
+// or that webhook file, never paths. Listener, control, and agents do not
+// receive this directory. The webhook file is not a provider secret reference.
 type secretStore struct {
 	root   string
 	dir    *os.File
@@ -266,6 +267,14 @@ func (s *secretStore) read(name string) ([]byte, error) {
 	payload, err := io.ReadAll(io.LimitReader(file, maxSecretBytes+1))
 	if err != nil || len(payload) == 0 || len(payload) > maxSecretBytes {
 		return nil, errors.New("reconciler private key is unavailable")
+	}
+	return payload, nil
+}
+
+func (s *secretStore) readWebhookSecret() ([]byte, error) {
+	payload, err := s.read(webhookSecretName)
+	if err != nil {
+		return nil, errWebhookSecretUnavailable
 	}
 	return payload, nil
 }

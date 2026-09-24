@@ -89,17 +89,19 @@ type invocationRunner interface {
 }
 
 type eventServer struct {
-	agentsDir    string
-	rulesDir     string
-	reposDir     string
-	providersDir string
-	runner       invocationRunner
-	newRunID     func() (string, error)
-	secrets      map[string]string
-	logger       *slog.Logger
-	syncToken    string
-	coordinator  privilegedCoordinator
-	store        *runStore
+	agentsDir       string
+	rulesDir        string
+	reposDir        string
+	providersDir    string
+	runner          invocationRunner
+	newRunID        func() (string, error)
+	secrets         map[string]string
+	logger          *slog.Logger
+	syncToken       string
+	coordinator     privilegedCoordinator
+	store           *runStore
+	verifyWebhook   webhookVerifier
+	repositoryBound repositoryBinder
 
 	mu         sync.RWMutex
 	syncing    bool
@@ -110,6 +112,8 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/events":
 		s.handleEvents(w, r)
+	case webhookPath:
+		s.handleGitHubWebhook(w, r)
 	case "/sync":
 		s.handleSync(w, r)
 	case "/health":
@@ -153,7 +157,10 @@ func (s *eventServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.dispatchCloudEvent(w, event)
+}
 
+func (s *eventServer) dispatchCloudEvent(w http.ResponseWriter, event cloudEvent) {
 	s.mu.RLock()
 	if s.syncing {
 		s.mu.RUnlock()

@@ -19,11 +19,13 @@ import (
 )
 
 const (
-	privilegedFDEnv = "GENESIS_PRIVILEGED_FD"
-	maxIPCBytes     = 1 << 20
-	ipcOpCoordinate = "coordinate"
-	ipcOpSpawn      = "spawn"
-	ipcOpWait       = "wait"
+	privilegedFDEnv        = "GENESIS_PRIVILEGED_FD"
+	maxIPCBytes            = 1 << 20
+	ipcOpCoordinate        = "coordinate"
+	ipcOpSpawn             = "spawn"
+	ipcOpWait              = "wait"
+	ipcOpVerifyWebhook     = "verify_webhook"
+	ipcOpWebhookRepository = "webhook_repository"
 )
 
 type privilegedCoordinator interface {
@@ -255,6 +257,22 @@ func servePrivilegedParent(conn net.Conn, logger *slog.Logger, state *privileged
 			closeFiles(fds)
 			if err != nil {
 				reply.Error = err.Error()
+			} else {
+				reply.Payload = payload
+			}
+		case ipcOpVerifyWebhook:
+			closeFiles(fds)
+			payload, err := handleVerifyWebhook(state, request.Payload)
+			if err != nil {
+				reply.Error = "webhook verification failed"
+			} else {
+				reply.Payload = payload
+			}
+		case ipcOpWebhookRepository:
+			closeFiles(fds)
+			payload, err := handleWebhookRepository(state, request.Payload)
+			if err != nil {
+				reply.Error = "repository bindings are unavailable"
 			} else {
 				reply.Payload = payload
 			}

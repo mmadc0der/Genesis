@@ -234,6 +234,9 @@ Each file is a regular file whose name is the provider secret reference.
 Genesis opens it from a pinned directory descriptor with `O_NOFOLLOW`.
 Symlinks, extra names, hard links, and group- or world-accessible files
 fail closed. The reconciler file is the GitHub App RSA private key.
+`GITHUB_APP_WEBHOOK_SECRET` may sit beside that key. It is the webhook HMAC
+secret, mode `0600`, and is not a provider `secret` reference. See
+[webhooks.md](webhooks.md).
 Programmer and reviewer references are not read in this stage. Public-read
 and `git: none` grants make no GitHub calls.
 
@@ -286,7 +289,8 @@ applies settings, Actions, the declared ruleset, and missing bootstrap
 files. Bootstrap uses a second installation token, exactly
 `contents: write` and `metadata: read`, so the App also needs Contents
 write. Secrets, environments, webhooks, per-run App tokens, deletion, and
-rotation stay unsupported. The contract is
+rotation stay unsupported. App delivery ingress is separate from those
+repository webhook writes. See [webhooks.md](webhooks.md). The contract is
 [repositories.md](repositories.md). CI uses a local fake GitHub API. The
 manual probes in
 [wsl-readonly-observation.md](wsl-readonly-observation.md) and
