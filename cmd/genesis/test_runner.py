@@ -227,7 +227,7 @@ class RunnerTests(unittest.TestCase):
             },
             {
                 "provider": "deepseek-official",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "cwd": workspace,
                 "profile": "sdk-minimal",
             },
