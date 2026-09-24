@@ -80,6 +80,14 @@ export function repositorySyncNotice(status: number, body: string): string {
     return "Sync returned a response that is not JSON. The provider result was not confirmed.";
   }
   const applied = parsed.repository_plan?.applied;
+  if (
+    parsed.repository_plan?.remote_mutation === "applied" &&
+    Array.isArray(applied) &&
+    applied.length > 0 &&
+    applied.every((item) => typeof item === "string" && /^[a-z_]+:[A-Za-z0-9][A-Za-z0-9._-]*$/.test(item))
+  ) {
+    return `Synced repositories. Applied GitHub changes were limited to ${applied.join(", ")}.`;
+  }
   if (parsed.repository_plan?.remote_mutation === "none" && Array.isArray(applied) && applied.length === 0) {
     const base = parsed.repository_plan.observation === "observed"
       ? "Synced agents, rules, and repositories. GitHub was read. Repository drift was planned and was not applied."
@@ -125,7 +133,7 @@ export function repositoryObservationSummary(repository: Pick<Repository, "provi
   if (repository.observation === "observed" && repository.observed) {
     const drifting = (repository.drift ?? []).filter((item) => item.status === "drift").length;
     const fields = drifting === 1 ? "field" : "fields";
-    return `Last observation of active ${repository.observed.org}/${repository.observed.name} (${repository.observed.repository_id}). ${drifting} drifting ${fields}. Nothing was changed.`;
+    return `Last observation of active ${repository.observed.org}/${repository.observed.name} (${repository.observed.repository_id}). ${drifting} drifting ${fields}.`;
   }
   return `Not observed. Genesis did not call ${repository.provider}.`;
 }

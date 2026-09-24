@@ -102,6 +102,7 @@ type observedRuleset struct {
 	HasPullRequest           bool     `json:"has_pull_request"`
 	HasStatusChecks          bool     `json:"has_status_checks"`
 	Unmodeled                bool     `json:"unmodeled,omitempty"`
+	BypassActors             bool     `json:"bypass_actors,omitempty"`
 }
 
 type repositoryObserved struct {
@@ -142,12 +143,14 @@ type repositoryJournal struct {
 }
 
 type repositoryObservationResult struct {
-	Status      string                  `json:"status"`
-	Digest      string                  `json:"digest,omitempty"`
-	Observed    []repositoryObserved    `json:"observed,omitempty"`
-	Drift       []repositoryDrift       `json:"drift,omitempty"`
-	Unsupported []repositoryUnsupported `json:"unsupported,omitempty"`
-	Journal     *repositoryJournal      `json:"journal,omitempty"`
+	Status         string                  `json:"status"`
+	Digest         string                  `json:"digest,omitempty"`
+	RemoteMutation string                  `json:"remote_mutation,omitempty"`
+	Applied        []string                `json:"applied,omitempty"`
+	Observed       []repositoryObserved    `json:"observed,omitempty"`
+	Drift          []repositoryDrift       `json:"drift,omitempty"`
+	Unsupported    []repositoryUnsupported `json:"unsupported,omitempty"`
+	Journal        *repositoryJournal      `json:"journal,omitempty"`
 }
 
 func repositoryDigest(repos map[string]repositoryDefinition) (string, error) {
@@ -894,6 +897,15 @@ func parseRulesetDetail(body []byte, defaultBranch string) (observedRuleset, err
 			observed.Unmodeled = true
 		}
 	}
+	if value, ok := raw["bypass_actors"]; ok && string(value) != "null" && string(value) != "[]" {
+		var actors []json.RawMessage
+		if err := json.Unmarshal(value, &actors); err != nil {
+			return observedRuleset{}, githubErr("partial")
+		}
+		if len(actors) > 0 {
+			observed.BypassActors = true
+		}
+	}
 	if value, ok := raw["conditions"]; ok && string(value) != "null" {
 		var conditions struct {
 			RefName *struct {
@@ -1604,16 +1616,24 @@ func applyRepositoryObservation(plan repositoryPlan, obs *repositoryObservationR
 	plan.Observed = obs.Observed
 	plan.Drift = obs.Drift
 	plan.Unsupported = obs.Unsupported
+	plan.Applied = append([]string(nil), obs.Applied...)
+	plan.RemoteMutation = obs.RemoteMutation
+	if plan.RemoteMutation == "" {
+		plan.RemoteMutation = remoteMutationNone
+	}
 	if plan.Observed == nil {
 		plan.Observed = []repositoryObserved{}
 	}
 	if plan.Drift == nil {
 		plan.Drift = []repositoryDrift{}
 	}
+	if plan.Applied == nil {
+		plan.Applied = []string{}
+	}
 	if plan.Unsupported == nil {
 		plan.Unsupported = []repositoryUnsupported{}
 	}
-	return plan, obs.Journal, repositoryPlanIsReadOnly(plan)
+	return plan, obs.Journal, repositoryPlanRecordsApply(plan)
 }
 
 func observationError(err error) error {

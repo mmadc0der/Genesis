@@ -167,12 +167,16 @@ prompt, model, executable, or other run configuration.
 
 `repos.d` is optional desired GitHub state. A missing directory leaves the
 layer inactive and does not change the agent/rule digest. The committed
-`repos.d/example.yaml` is a declaration for `octo-org/lab-widget`. Genesis
-does not create that repository. A repos sync with a configured reconciler
-App reads an adopted repository and plans drift; `remote_mutation` stays
-`none` and nothing is patched. Without that key, observation is
-`unavailable` and GitHub is not called. Schema, the read-only journal, and
-the next settings PATCH are in [docs/repositories.md](docs/repositories.md).
+`repos.d/example.yaml` is a declaration for `octo-org/lab-widget`. Without
+a reconciler key, observation is `unavailable` and GitHub is not called.
+With that key, `existing: adopt` creates the repository when GitHub
+reports that it does not exist, binds its id, and applies visibility,
+description, features, merge settings, Actions, the declared ruleset, and
+missing bootstrap files. `existing: refuse` makes no HTTP call. `remote_mutation` is
+`applied` only for intents this sync wrote. Secrets, identities, webhooks,
+and per-run App tokens stay unsupported. The App needs Administration
+write and Contents write; bootstrap uses a separate contents token. Schema
+and fail-closed rules are in [docs/repositories.md](docs/repositories.md).
 
 ## Providers
 

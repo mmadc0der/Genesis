@@ -75,8 +75,10 @@ Successful sync:
    `rules are invalid` / `repositories are invalid`), cache unchanged, no IPC.
 2. Build a typed privileged plan from the would-be agents, and a separate
    repository plan when `repos` is in scope. The repository plan is not an
-   IPC payload. Its `remote_mutation` is `none`; every intent is
-   `unsupported`. Genesis does not call a provider.
+   IPC payload. Root may apply adopted repository settings, Actions, the
+   declared ruleset, and missing bootstrap files. `remote_mutation` is
+   `applied` only for intents that were written; every other known intent
+   stays unsupported. Without a reconciler, Genesis does not call a provider.
 3. If a coordinator is attached, send `{op:"coordinate", payload: plan}` over
    the inherited socket and wait. IPC failure **or a failed dedicated-user
    reconcile**: `500` `privileged coordination failed`, cache unchanged.
@@ -116,9 +118,8 @@ or provider identity names. See [providers.md](providers.md).
 Repository intents (`ensure_repository`, `ensure_actions`,
 `ensure_bootstrap`, `ensure_secrets`, `ensure_protection`,
 `ensure_identities`, `retain_on_remove`) are not host intents. See
-[repositories.md](repositories.md). A repos sync may ask root to observe an
-adopted repository with GET requests only. Drift is planned on the sync
-response and is not applied.
+[repositories.md](repositories.md). A repos sync may ask root to apply an
+adopted repository. Secrets, identities, and retain stay unsupported.
 
 `host_mutation` is `"applied"` when at least one dedicated user was
 reconciled, otherwise `"none"`. `applied` lists `ensure_agent_user:<id>`.

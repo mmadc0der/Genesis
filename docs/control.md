@@ -89,7 +89,9 @@ observation journal digest matches the active repository list, each record
 also includes `observation`, the redacted `observed` GitHub view, and
 `drift` of that active declaration against the last read. A stale or
 missing journal omits those fields. The panel shows the observed id and
-the drift list. Sync does not apply drift: `remote_mutation` stays `none`.
+the drift list. A repos sync may apply adopted repository settings,
+Actions, the declared ruleset, and missing bootstrap files.
+`remote_mutation` is `applied` only for intents that sync wrote.
 Provider identity files are not served. Agent grants, when
 present, show repository, git access, allowlisted permissions, and whether
 a credential is pending or unnecessary. They do not show provider identity

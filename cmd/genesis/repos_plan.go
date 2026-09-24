@@ -1,9 +1,13 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const (
 	remoteMutationNone         = "none"
+	remoteMutationApplied      = "applied"
 	repositoryNotAppliedReason = "repository apply is not implemented; Genesis did not call the provider or mutate the remote"
 
 	intentEnsureRepository = "ensure_repository"
@@ -137,6 +141,82 @@ func knownRepositoryIntent(kind string) bool {
 	default:
 		return false
 	}
+}
+
+func repositoryPlanRecordsApply(plan repositoryPlan) error {
+	switch plan.RemoteMutation {
+	case remoteMutationNone:
+		if len(plan.Applied) != 0 {
+			return fmt.Errorf("repository plan applied %d intents", len(plan.Applied))
+		}
+	case remoteMutationApplied:
+		if len(plan.Applied) == 0 {
+			return fmt.Errorf("repository plan applied nothing")
+		}
+	default:
+		return fmt.Errorf("repository plan remote_mutation = %q", plan.RemoteMutation)
+	}
+	if plan.Observation != observationObserved {
+		return fmt.Errorf("repository observation status = %q", plan.Observation)
+	}
+	if plan.Observed == nil || plan.Drift == nil || plan.Unsupported == nil || plan.Applied == nil {
+		return fmt.Errorf("applied repository plan is incomplete")
+	}
+	applied := map[string]struct{}{}
+	for _, item := range plan.Applied {
+		kind, id, ok := strings.Cut(item, ":")
+		if !ok || id == "" || !knownRepositoryIntent(kind) {
+			return fmt.Errorf("repository plan applied %q", item)
+		}
+		if _, exists := applied[item]; exists {
+			return fmt.Errorf("repository plan applied %s twice", item)
+		}
+		found := false
+		for _, intent := range plan.Intents {
+			if intent.Kind == kind && intent.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("repository plan applied %s without an intent", item)
+		}
+		applied[item] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	for _, item := range plan.Unsupported {
+		if item.Kind == "" || item.ID == "" || item.Reason == "" || item.Reason == repositoryNotAppliedReason || !knownRepositoryIntent(item.Kind) {
+			return fmt.Errorf("repository intent %s %s has no concrete unsupported reason", item.Kind, item.ID)
+		}
+		key := item.Kind + ":" + item.ID
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("repository intent %s was unsupported twice", key)
+		}
+		if _, exists := applied[key]; exists {
+			return fmt.Errorf("repository intent %s is both applied and unsupported", key)
+		}
+		seen[key] = struct{}{}
+	}
+	for _, intent := range plan.Intents {
+		key := intent.Kind + ":" + intent.ID
+		if _, ok := applied[key]; ok {
+			continue
+		}
+		if _, ok := seen[key]; !ok {
+			return fmt.Errorf("repository intent %s was not classified", key)
+		}
+	}
+	for _, item := range plan.Drift {
+		switch item.Status {
+		case driftDrift, driftUnobservable, driftUnsupported:
+			if item.ID == "" || item.Field == "" {
+				return fmt.Errorf("repository drift entry is incomplete")
+			}
+		default:
+			return fmt.Errorf("repository drift status %q", item.Status)
+		}
+	}
+	return nil
 }
 
 func repositoryPlanIsReadOnly(plan repositoryPlan) error {

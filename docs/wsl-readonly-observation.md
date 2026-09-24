@@ -10,6 +10,13 @@ on that repository with Administration write and Metadata read. It does
 not create an App, delete the repository, register a deploy key, or change
 settings. The host PEM stays where it already is.
 
+A current repos sync applies an `existing: adopt` declaration: settings,
+Actions, the declared ruleset, and missing bootstrap files. This probe was
+written when that sync only read. Do not run it against
+`genesis-id13-tech/verification` expecting the repository to stay
+unchanged. Bootstrap also needs Contents write on the App. The permission
+set recorded below is the observation-stage App.
+
 Keep one shell. Do not print, commit, or paste a PEM, App JWT, installation
 token, `GH_TOKEN`, or `GITHUB_TOKEN`. The scripts below print only the
 evidence lines. If a script exits nonzero, run the cleanup section before
@@ -533,7 +540,7 @@ Save these lines and nothing else:
 |---|---|
 | Repo and App | `genesis-id13-tech/verification`, public, not archived, one installation, permissions `administration: write` and `metadata: read`, `total_count` 1 |
 | Secret file | `f 600` and the byte count, not the PEM |
-| Repos-only sync | HTTP `200`, `repo_unchanged`, `keys_unchanged`, `observation observed`, `repository_remote_mutation none`, `grant_remote_registration none`, `repository_id` and `node_id` equal to the `gh` values |
+| Repos-only sync | Historical, when sync only read: HTTP `200`, `repo_unchanged`, `keys_unchanged`, `observation observed`, `repository_remote_mutation none`, `grant_remote_registration none`, `repository_id` and `node_id` equal to the `gh` values. A current sync applies the declaration. |
 | Token scope | two or more `token_scope administration=read,metadata=read administration=read,metadata=read` |
 | Calls | `github_posts` and `github_gets` at least 2, no `unexpected_call`. The only POST path is installation `access_tokens` |
 | Drift | `drift lifecycle.remove unsupported`. No `settings.` line with status `drift`. Extra rulesets or Actions allowances may print as `unobservable` or `unsupported` |

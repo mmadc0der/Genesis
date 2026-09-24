@@ -121,9 +121,9 @@ func (s *privilegedState) canMutate() bool {
 func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 	var observation *repositoryObservationResult
 	if plan.ObserveRepositories {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
-		obs, err := s.observeDesiredRepositories(ctx, plan.RepositoryDigest)
+		obs, err := s.reconcileDesiredRepositories(ctx, plan.RepositoryDigest)
 		if err != nil {
 			return coordinateResult{}, err
 		}
