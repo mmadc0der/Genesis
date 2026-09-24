@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -51,11 +53,13 @@ func githubKind(err error, kind string) bool {
 }
 
 type githubRegistrar struct {
-	baseURL   string
-	transport http.RoundTripper
-	now       func() time.Time
-	sleep     func(time.Duration)
-	resolve   func(context.Context, grantRegistration) (githubAppBinding, error)
+	baseURL     string
+	transport   http.RoundTripper
+	now         func() time.Time
+	sleep       func(time.Duration)
+	resolve     func(context.Context, grantRegistration) (githubAppBinding, error)
+	resolveRepo func(context.Context, repositoryDefinition) (githubAppBinding, error)
+	logger      *slog.Logger
 }
 
 type githubAppBinding struct {
@@ -135,14 +139,21 @@ type githubClient struct {
 	app    githubAppBinding
 	jwt    string
 	jwtExp time.Time
+	logger *slog.Logger
 }
 
 func newGitHubRegistrar(state *privilegedState) githubRegistrar {
+	var logger *slog.Logger
+	if state != nil {
+		logger = state.logger
+	}
 	return githubRegistrar{
-		baseURL:   defaultGitHubAPI,
-		transport: http.DefaultTransport,
-		now:       time.Now,
-		resolve:   state.resolveReconcilerApp,
+		baseURL:     defaultGitHubAPI,
+		transport:   http.DefaultTransport,
+		now:         time.Now,
+		resolve:     state.resolveReconcilerApp,
+		resolveRepo: state.resolveReconcilerRepository,
+		logger:      logger,
 	}
 }
 
@@ -260,9 +271,10 @@ func (g githubRegistrar) client(app githubAppBinding) (*githubClient, error) {
 				return errors.New("github redirect refused")
 			},
 		},
-		now:   now,
-		sleep: g.sleep,
-		app:   app,
+		now:    now,
+		sleep:  g.sleep,
+		app:    app,
+		logger: g.logger,
 	}, nil
 }
 
@@ -300,6 +312,7 @@ func (c *githubClient) remint(ctx context.Context, tok *tokenResult) error {
 	if err != nil {
 		return err
 	}
+	logGitHubTokenScope(c.logger, tok.perms, minted.Permissions)
 	wantID := int64(0)
 	if len(tok.ids) == 1 {
 		wantID = tok.ids[0]
@@ -617,7 +630,69 @@ func (c *githubClient) roundTrip(ctx context.Context, method, path, auth string,
 	if len(payload) > maxGitHubBody {
 		return 0, nil, nil, githubErr("partial")
 	}
+	logGitHubCall(c.logger, method, path, resp.StatusCode)
 	return resp.StatusCode, resp.Header.Clone(), payload, nil
+}
+
+func logGitHubCall(logger *slog.Logger, method, path string, status int) {
+	if logger == nil {
+		return
+	}
+	logger.Info("github call", "method", method, "path", redactGitHubPath(path), "status", status)
+}
+
+func logGitHubTokenScope(logger *slog.Logger, requested gitHubPermissions, returned map[string]string) {
+	if logger == nil {
+		return
+	}
+	logger.Info("github token scope",
+		"requested", formatRequestedPermissions(requested),
+		"returned", formatPermissionMap(returned),
+	)
+}
+
+func formatRequestedPermissions(perms gitHubPermissions) string {
+	values := map[string]string{}
+	if perms.Administration != "" {
+		values["administration"] = perms.Administration
+	}
+	if perms.Metadata != "" {
+		values["metadata"] = perms.Metadata
+	}
+	return formatPermissionMap(values)
+}
+
+func formatPermissionMap(values map[string]string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := values[key]
+		if value != "read" && value != "write" {
+			value = "redacted"
+		}
+		if strings.ContainsAny(key, " =,\r\n") || githubTokenPattern.MatchString(key) || jwtPattern.MatchString(key) {
+			key = "redacted"
+		}
+		parts = append(parts, key+"="+value)
+	}
+	return strings.Join(parts, ",")
+}
+
+func redactGitHubPath(path string) string {
+	if cut, _, ok := strings.Cut(path, "?"); ok {
+		path = cut
+	}
+	if path == "" || strings.Contains(path, "://") || githubTokenPattern.MatchString(path) || jwtPattern.MatchString(path) || strings.Contains(path, "PRIVATE KEY") {
+		return "redacted"
+	}
+	return path
 }
 
 func (c *githubClient) endpoint(path string) (string, error) {

@@ -133,6 +133,9 @@ button.row.selected, button.run:hover, button.row:hover { background: #222; }
 .instructions { white-space: pre-wrap; }
 .path { color: #9a9a9a; font-size: 12px; overflow-wrap: anywhere; }
 .drawer ul { list-style: none; padding: 0; margin: 0; }
+.drift-list { list-style: disc; padding-left: 1.1rem; }
+.drift-drift { color: #e0b15a; }
+.drift-unobservable, .drift-unsupported { color: #9a9a9a; }
 .drawer li { margin: 0.15rem 0; }
 .drawer pre {
   white-space: pre-wrap;

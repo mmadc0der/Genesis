@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const (
@@ -117,13 +119,24 @@ func (s *privilegedState) canMutate() bool {
 }
 
 func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
+	var observation *repositoryObservationResult
+	if plan.ObserveRepositories {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		obs, err := s.observeDesiredRepositories(ctx, plan.RepositoryDigest)
+		if err != nil {
+			return coordinateResult{}, err
+		}
+		observation = &obs
+	}
 	if plan.Agents {
 		s.revokeRemovedGrants(plan)
 	}
 	result := coordinateResult{
-		HostMutation: hostMutationNone,
-		Applied:      []string{},
-		Unsupported:  []unsupportedChange{},
+		HostMutation:          hostMutationNone,
+		Applied:               []string{},
+		Unsupported:           []unsupportedChange{},
+		RepositoryObservation: observation,
 	}
 	seenUsers := map[string]struct{}{}
 	sawAgentLayer := false

@@ -167,11 +167,12 @@ prompt, model, executable, or other run configuration.
 
 `repos.d` is optional desired GitHub state. A missing directory leaves the
 layer inactive and does not change the agent/rule digest. The committed
-`repos.d/example.yaml` is a declaration for `octo-org/lab-widget`; Genesis
-does not call GitHub, mint credentials, or mutate a remote. Sync returns a
-repository plan with `remote_mutation: none` and every intent unsupported.
-Schema, closed paths, and the next slice are in
-[docs/repositories.md](docs/repositories.md).
+`repos.d/example.yaml` is a declaration for `octo-org/lab-widget`. Genesis
+does not create that repository. A repos sync with a configured reconciler
+App reads an adopted repository and plans drift; `remote_mutation` stays
+`none` and nothing is patched. Without that key, observation is
+`unavailable` and GitHub is not called. Schema, the read-only journal, and
+the next settings PATCH are in [docs/repositories.md](docs/repositories.md).
 
 ## Providers
 

@@ -1,5 +1,9 @@
 # WSL Docker and reconciler App checklist
 
+For the existing `genesis-id13-tech/verification` App, use the shorter
+read-only probe in [wsl-readonly-observation.md](wsl-readonly-observation.md).
+This file is the deploy-key checklist. It registers a key in later sections.
+
 Run this from a clone on the WSL filesystem (`~/src/genesis`, not `/mnt/...`),
 in a distro with Docker Desktop integration. Do not run it from PowerShell
 or `cmd.exe`. CI does not perform this check.
@@ -11,15 +15,16 @@ in the last section. Do not `cat` `/var/lib/genesis/secrets` or
 
 `sh scripts/wsl-docker-ssh-check.sh` is only the no-credential smoke. It
 does not register a deploy key. The later sections use one disposable
-public organization repository and one reconciler App. Genesis still does
-not create the repository or apply settings, rulesets, Actions, or webhooks,
-and it does not give agents an App token.
+public organization repository and one reconciler App. A repos-only sync
+reads that repository and plans drift. It does not create the repository,
+change settings, rulesets, Actions, secrets, environments, or webhooks,
+register a deploy key, or give agents an App token.
 
 ## 0. Placeholders
 
 ```sh
 cd ~/src/genesis
-git checkout cursor/github-deploy-registrar-d83c
+git checkout cursor/repo-observe-drift-9434
 
 export ORG=replace-with-org-login
 export REPO=genesis-deploy-probe
@@ -53,8 +58,9 @@ missing `ssh` fails the script. This command does not contact GitHub.
 An organization repository that already exists is the expected target.
 Do not create a second repository, and do not push a commit, README, or
 branch. An empty repository has no commits, so `size` is `0`.
-`default_branch` may be `null` or `"main"`. Genesis does not read that
-field when it registers a deploy key. The `default_branch: main` line in
+`default_branch` may be `null` or `"main"`. Deploy-key registration does
+not read or apply `default_branch`. A repos-only sync reads it, records
+the value, and does not change it. The `default_branch: main` line in
 the declaration below is not applied.
 
 Confirm the repository before creating an App. `gh` is the user login from
@@ -84,8 +90,9 @@ or its private key. As an owner of `$ORG`:
    - Repository permission **Metadata: Read-only** (GitHub requires this).
    - No other repository or organization permissions. Do not grant Contents.
      A minted token is rejected unless its permission set is exact:
-     discovery is only `metadata: read`, and the key token is only
-     `administration: write` plus `metadata: read`.
+     discovery is only `metadata: read`, repository observation is only
+     `administration: read` plus `metadata: read`, and the key token is
+     only `administration: write` plus `metadata: read`.
    - **Where can this GitHub App be installed?** Only on this account.
 2. On the App's settings page, choose **Generate a private key**. The
    browser downloads one RSA PEM. Do not open it. Move that download onto
@@ -252,7 +259,91 @@ after `docker compose up --build`. The secret file is on the
 `example.yaml` matches `type=dev.genesis.run`, `source=urn:genesis:example`,
 `subject=hello`, and starts `workspace-janitor`.
 
-## 4. Create, then list and adopt
+## 4. Read-only repository observation
+
+Do this before any sync that includes agents. The agent file from the
+previous section is already on disk, and its grant is `git: write`. A
+repos-only sync must not register a key. Every `gh` command here is a
+`GET`. Do not post, patch, or delete.
+
+```sh
+gh api "/repos/$ORG/$REPO" --jq '{id,node_id,visibility,private,description,default_branch,archived,has_issues,has_wiki,has_projects,allow_squash_merge,allow_merge_commit,allow_rebase_merge,delete_branch_on_merge,size}' \
+  > /tmp/genesis-repo-before.json
+gh api "/repos/$ORG/$REPO/keys" --jq 'length'
+cat /tmp/genesis-repo-before.json
+
+curl -sS -D /tmp/genesis-observe.headers -o /tmp/genesis-observe.json \
+  http://127.0.0.1:8790/api/sync \
+  -H 'Content-Type: application/json' \
+  --data '{"scope":["repos"]}'
+head -n 1 /tmp/genesis-observe.headers
+
+gh api "/repos/$ORG/$REPO" --jq '{id,node_id,visibility,private,description,default_branch,archived,has_issues,has_wiki,has_projects,allow_squash_merge,allow_merge_commit,allow_rebase_merge,delete_branch_on_merge,size}' \
+  > /tmp/genesis-repo-after.json
+gh api "/repos/$ORG/$REPO/keys" --jq 'length'
+cmp /tmp/genesis-repo-before.json /tmp/genesis-repo-after.json && echo repo_unchanged || exit 1
+
+python3 - <<'PY'
+import json
+plan = json.load(open("/tmp/genesis-observe.json"))
+repo = plan["repository_plan"]
+grant = plan["grant_plan"]
+assert repo["observation"] == "observed"
+assert repo["remote_mutation"] == "none"
+assert repo["applied"] == []
+assert grant["credential_active"] is False
+assert grant["remote_registration"] == "none"
+assert grant["key_material"] == "none"
+observed = repo["observed"][0]
+live = json.load(open("/tmp/genesis-repo-after.json"))
+assert observed["repository_id"] == live["id"]
+assert observed["node_id"] == live["node_id"]
+assert observed["visibility"] == live["visibility"]
+assert observed["org"] and observed["name"]
+print("observation", repo["observation"])
+print("repository_remote_mutation", repo["remote_mutation"])
+print("repository_id", observed["repository_id"])
+print("node_id", observed["node_id"])
+print("drift_count", len(repo.get("drift") or []))
+for item in repo.get("drift") or []:
+    print("drift", item["field"], item["status"])
+PY
+
+docker compose exec -T -u genesis genesis python3 -c '
+import json, pathlib
+path = pathlib.Path("/var/lib/genesis/data/observations/repositories.json")
+text = path.read_text()
+for marker in ("ghs_", "ghp_", "github_pat_", "BEGIN ", "PRIVATE KEY", "eyJ"):
+    if marker in text:
+        raise SystemExit("journal contains " + marker)
+journal = json.loads(text)
+binding = journal["bindings"][0]
+print("journal_version", journal["version"])
+print("journal_repository_id", binding["repository_id"])
+print("journal_node_id", binding["node_id"])
+'
+docker compose exec -T -u 0 genesis stat -c '%a %u' /var/lib/genesis/data/observations/repositories.json
+curl -sf http://127.0.0.1:8790/api/repositories |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); one=next(item for item in d["repositories"] if item["id"]=="probe"); print(one.get("observation"), (one.get("observed") or {}).get("repository_id"), len(one.get("drift") or []))'
+```
+
+Expected: both key lengths are `0`. `cmp` prints `repo_unchanged`. The
+sync is HTTP `200`. The script prints `observation observed`,
+`repository_remote_mutation none`, and a `repository_id` and `node_id`
+equal to `gh api /repos/$ORG/$REPO`. Drift lines are allowed when the
+empty repository does not already match the YAML, including a null
+`default_branch` against `main`. Those lines are the plan. GitHub must
+be unchanged. The journal prints `journal_version 1` and the same id
+and node id, with no token marker. `stat` prints `600 65532`. The
+control line prints `observed`, the same repository id, and the drift
+count. A `500` body is `privileged coordination failed`. Do not continue
+to the key-creating sync. Logs may contain `github repository was not
+found` when the org, name, or installation target does not match, or
+`github auth scope does not match` when the observation token was not
+exactly `administration: read` and `metadata: read`. Do not print log
+bodies that might contain a token; those markers are the evidence.
+
+## 5. Create, then list and adopt
 
 Keep this shell open. Later sections reuse `show_sync`, `list_keys`, and
 `probe_socket`.
@@ -341,7 +432,7 @@ permission outside that exact set. `github missing` means the org, repo, or
 installation target does not match. `github partial` means the installation
 token is not exactly `$ORG/$REPO`. Do not print log bodies.
 
-## 5. The dedicated process gets the socket
+## 6. The dedicated process gets the socket
 
 ```sh
 probe_socket() {
@@ -438,7 +529,7 @@ docker compose exec -T -u 0 genesis sh -c 'find /var/lib/genesis/credentials/soc
 
 Expected: `0`.
 
-## 6. A grant change drops the socket
+## 7. A grant change drops the socket
 
 `git: none` is a different grant. It must not call GitHub and must not
 receive a socket. The existing write key stays on GitHub.
@@ -485,7 +576,7 @@ fingerprint is empty. `retained_material` contains the previous write
 grant id. `list_keys` still shows exactly one key, with the original id.
 The event is `202`. The proof file says `socket_absent=yes`.
 
-That sync also removes a socket section 5 already handed out, before the
+That sync also removes a socket section 6 already handed out, before the
 response returns, including while that process is still running. The old
 process can keep a stale `SSH_AUTH_SOCK` value; `ssh-add -l` on it fails
 because the socket file is gone. The new process never receives the
@@ -532,7 +623,7 @@ print("restored_same_key", row(new)["remote_key_id"])
 PY
 ```
 
-## 7. Refusal drops the socket
+## 8. Refusal drops the socket
 
 Add a second deploy key with the same title and a different public key.
 Genesis must not delete either key. The next sync fails closed, stores
@@ -589,7 +680,7 @@ Expected: HTTP `500` and body `privileged coordination failed`. Logs contain
 `refused`, the previous numeric key id, and `1`. The event is `202`. The
 proof file says `socket_absent=yes`. GitHub still has both keys.
 
-## 8. Cleanup and revocation
+## 9. Cleanup and revocation
 
 Remove the grant before deleting the remote, so the last sync does not call
 GitHub.
@@ -641,6 +732,7 @@ Save these lines and nothing else:
 |---|---|
 | Smoke | `OpenSSH_...` and `ssh client check passed` |
 | Secret file | `f 600` and the byte count, not the PEM |
+| Read-only observation | `200`, key length `0` before and after, `repo_unchanged`, `observation observed`, `repository_remote_mutation none`, `repository_id` and `node_id` matching `gh`, journal `600 65532` with the same ids and no token marker |
 | Create | `200`, `credential_active False`, `remote_status ready`, `generation 1`, one key, title `genesis-<grant_id>`, `read_only=false`, matching `SHA256:` |
 | Adopt | `200` and `adopted_same_key` equal to the create id; still one key |
 | Socket on | `202`, `socket_mode=600`, dedicated uid, `dedicated_process_has_socket=yes`, matching `ssh-add` fingerprint, GitHub text naming `$ORG/$REPO` |
@@ -650,6 +742,7 @@ Save these lines and nothing else:
 | Refusal | `500`, `github collision`, no secret markers, `refused <id> 1`, live socket file removed before the response, `202`, `socket_absent=yes`, two keys still listed |
 | Cleanup | repo `404`, PEM path gone |
 
-`credential_active` stays false. The HTTP plan's `remote_registration`
-stays `unsupported`. That is the listener summary, not the registrar
-result.
+After the key-creating sync, `credential_active` stays false. That HTTP
+plan's `remote_registration` stays `unsupported`. That is the listener
+summary, not the registrar result. The earlier repos-only sync reports
+`remote_registration none` because it does not register a key.

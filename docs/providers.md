@@ -271,7 +271,22 @@ written to logs, IPC errors, or the sync body. Tests inject the HTTP
 transport and clock and use a local fake GitHub API. No real credential
 is required.
 
-Repository creation, settings, rulesets, Actions, webhooks, App-token
-delivery, deletion, and rotation stay unsupported. CI uses a local fake
-GitHub API. The manual WSL checklist, including the real reconciler App
-steps, is [ssh-client-verification.md](ssh-client-verification.md).
+## Stage 4: read-only repository observation
+
+The same root reconciler App observes an `existing: adopt` repository
+during a repos sync. That token is exactly `administration: read` plus
+`metadata: read`. Repository GETs are the only observation calls. The
+installation-token mint remains the existing `POST
+/app/installations/{id}/access_tokens`. Observation does not post a deploy
+key, patch settings, or mint an agent token. The non-secret journal and
+the drift plan are specified in [repositories.md](repositories.md).
+
+Repository creation, settings writes, rulesets, Actions writes, webhooks,
+App-token delivery, deletion, and rotation stay unsupported. The next
+mutation is Stage 5 `ensure_repository_settings`: a settings PATCH on an
+already-adopted repository, limited to visibility, description, features,
+merge methods, and delete-branch-on-merge. CI uses a local fake GitHub
+API. The manual read-only probe for an existing App is
+[wsl-readonly-observation.md](wsl-readonly-observation.md). The longer
+deploy-key checklist is
+[ssh-client-verification.md](ssh-client-verification.md).
