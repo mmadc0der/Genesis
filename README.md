@@ -179,8 +179,11 @@ missing bootstrap files. `existing: refuse` makes no HTTP call. `remote_mutation
 webhook configuration stay unsupported. A dedicated run can still mint its
 own short-lived installation token and check out the bound repository.
 The App needs Administration write and Contents write; bootstrap uses a
-separate contents token. Schema
-and fail-closed rules are in [docs/repositories.md](docs/repositories.md).
+separate contents token. The running designer reads the loader contract
+from `/usr/share/genesis/schema/repository-declaration.txt`, generated from
+the same structs that load `repos.d`. `repos.d/example.yaml` is an example,
+not that contract. Operator-facing rules are in
+[docs/repositories.md](docs/repositories.md).
 
 ## Providers
 

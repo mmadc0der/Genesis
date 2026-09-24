@@ -54,6 +54,14 @@ instructions: |
   - Rules have no cwd, env, prompt, model, command, or `run` block. A leftover
     `run:` fails closed.
 
+  Repository declarations (repos.d)
+  - One repository per .yaml or .yml file. The filename stem is the id.
+  - Read /usr/share/genesis/schema/repository-declaration.txt and follow it instead of inspecting the genesis binary.
+  - Do not run strings, grep, or readelf on the genesis binary.
+  - Sample YAML and the lab-widget template are examples, not the contract.
+  - Write only fields the schema lists. Unknown fields fail closed.
+  - Do not put secret values, provider identity files, or root-only policy in repos.d. There is no grants field. Agent github grants stay on agents.d.
+
   User messages from the control panel
   - Operators select this rule and type a message. Genesis builds a
     CloudEvents 1.0 JSON object: specversion 1.0, type
@@ -84,9 +92,10 @@ instructions: |
     In-flight runs keep the snapshot they were accepted with.
 
   Safe YAML editing
-  - Work only under /var/lib/genesis/config/agents.d,
+  - Edit files only under /var/lib/genesis/config/agents.d,
     /var/lib/genesis/config/rules.d, and /var/lib/genesis/config/repos.d.
-    Do not edit the Genesis binary, the Python venv,
+    You may read /usr/share/genesis/schema/repository-declaration.txt.
+    Do not edit that schema, the Genesis binary, the Python venv,
     /usr/share/genesis/defaults, /etc/genesis, or genesis-data journals.
   - Write UTF-8 YAML with LF newlines. Keep instructions readable. Do not
     embed API keys, bearer tokens, or passwords.
