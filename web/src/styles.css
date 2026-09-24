@@ -120,12 +120,55 @@ button.row.selected, button.run:hover, button.row:hover { background: #222; }
 .run { border-bottom: 1px solid #222; padding: 0.55rem 0.7rem; }
 .empty { color: #8d8d8d; padding: 0.8rem; margin: 0; }
 
-.line { padding: 0.45rem 0.8rem 0.55rem; border-bottom: 1px solid #1d1d1d; }
-.line header { display: flex; justify-content: space-between; color: #8d8d8d; font-size: 11px; text-transform: uppercase; }
-.line p { margin: 0.2rem 0 0; white-space: pre-wrap; }
-.line-result, .line-assistant { background: #17191c; }
-.line-result p, .line-assistant p { color: #eee; }
-.line-tool p { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+button.line {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: 0.65rem;
+  align-items: baseline;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #1d1d1d;
+  border-radius: 0;
+  padding: 0.38rem 0.8rem;
+}
+button.line .kind,
+button.line time {
+  color: #8d8d8d;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+button.line time { grid-column: 3; grid-row: 1; }
+button.line p { margin: 0; min-width: 0; }
+button.line p.preview {
+  grid-column: 2;
+  grid-row: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+button.line.open { grid-template-columns: minmax(0, 1fr) auto; }
+button.line.open time { grid-column: 2; }
+button.line.open p.full {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  margin-top: 0.2rem;
+  white-space: pre-wrap;
+  user-select: text;
+}
+button.line.line-result,
+button.line.line-assistant { background: #17191c; }
+button.line.line-result p,
+button.line.line-assistant p { color: #eee; }
+button.line.line-tool p { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+button.line:hover,
+button.line:focus-visible,
+button.line.line-result:hover,
+button.line.line-assistant:hover,
+button.line.line-result:focus-visible,
+button.line.line-assistant:focus-visible { background: #222; }
+button.line:focus-visible { outline: 1px solid #6a6a6a; outline-offset: -1px; }
 .line-retry { color: #e0b15a; }
 .line-meta { color: #9a9a9a; }
 

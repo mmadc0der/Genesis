@@ -167,8 +167,14 @@ the published binding is `127.0.0.1:8790`.
   message, code, and status, and `llm/retry` count, code, and message. Live
   `on_chunk` deltas append onto the open assistant or tool row when the
   runtime actually forwards them. `usage` and `finish` frames are not painted.
-  A displayed assistant body or tool result is capped at 16 KiB; the journal
-  line keeps the redacted frame up to the existing 16 MiB cap. The run-level
+  Each activity row is one line until it is clicked. Clicking the row toggles
+  the full text already produced for that row; clicking again collapses it.
+  Assistant messages, reasoning, tool results, retry text, and turn failures
+  use a single-line preview, with an ellipsis when the text is longer.
+  Tool-call arguments are compacted to one short line instead of pretty-printed
+  JSON. A displayed assistant body or tool result is capped at 16 KiB; the journal
+  line keeps the redacted frame up to the existing 16 MiB cap. The journal
+  format is unchanged. The run-level
   error stays the wrapper string only when no `turn/end` failure object was
   journaled.
 - No database, SSE channel, or external broker.
