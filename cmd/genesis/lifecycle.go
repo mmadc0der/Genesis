@@ -28,7 +28,7 @@ const (
 	originPython    = "python"
 	originSDKEvent  = "sdk.session.event"
 	originSDKStatus = "sdk.session.status"
-	originSDKChunk  = "sdk.on_chunk"
+	originSDKChunk  = "sdk.session.on_chunk"
 	originSDKOther  = "sdk.other"
 
 	pythonFrameSessionCreated = "session.created"
