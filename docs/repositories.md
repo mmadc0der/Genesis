@@ -261,20 +261,27 @@ installation therefore needs repository **Administration: write** and
 journals, API responses, and errors still contain no JWT, installation
 token, or PEM.
 
-For each adopted repository Genesis mints the administration token, then
-`GET /repos/{org}/{name}`:
+For each adopted repository Genesis first requests an administration token
+limited to that repository name. GitHub answers `422` or `404` when the
+repository does not exist or is not accessible to the installation. That
+response is the missing-repository signal:
 
-- GitHub `404` with no persisted binding creates the repository:
-  `POST /orgs/{org}/repos` with the declared name, visibility, description,
-  the matching `private` flag, and `auto_init: true`. Genesis re-mints,
-  re-reads, and binds `repository_id` and `node_id` with the same
-  fail-closed identity rules as observation. If the resulting default
-  branch name differs from the declaration, the sync fails closed. Genesis
-  does not rename, transfer, archive, unarchive, or delete.
-- A `404` for an id that is already bound does not create a replacement.
-- An existing repository keeps its binding. A different id, node id, owner,
-  or name fails closed. The default branch is not changed when it already
-  exists.
+- With no persisted binding, Genesis requests a second administration
+  token with the same permissions and no repository limit
+  (`repository_selection` `all` or `selected`). It uses that token only for
+  `POST /orgs/{org}/repos`, with the declared name, visibility, description,
+  the matching `private` flag, and `auto_init: true`. Any other permission
+  set fails closed before the create. Genesis then re-mints a token limited
+  to the new name, re-reads, and binds `repository_id` and `node_id` with
+  the same fail-closed identity rules as observation. If the resulting
+  default branch name differs from the declaration, the sync fails closed.
+  Genesis does not rename, transfer, archive, unarchive, or delete.
+- The same `422` or `404` for an id that is already bound does not create a
+  replacement and does not request the unlimited token.
+- A later repository `GET` of `404` with no persisted binding also creates,
+  using the token that was already minted for that name. An existing
+  repository keeps its binding. A different id, node id, owner, or name
+  fails closed. The default branch is not changed when it already exists.
 
 After the identity check, Genesis reads Actions and rulesets with that same
 administration token before it writes:
@@ -282,7 +289,7 @@ administration token before it writes:
 | Shape | Behavior |
 |---|---|
 | Settings | `PATCH /repos/{org}/{repo}` for visibility, description, issues, wiki, projects, allow_squash, allow_merge_commit, allow_rebase, and delete_branch_on_merge when any of those differ. The body does not include the default branch, the name, or archived. |
-| Actions | `PUT` enabled, allowed, and, when allowed is `selected`, the selected patterns. If SHA pinning is on, SHA pinning was not reported, selected actions are unknown, or the repository has GitHub-owned or verified allowances, Genesis does not overwrite Actions and fails the sync. The listener generation is not swapped. |
+| Actions | `PUT` enabled, allowed, and, when allowed is `selected`, the selected patterns. GitHub's `204 No Content` is success. If SHA pinning is on, SHA pinning was not reported, selected actions are unknown, or the repository has GitHub-owned or verified allowances, Genesis does not overwrite Actions and fails the sync. A failed Actions write, including a patterns `PUT` that follows a successful permissions `PUT`, does not swap the listener generation. |
 | Protection | Create or update only the one declared repository ruleset: active enforcement, approving reviews, dismiss-stale, required checks, and strict checks, targeting `refs/heads/{current default branch}`. Extra rulesets are left in place. A ruleset with bypass actors, unmodeled rules, extra review requirements, or an unreported dismiss-stale value is not overwritten. If the ruleset list was unobservable, Genesis does not guess and does not create one. |
 | Bootstrap | Commit template files that are absent, on the current default branch, with the contents token. Existing files are never overwritten. The built-in `lab-widget` template ships `.github/workflows/ci.yml`, whose check name is `ci`, matching that template's `protection.required_checks`. A template id that is not shipped, or required checks the template does not provide, fails closed before any HTTP call. |
 

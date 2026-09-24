@@ -590,10 +590,10 @@ func (c *githubClient) do(ctx context.Context, method, path, auth string, payloa
 				return nil, nil, err
 			}
 			continue
-		case status != http.StatusOK && status != http.StatusCreated:
-			return nil, nil, githubErr("partial")
-		default:
+		case status == http.StatusNoContent || status == http.StatusOK || status == http.StatusCreated:
 			return body, header, nil
+		default:
+			return nil, nil, githubErr("partial")
 		}
 	}
 	if last == nil {

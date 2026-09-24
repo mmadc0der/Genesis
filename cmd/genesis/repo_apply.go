@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -282,13 +283,27 @@ func (g githubRegistrar) prepareRepository(ctx context.Context, definition repos
 	}
 	writePerms := gitHubPermissions{Administration: "write", Metadata: "read"}
 	discovery, err := client.mint(ctx, []string{definition.Name}, nil, writePerms)
+	created := false
+	if namedRepositoryUnavailable(err) {
+		// GitHub refuses a repository-scoped installation token with 422, or
+		// 404, when that repository does not exist or is not accessible.
+		// A persisted binding must not be replaced. Creating uses a separate
+		// installation token that is not limited to the missing name.
+		if prior != nil {
+			return preparedRepo{}, errRepositoryNotFound
+		}
+		if err := client.createMissingRepository(ctx, writePerms, definition); err != nil {
+			return preparedRepo{}, err
+		}
+		created = true
+		discovery, err = client.mint(ctx, []string{definition.Name}, nil, writePerms)
+	}
 	if err != nil {
 		return preparedRepo{}, err
 	}
 	document, err := client.getManagedRepo(ctx, &discovery)
-	created := false
 	if githubKind(err, "missing") {
-		if prior != nil {
+		if prior != nil || created {
 			return preparedRepo{}, errRepositoryNotFound
 		}
 		if err := client.createOrgRepository(ctx, &discovery, definition); err != nil {
@@ -482,6 +497,43 @@ func (c *githubClient) getManagedRepo(ctx context.Context, tok *tokenResult) (ob
 		return observedRepoDocument{}, err
 	}
 	return document, nil
+}
+
+func namedRepositoryUnavailable(err error) bool {
+	return githubKind(err, "collision") || githubKind(err, "missing")
+}
+
+func (c *githubClient) createMissingRepository(ctx context.Context, perms gitHubPermissions, definition repositoryDefinition) error {
+	tok, err := c.mintRepositoryCreate(ctx, perms)
+	if err != nil {
+		return err
+	}
+	return c.createOrgRepository(ctx, &tok, definition)
+}
+
+func (c *githubClient) mintRepositoryCreate(ctx context.Context, perms gitHubPermissions) (tokenResult, error) {
+	if perms.Administration != "write" || perms.Metadata != "read" || perms.Contents != "" {
+		return tokenResult{}, githubErr("auth")
+	}
+	minted, err := withAuthRetry(c, func() (tokenResult, error) {
+		return c.mintOnce(ctx, nil, nil, perms)
+	})
+	if err != nil {
+		return tokenResult{}, err
+	}
+	logGitHubTokenScope(c.logger, perms, minted.Permissions)
+	want, err := expectedTokenPermissions(perms)
+	if err != nil || !permissionMapsEqual(minted.Permissions, want) {
+		return tokenResult{}, githubErr("auth")
+	}
+	if !minted.ExpiresAt.After(c.now().Add(30*time.Second)) || minted.Token == "" {
+		return tokenResult{}, githubErr("auth")
+	}
+	if minted.Selection != "all" && minted.Selection != "selected" {
+		return tokenResult{}, githubErr("partial")
+	}
+	minted.perms = perms
+	return minted, nil
 }
 
 func (c *githubClient) createOrgRepository(ctx context.Context, tok *tokenResult, definition repositoryDefinition) error {

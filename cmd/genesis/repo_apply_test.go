@@ -71,6 +71,25 @@ func TestRepositoryApplyCreatesBindsAndShapes(t *testing.T) {
 	if strings.Contains(patch, "default_branch") || strings.Contains(patch, "archived") || !strings.Contains(patch, `"has_wiki":false`) {
 		t.Fatalf("settings patch = %s", patch)
 	}
+	if len(fake.tokenStatuses) == 0 || fake.tokenStatuses[0] != http.StatusUnprocessableEntity {
+		t.Fatalf("missing repository token statuses = %v", fake.tokenStatuses)
+	}
+	if len(fake.methods) < 3 || fake.methods[2] != "POST /orgs/octo-org/repos" {
+		t.Fatalf("create did not follow the installation token: %#v", fake.methods)
+	}
+	createToken := ""
+	for _, body := range fake.bodies {
+		if strings.HasPrefix(body, "POST /app/installations/100002/access_tokens ") && !strings.Contains(body, `"repositories"`) {
+			createToken = body
+			break
+		}
+	}
+	if !strings.Contains(createToken, `"administration":"write"`) || strings.Contains(createToken, `"repositories"`) || strings.Contains(createToken, `"repository_ids"`) {
+		t.Fatalf("create token = %s", createToken)
+	}
+	if fake.count("PUT", "/repos/octo-org/lab-widget/actions/permissions") != 1 || fake.count("PUT", "/repos/octo-org/lab-widget/actions/permissions/selected-actions") != 1 {
+		t.Fatalf("actions writes = %#v", fake.methods)
+	}
 	ruleset := fake.body("POST", "/repos/octo-org/lab-widget/rulesets")
 	if !strings.Contains(ruleset, `"include":["refs/heads/main"]`) || !strings.Contains(ruleset, `"context":"ci"`) || strings.Contains(ruleset, "~DEFAULT_BRANCH") {
 		t.Fatalf("ruleset = %s", ruleset)
@@ -174,6 +193,11 @@ func TestRepositoryApplyFailClosedBeforeWrite(t *testing.T) {
 			f.createBranch = "trunk"
 			writeRepoFile(t, repos, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
 		}, want: errRepositoryDefaultBranch.Error()},
+		{name: "create scope", prepare: func(t *testing.T, f *applyGitHub, repos string, _ *privilegedState) {
+			f.exists = false
+			f.createPermissionsExtra = true
+			writeRepoFile(t, repos, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+		}, want: errRepositoryAuthScope.Error()},
 		{name: "bound missing", prepare: func(t *testing.T, f *applyGitHub, repos string, state *privilegedState) {
 			f.exists = false
 			writeRepoFile(t, repos, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
@@ -340,6 +364,88 @@ func TestRepositoryApplyDesiredChangeKeepsGeneration(t *testing.T) {
 	}
 }
 
+func TestRepositoryApplyCreatesAfterTokenNotFound(t *testing.T) {
+	frozen := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	fake := newApplyGitHub(t, frozen)
+	fake.exists = false
+	fake.tokenMissingStatus = http.StatusNotFound
+	fake.files[".github/workflows/ci.yml"] = []byte("name: ci\n")
+	state, reposDir := applyState(t, fake, frozen)
+	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+	result, err := state.reconcileDesiredRepositories(context.Background(), mustRepositoryDigest(t, reposDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.tokenStatuses[0] != http.StatusNotFound || fake.count("POST", "/orgs/octo-org/repos") != 1 {
+		t.Fatalf("token statuses=%v calls=%v", fake.tokenStatuses, fake.methods)
+	}
+	if result.Journal == nil || result.Journal.Bindings[0].RepositoryID != 4242 {
+		t.Fatalf("binding = %#v", result.Journal)
+	}
+}
+
+func TestRepositoryApplyActionsNoContent(t *testing.T) {
+	frozen := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	fake := newApplyGitHub(t, frozen)
+	fake.enabled = false
+	fake.allowed = actionsAllowedAll
+	fake.files[".github/workflows/ci.yml"] = []byte("name: ci\n")
+	state, reposDir := applyState(t, fake, frozen)
+	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+	result, err := state.reconcileDesiredRepositories(context.Background(), mustRepositoryDigest(t, reposDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(result.Applied, intentEnsureActions+":lab") || result.RemoteMutation != remoteMutationApplied {
+		t.Fatalf("actions were not recorded: %#v", result)
+	}
+	if fake.count("PUT", "/repos/octo-org/lab-widget/actions/permissions") != 1 || fake.count("PUT", "/repos/octo-org/lab-widget/actions/permissions/selected-actions") != 1 {
+		t.Fatalf("actions writes = %#v", fake.methods)
+	}
+	if fake.enabled != true || fake.allowed != actionsAllowedSelected || !sameStrings(fake.patterns, []string{"actions/checkout@v4"}) {
+		t.Fatalf("actions state enabled=%v allowed=%s patterns=%v", fake.enabled, fake.allowed, fake.patterns)
+	}
+}
+
+func TestRepositoryApplyFailedActionsWriteKeepsGeneration(t *testing.T) {
+	frozen := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	fake := newApplyGitHub(t, frozen)
+	fake.description = "old description"
+	fake.enabled = false
+	fake.allowed = actionsAllowedAll
+	fake.patterns = []string{"actions/checkout@v3"}
+	fake.selectedPutStatus = http.StatusUnprocessableEntity
+	fake.files[".github/workflows/ci.yml"] = []byte("name: ci\n")
+	state, reposDir := applyState(t, fake, frozen)
+	writeRepoFile(t, reposDir, "lab.yaml", validRepositoryYAML("octo-org", "lab-widget"))
+	server := newSyncTestServer(t, nil)
+	server.reposDir = reposDir
+	if response := sendSync(server, "sync-secret", map[string]any{"scope": []string{scopeRepos}}); response.Code != http.StatusOK {
+		t.Fatalf("seed = %d %s", response.Code, response.Body.String())
+	}
+	server.mu.RLock()
+	seeded := server.generation.digest
+	server.mu.RUnlock()
+	state.dataDir = server.store.dataDir
+	server.coordinator = stateCoordinator{state: state}
+	response := sendSync(server, "sync-secret", map[string]any{"scope": []string{scopeRepos}})
+	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "ghs_") {
+		t.Fatalf("partial actions = %d %s", response.Code, response.Body.String())
+	}
+	server.mu.RLock()
+	kept := server.generation.digest == seeded
+	server.mu.RUnlock()
+	if !kept {
+		t.Fatal("failed actions write swapped the generation")
+	}
+	if fake.count("PATCH", "/repos/octo-org/lab-widget") != 1 || fake.count("PUT", "/repos/octo-org/lab-widget/actions/permissions") != 1 || fake.count("PUT", "/repos/octo-org/lab-widget/actions/permissions/selected-actions") != 1 {
+		t.Fatalf("partial writes = %#v", fake.methods)
+	}
+	if fake.allowed != actionsAllowedSelected || sameStrings(fake.patterns, []string{"actions/checkout@v4"}) {
+		t.Fatalf("patterns were replaced despite the failed write: allowed=%s patterns=%v", fake.allowed, fake.patterns)
+	}
+}
+
 func TestRepositoryApplyUnsafeActionsKeepGeneration(t *testing.T) {
 	frozen := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
 	fake := newApplyGitHub(t, frozen)
@@ -454,46 +560,50 @@ func applyState(t *testing.T, fake *applyGitHub, now time.Time) (*privilegedStat
 }
 
 type applyGitHub struct {
-	t               *testing.T
-	server          *httptest.Server
-	now             time.Time
-	mu              sync.Mutex
-	methods         []string
-	bodies          []string
-	exists          bool
-	id              int64
-	node            string
-	owner           string
-	name            string
-	visibility      string
-	description     string
-	branch          string
-	createBranch    string
-	archived        bool
-	issues          bool
-	wiki            bool
-	projects        bool
-	squash          bool
-	mergeCommit     bool
-	rebase          bool
-	deleteBranch    bool
-	enabled         bool
-	allowed         string
-	patterns        []string
-	pinning         *bool
-	omitPinning     bool
-	extraActions    bool
-	selectedMissing bool
-	rulesStatus     int
-	rulesetID       int64
-	rulesetInclude  string
-	unmodeled       bool
-	extraRuleset    bool
-	files           map[string][]byte
-	adminLevel      string
-	contentsExtra   bool
-	repoGets        int
-	onPatch         func()
+	t                      *testing.T
+	server                 *httptest.Server
+	now                    time.Time
+	mu                     sync.Mutex
+	methods                []string
+	bodies                 []string
+	exists                 bool
+	id                     int64
+	node                   string
+	owner                  string
+	name                   string
+	visibility             string
+	description            string
+	branch                 string
+	createBranch           string
+	archived               bool
+	issues                 bool
+	wiki                   bool
+	projects               bool
+	squash                 bool
+	mergeCommit            bool
+	rebase                 bool
+	deleteBranch           bool
+	enabled                bool
+	allowed                string
+	patterns               []string
+	pinning                *bool
+	omitPinning            bool
+	extraActions           bool
+	selectedMissing        bool
+	rulesStatus            int
+	rulesetID              int64
+	rulesetInclude         string
+	unmodeled              bool
+	extraRuleset           bool
+	files                  map[string][]byte
+	adminLevel             string
+	contentsExtra          bool
+	createPermissionsExtra bool
+	tokenMissingStatus     int
+	tokenStatuses          []int
+	selectedPutStatus      int
+	repoGets               int
+	onPatch                func()
 }
 
 func newApplyGitHub(t *testing.T, now time.Time) *applyGitHub {
@@ -543,8 +653,7 @@ func (f *applyGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(body, &payload)
 		f.enabled = payload.Enabled
 		f.allowed = payload.Allowed
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
+		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/octo-org/lab-widget/actions/permissions/selected-actions":
 		if f.selectedMissing {
 			http.NotFound(w, r)
@@ -560,11 +669,15 @@ func (f *applyGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			Patterns []string `json:"patterns_allowed"`
 		}
 		_ = json.Unmarshal(body, &payload)
+		if f.selectedPutStatus != 0 {
+			w.WriteHeader(f.selectedPutStatus)
+			_, _ = w.Write([]byte(`{"message":"selected actions were not updated"}`))
+			return
+		}
 		f.extraActions = payload.Owned || payload.Verified
 		f.patterns = append([]string(nil), payload.Patterns...)
 		f.selectedMissing = false
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
+		w.WriteHeader(http.StatusNoContent)
 	case r.URL.Path == "/repos/octo-org/lab-widget/rulesets" && r.Method == http.MethodGet:
 		f.serveRules(w)
 	case r.URL.Path == "/repos/octo-org/lab-widget/rulesets" && r.Method == http.MethodPost:
@@ -611,6 +724,30 @@ func (f *applyGitHub) serveToken(w http.ResponseWriter, body []byte) {
 	}
 	if f.contentsExtra && request.Permissions.Contents != "" {
 		permissions["administration"] = "read"
+	}
+	scoped := len(request.Repositories) > 0 || len(request.RepositoryIDs) > 0
+	if scoped && !f.exists {
+		status := http.StatusUnprocessableEntity
+		if f.tokenMissingStatus != 0 {
+			status = f.tokenMissingStatus
+		}
+		f.tokenStatuses = append(f.tokenStatuses, status)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"There is at least one repository that does not exist or is not accessible to the parent installation.","documentation_url":"https://docs.github.com/rest/apps/apps#create-an-installation-access-token"}`))
+		return
+	}
+	if !scoped && f.createPermissionsExtra {
+		permissions["contents"] = "read"
+	}
+	f.tokenStatuses = append(f.tokenStatuses, http.StatusCreated)
+	w.WriteHeader(http.StatusCreated)
+	if !scoped {
+		_ = json.NewEncoder(w).Encode(gitHubTokenResponse{
+			Token: "ghs_applytesttokenvalue000000000000", ExpiresAt: f.now.Add(time.Hour),
+			Permissions: permissions, RepositorySelection: "all",
+		})
+		return
 	}
 	id := f.id
 	if id == 0 {

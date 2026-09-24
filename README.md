@@ -170,9 +170,9 @@ layer inactive and does not change the agent/rule digest. The committed
 `repos.d/example.yaml` is a declaration for `octo-org/lab-widget`. Without
 a reconciler key, observation is `unavailable` and GitHub is not called.
 With that key, `existing: adopt` creates the repository when GitHub
-returns 404, binds its id, and applies visibility, description, features,
-merge settings, Actions, the declared ruleset, and missing bootstrap
-files. `existing: refuse` makes no HTTP call. `remote_mutation` is
+reports that it does not exist, binds its id, and applies visibility,
+description, features, merge settings, Actions, the declared ruleset, and
+missing bootstrap files. `existing: refuse` makes no HTTP call. `remote_mutation` is
 `applied` only for intents this sync wrote. Secrets, identities, webhooks,
 and per-run App tokens stay unsupported. The App needs Administration
 write and Contents write; bootstrap uses a separate contents token. Schema
