@@ -1,7 +1,7 @@
-# Example declaration for octo-org/lab-widget. Genesis does not create it.
-# Without a reconciler key, observation stays unavailable and this file
-# is not applied. A configured reconciler that cannot see the repository
-# fails the sync and keeps the previous generation.
+# Example declaration for octo-org/lab-widget. Without a reconciler key,
+# observation stays unavailable and this file is not applied. With that
+# key, adopt creates the repository on GitHub 404 and applies this shape.
+# A failed apply keeps the previous generation.
 # Secret names are references; values never belong in repos.d.
 provider: github
 org: octo-org

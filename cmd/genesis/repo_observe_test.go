@@ -563,6 +563,34 @@ func (f *observationFake) serve(w http.ResponseWriter, r *http.Request) {
 		f.posts.Add(1)
 		f.serveToken(w, r)
 		return
+	case http.MethodPatch:
+		if r.URL.Path != "/repos/octo-org/lab-widget" {
+			f.mutations.Add(1)
+			http.Error(w, "mutation refused", http.StatusMethodNotAllowed)
+			return
+		}
+		var patch map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			f.t.Errorf("settings patch: %v", err)
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		if _, ok := patch["default_branch"]; ok {
+			f.t.Errorf("settings patch changed the default branch")
+		}
+		if _, ok := patch["archived"]; ok {
+			f.t.Errorf("settings patch changed archived")
+		}
+		if raw, ok := patch["description"]; ok {
+			var description string
+			if err := json.Unmarshal(raw, &description); err != nil {
+				f.t.Errorf("description patch: %v", err)
+			} else {
+				f.description = description
+			}
+		}
+		f.serveRepo(w)
+		return
 	default:
 		f.mutations.Add(1)
 		http.Error(w, "mutation refused", http.StatusMethodNotAllowed)
@@ -629,6 +657,12 @@ func (f *observationFake) serve(w http.ResponseWriter, r *http.Request) {
 			"conditions": map[string]any{"ref_name": map[string]any{"include": []string{"refs/heads/main"}, "exclude": []string{}}},
 			"rules":      rules,
 		})
+	case r.URL.Path == "/repos/octo-org/lab-widget/contents/.github/workflows/ci.yml":
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": "file", "encoding": "base64", "name": "ci.yml",
+			"path": ".github/workflows/ci.yml", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"content": "Y2kK",
+		})
 	case r.URL.Path == "/repos/octo-org/lab-widget/rules/branches/main":
 		if f.branchStatus != 0 {
 			w.WriteHeader(f.branchStatus)
@@ -650,12 +684,21 @@ func (f *observationFake) serveToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad", http.StatusBadRequest)
 		return
 	}
-	if request.Permissions.Administration != "read" || request.Permissions.Metadata != "read" {
-		f.t.Errorf("observation requested permissions %#v", request.Permissions)
-	}
-	permissions := map[string]string{"administration": f.administration, "metadata": "read"}
-	if f.extraPermission != "" {
-		permissions[f.extraPermission] = "read"
+	var permissions map[string]string
+	switch {
+	case request.Permissions.Administration == "write" && request.Permissions.Metadata == "read" && request.Permissions.Contents == "":
+		permissions = map[string]string{"administration": "write", "metadata": "read"}
+	case request.Permissions.Contents == "write" && request.Permissions.Metadata == "read" && request.Permissions.Administration == "":
+		permissions = map[string]string{"contents": "write", "metadata": "read"}
+	case request.Permissions.Administration == "read" && request.Permissions.Metadata == "read" && request.Permissions.Contents == "":
+		permissions = map[string]string{"administration": f.administration, "metadata": "read"}
+		if f.extraPermission != "" {
+			permissions[f.extraPermission] = "read"
+		}
+	default:
+		f.t.Errorf("unexpected token permissions %#v", request.Permissions)
+		http.Error(w, "bad", http.StatusBadRequest)
+		return
 	}
 	id := f.repositoryID
 	if id == 0 {

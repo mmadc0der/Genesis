@@ -1,11 +1,13 @@
 # Repository declarations
 
 `repos.d/*.yaml` is desired GitHub repository state. Genesis loads it into
-the same immutable generation as agents and rules. Stage 4 observes an
-existing repository and plans semantic drift. It does not create a
-repository, change settings, mint an agent token, or write Actions,
-rulesets, secrets, environments, or webhooks. `remote_mutation` stays
-`none` and `applied` stays empty.
+the same immutable generation as agents and rules. A repos sync with a
+configured reconciler reads each `existing: adopt` repository and applies
+the declared shape below. `existing: refuse` makes no HTTP call. A failed
+apply keeps the previous listener generation. `remote_mutation` is
+`applied` only when this sync wrote at least one intent, and `applied`
+names only those intents (`kind:id`). Every other known intent stays
+unsupported with a concrete reason.
 
 Listener and control both take `-repos` (default `repos.d`). A missing
 directory leaves the layer inactive. The generation digest then stays the
@@ -85,7 +87,7 @@ and keeps the previous generation.
 | `lifecycle.remove` | `retain` only. `archive` and `delete` are rejected, so this file cannot express a destructive remote change. |
 | `lifecycle.existing` | `adopt` or `refuse`. `adopt` asks root to resolve that exact org and name. `refuse` is classified and does not call GitHub. |
 | `settings` | Visibility (`public` or `private`), optional description, default branch, and explicit feature and merge booleans. At least one merge method must be allowed. The default branch is a single git path segment: no slash, no `..`, no trailing dot, not `HEAD`, and not a name ending in `.lock`. |
-| `bootstrap.template` | Optional one-time template id (`lab-widget`). It is not a path, URL, or file body. Genesis does not read a template directory here. |
+| `bootstrap.template` | Optional template id (`lab-widget`). It is not a path, URL, or file body. Apply resolves it only to a Genesis-owned template directory shipped in this repository. |
 | `actions` | `enabled` plus `allowed`: `all`, `local_only`, or `selected`. `selected` requires action patterns: `owner/name`, optional subpaths, optional `@ref`, and `*` wildcards. Patterns forbid `..`, backslashes, spaces, and URLs. |
 | `secrets` | Optional repository secret names and named environments. Names match `^[A-Z][A-Z0-9_]{0,63}$`. There is no value field. |
 | `protection.ruleset` | Optional ruleset intent: name, 0–6 approving reviews, dismiss-stale, check contexts, and strict checks. A check context is one trimmed line of at most 255 characters. It may contain letters, digits, spaces, and `/_. :-(),+`. It cannot contain `..`, a leading `/`, a backslash, or a URL. Strict checks require at least one context. |
@@ -107,14 +109,13 @@ name ends in `.yaml` fails the load.
 reloads all three. A missing `repos.d` is a successful inactive reload. A
 symlink at that path is not missing: the load fails and the previous
 generation stays in place. `["repos"]` rereads only repository files. It
-does not reload agents or rules. The privileged call observes repositories
-and does not reconcile host users, so a dedicated-user edit that has not
-been synced stays inactive. Invalid YAML
-returns `500` `repositories are invalid` and leaves the previous generation
-in place.
+does not reload agents or rules. The privileged call applies the adopted repository shape, then re-reads
+it. It does not reconcile host users, so a dedicated-user edit that has
+not been synced stays inactive. Invalid YAML returns `500`
+`repositories are invalid` and leaves the previous generation in place.
 
-Host user reconcile is unchanged. A repos scope also asks the root
-coordinator to observe before any host or grant mutation. Agents-only and
+Host user reconcile is unchanged. A repos scope asks the root coordinator
+to apply and observe before any host or grant mutation. Agents-only and
 rules-only sync do not set that flag and do not call GitHub for repository
 state. The sync JSON adds:
 
@@ -124,9 +125,9 @@ state. The sync JSON adds:
   "repository_plan": {
     "requested": true,
     "active": true,
-    "remote_mutation": "none",
+    "remote_mutation": "applied",
     "observation": "observed",
-    "applied": [],
+    "applied": ["ensure_repository:example"],
     "intents": [],
     "observed": [],
     "drift": [],
@@ -135,7 +136,9 @@ state. The sync JSON adds:
 }
 ```
 
-Intent kinds, in order, are `ensure_repository`, `ensure_actions`,
+The arrays in that example are abbreviated. A real plan lists every intent
+and classifies each one as applied or unsupported. Intent kinds, in order,
+are `ensure_repository`, `ensure_actions`,
 `ensure_bootstrap`, `ensure_secrets`, `ensure_protection`,
 `ensure_identities`, and `retain_on_remove`. Missing optional blocks omit
 their intents.
@@ -242,17 +245,61 @@ Control reads the same files and serves `GET /api/repositories` and
 Invalid desired YAML still returns the active cache and `desired_error`.
 Drift is active versus last observation, not draft YAML versus GitHub.
 
-## Next mutation stage
+## Apply
 
-Stage 5, `ensure_repository_settings`, is not implemented. It would
-`PATCH /repos/{org}/{repo}` only for an already-adopted repository whose
-persisted id and node id still match. The patch body would be limited to
-`visibility`, `description`, `has_issues`, `has_wiki`, `has_projects`,
-`allow_squash_merge`, `allow_merge_commit`, `allow_rebase_merge`, and
-`delete_branch_on_merge`. It would still not create a repository, change
-the default branch, archive or unarchive, write Actions or rulesets, write
-secrets, environments, or webhooks, change deploy keys, or mint an agent
-token.
+Apply runs in the same repos sync as observation, using the root reconciler
+App, and only for `existing: adopt`. `existing: refuse` is classified and
+makes no HTTP call. The read-only observation above still journals the
+repository after a successful apply. It is not replaced.
+
+Settings, create, Actions, and rulesets use one installation token requested
+as exactly `administration: write` and `metadata: read`. Bootstrap contents
+calls use a second token requested as exactly `contents: write` and
+`metadata: read`. Any other returned permission set fails closed. The App
+installation therefore needs repository **Administration: write** and
+**Contents: write** (metadata is included with repository access). Logs,
+journals, API responses, and errors still contain no JWT, installation
+token, or PEM.
+
+For each adopted repository Genesis mints the administration token, then
+`GET /repos/{org}/{name}`:
+
+- GitHub `404` with no persisted binding creates the repository:
+  `POST /orgs/{org}/repos` with the declared name, visibility, description,
+  the matching `private` flag, and `auto_init: true`. Genesis re-mints,
+  re-reads, and binds `repository_id` and `node_id` with the same
+  fail-closed identity rules as observation. If the resulting default
+  branch name differs from the declaration, the sync fails closed. Genesis
+  does not rename, transfer, archive, unarchive, or delete.
+- A `404` for an id that is already bound does not create a replacement.
+- An existing repository keeps its binding. A different id, node id, owner,
+  or name fails closed. The default branch is not changed when it already
+  exists.
+
+After the identity check, Genesis reads Actions and rulesets with that same
+administration token before it writes:
+
+| Shape | Behavior |
+|---|---|
+| Settings | `PATCH /repos/{org}/{repo}` for visibility, description, issues, wiki, projects, allow_squash, allow_merge_commit, allow_rebase, and delete_branch_on_merge when any of those differ. The body does not include the default branch, the name, or archived. |
+| Actions | `PUT` enabled, allowed, and, when allowed is `selected`, the selected patterns. If SHA pinning is on, SHA pinning was not reported, selected actions are unknown, or the repository has GitHub-owned or verified allowances, Genesis does not overwrite Actions and fails the sync. The listener generation is not swapped. |
+| Protection | Create or update only the one declared repository ruleset: active enforcement, approving reviews, dismiss-stale, required checks, and strict checks, targeting `refs/heads/{current default branch}`. Extra rulesets are left in place. A ruleset with bypass actors, unmodeled rules, extra review requirements, or an unreported dismiss-stale value is not overwritten. If the ruleset list was unobservable, Genesis does not guess and does not create one. |
+| Bootstrap | Commit template files that are absent, on the current default branch, with the contents token. Existing files are never overwritten. The built-in `lab-widget` template ships `.github/workflows/ci.yml`, whose check name is `ci`, matching that template's `protection.required_checks`. A template id that is not shipped, or required checks the template does not provide, fails closed before any HTTP call. |
+
+`ensure_secrets`, `ensure_identities`, and `retain_on_remove` stay
+unsupported. This stage does not write secrets, environments, webhooks,
+deploy keys, or per-run App tokens, and it does not clone a workspace.
+An intent that was not written remains unsupported with a concrete reason,
+including "already matches" when no write was required.
+
+`remote_mutation` is `none` when this sync wrote nothing and `applied`
+when it wrote at least one intent. `applied` contains only `kind:id`
+values for intents actually written. A failed apply, including an unsafe
+Actions policy, an identity mismatch, a rename or transfer, a created
+default branch that differs from the declaration, or a desired-state
+change during the operation, returns an error and keeps the previous
+listener generation. The journal is still written only after the grant
+plan is confirmed inactive and the digest still matches.
 
 Provider identity files and agent-to-repository grants are specified in
 [providers.md](providers.md). Root launch can register an SSH deploy key

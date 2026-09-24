@@ -72,6 +72,7 @@ type githubAppBinding struct {
 
 type gitHubPermissions struct {
 	Administration string `json:"administration,omitempty"`
+	Contents       string `json:"contents,omitempty"`
 	Metadata       string `json:"metadata,omitempty"`
 }
 
@@ -399,6 +400,12 @@ func expectedTokenPermissions(requested gitHubPermissions) (map[string]string, e
 		}
 		want["administration"] = requested.Administration
 	}
+	if requested.Contents != "" {
+		if requested.Contents != "read" && requested.Contents != "write" {
+			return nil, githubErr("auth")
+		}
+		want["contents"] = requested.Contents
+	}
 	if len(want) == 0 {
 		return nil, githubErr("auth")
 	}
@@ -655,6 +662,9 @@ func formatRequestedPermissions(perms gitHubPermissions) string {
 	values := map[string]string{}
 	if perms.Administration != "" {
 		values["administration"] = perms.Administration
+	}
+	if perms.Contents != "" {
+		values["contents"] = perms.Contents
 	}
 	if perms.Metadata != "" {
 		values["metadata"] = perms.Metadata

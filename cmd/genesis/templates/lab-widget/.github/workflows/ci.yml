@@ -1,0 +1,11 @@
+name: ci
+on:
+  pull_request:
+  push:
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: ci
+        run: echo ci

@@ -182,11 +182,14 @@ describe("control panel model", () => {
         },
         drift: [{ id: "lab", field: "settings.visibility", desired: "private", observed: "public", status: "drift" }],
       }),
-    ).toBe("Last observation of active octo-org/lab-widget (4242). 1 drifting field. Nothing was changed.");
+    ).toBe("Last observation of active octo-org/lab-widget (4242). 1 drifting field.");
     expect(driftLine({ field: "settings.visibility", status: "drift", desired: "private", observed: "public" })).toContain(
       "private → public",
     );
     expect(repositorySyncNotice(200, JSON.stringify({ repository_plan: { remote_mutation: "applied", applied: ["ensure_repository:lab"] } }))).toContain(
+      "ensure_repository:lab",
+    );
+    expect(repositorySyncNotice(200, JSON.stringify({ repository_plan: { remote_mutation: "applied", applied: [] } }))).toContain(
       "did not confirm",
     );
     expect(repositorySyncNotice(200, "not-json")).toContain("not JSON");

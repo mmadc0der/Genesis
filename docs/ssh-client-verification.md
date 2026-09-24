@@ -15,10 +15,15 @@ in the last section. Do not `cat` `/var/lib/genesis/secrets` or
 
 `sh scripts/wsl-docker-ssh-check.sh` is only the no-credential smoke. It
 does not register a deploy key. The later sections use one disposable
-public organization repository and one reconciler App. A repos-only sync
-reads that repository and plans drift. It does not create the repository,
-change settings, rulesets, Actions, secrets, environments, or webhooks,
-register a deploy key, or give agents an App token.
+public organization repository and one reconciler App. A current repos
+sync creates a missing adopted repository and applies settings, Actions,
+the declared ruleset, and missing bootstrap files. The repos sections
+below were written when that sync only read and asserted `repo_unchanged`
+with `remote_mutation none`. Do not run them expecting GitHub settings to
+stay unchanged. They still do not register a deploy key, write secrets, or
+give agents an App token. Deploy-key registration is a later section.
+Bootstrap needs Contents write; this checklist's declaration has no
+template, so it does not request a contents token.
 
 ## 0. Placeholders
 
@@ -59,9 +64,10 @@ An organization repository that already exists is the expected target.
 Do not create a second repository, and do not push a commit, README, or
 branch. An empty repository has no commits, so `size` is `0`.
 `default_branch` may be `null` or `"main"`. Deploy-key registration does
-not read or apply `default_branch`. A repos-only sync reads it, records
-the value, and does not change it. The `default_branch: main` line in
-the declaration below is not applied.
+not read or apply `default_branch`. A repos sync does not rename the
+default branch of a repository that already exists. It does apply the
+other declared settings, including the description in the declaration
+below.
 
 Confirm the repository before creating an App. `gh` is the user login from
 `gh auth status`, and that user must be an organization owner. This prints
@@ -88,11 +94,14 @@ or its private key. As an owner of `$ORG`:
      unchecked.
    - Repository permission **Administration: Read and write**.
    - Repository permission **Metadata: Read-only** (GitHub requires this).
-   - No other repository or organization permissions. Do not grant Contents.
-     A minted token is rejected unless its permission set is exact:
+   - No other repository or organization permissions. Contents write is
+     required only when a declaration sets `bootstrap.template`. This
+     checklist's declaration does not, so do not grant Contents for this
+     probe. A minted token is rejected unless its permission set is exact:
      discovery is only `metadata: read`, repository observation is only
-     `administration: read` plus `metadata: read`, and the key token is
-     only `administration: write` plus `metadata: read`.
+     `administration: read` plus `metadata: read`, settings and Actions
+     use only `administration: write` plus `metadata: read`, and bootstrap
+     uses only `contents: write` plus `metadata: read`.
    - **Where can this GitHub App be installed?** Only on this account.
 2. On the App's settings page, choose **Generate a private key**. The
    browser downloads one RSA PEM. Do not open it. Move that download onto
@@ -327,13 +336,16 @@ curl -sf http://127.0.0.1:8790/api/repositories |
   python3 -c 'import json,sys; d=json.load(sys.stdin); one=next(item for item in d["repositories"] if item["id"]=="probe"); print(one.get("observation"), (one.get("observed") or {}).get("repository_id"), len(one.get("drift") or []))'
 ```
 
-Expected: both key lengths are `0`. `cmp` prints `repo_unchanged`. The
-sync is HTTP `200`. The script prints `observation observed`,
-`repository_remote_mutation none`, and a `repository_id` and `node_id`
-equal to `gh api /repos/$ORG/$REPO`. Drift lines are allowed when the
-empty repository does not already match the YAML, including a null
-`default_branch` against `main`. Those lines are the plan. GitHub must
-be unchanged. The journal prints `journal_version 1` and the same id
+This script is the observation-stage check. A current repos sync applies
+the declaration, so `repo_unchanged` and `repository_remote_mutation none`
+are not the contract. Do not run it against a live repository. When it
+was read-only, the expected evidence was: both key lengths are `0`. `cmp`
+prints `repo_unchanged`. The sync is HTTP `200`. The script prints
+`observation observed`, `repository_remote_mutation none`, and a
+`repository_id` and `node_id` equal to `gh api /repos/$ORG/$REPO`. Drift
+lines were allowed when the empty repository did not already match the
+YAML, including a null `default_branch` against `main`. The journal prints
+`journal_version 1` and the same id
 and node id, with no token marker. `stat` prints `600 65532`. The
 control line prints `observed`, the same repository id, and the drift
 count. A `500` body is `privileged coordination failed`. Do not continue
