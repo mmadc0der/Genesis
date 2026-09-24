@@ -290,9 +290,9 @@ suffixes.
 The embedded Python runner writes flushed NDJSON on stdout: `session.created`
 as soon as `start_session()` returns, then raw SDK `on_notification` frames,
 then exactly one `result`. Go stream-reads that pipe while the child runs,
-maps root-session turn/tool brackets into Genesis lifecycle CloudEvents, and
-appends them to `events.jsonl` before in-process fan-out. Those records are
-observations, not ingress: do not POST them back to `/events`.
+maps root-session trajectory notifications into Genesis lifecycle CloudEvents,
+and appends them to `events.jsonl` before in-process fan-out. Those records
+are observations, not ingress: do not POST them back to `/events`.
 
 ```
 <data>/runs/gen_<hex>/
@@ -303,13 +303,29 @@ observations, not ingress: do not POST them back to `/events`.
 ```
 
 Lifecycle types are `dev.genesis.run.accepted`, `start`, `session.created`,
-`turn`, `tool`, `result`, `error`, and `end`. Each event has a unique `evt_`
-id, a per-run `sequence`, `time`, run/agent/rule identity, optional
-`sessionid`, and causation (`causeid` / `causesource` / `causetype`) to the
-incoming CloudEvent. Turn and tool payloads keep a `raw` SDK notification
-without making SDK schema the domain vocabulary. There is no live token type:
-the pinned SDK does not deliver `assistant/chunk` or adapter `text-delta` on
-this pipe.
+`turn`, `tool`, `assistant`, `retry`, `chunk`, `result`, `error`, and `end`.
+Each event has a unique `evt_` id, a per-run `sequence`, `time`, run/agent/rule
+identity, optional `sessionid`, and causation (`causeid` / `causesource` /
+`causetype`) to the incoming CloudEvent. Turn, tool, assistant, retry, and
+chunk payloads keep a `raw` SDK notification. The same journal redactor runs
+before the line is appended. `assistant/message`, `assistant/attempt`, and
+`llm/retry` are journaled with turn and tool rows. `on_chunk` is journaled
+when the runtime forwards it. The control panel reads this file through
+`GET /api/runs/{id}/events` and the `/api/live` WebSocket; there is no second
+transport. A non-completed finish publishes the wrapper
+`DeepSeek run finished with finish_reason=…` error only when the journal has
+no `turn/end` failure object (`reason.error`).
+
+The per-run Cordis patch still disables `session-log-deepseek`. It also
+inserts `cmd/genesis/assistant_stream_plugin.mjs` by absolute path. On
+`deepseek-harness` `0.1.5rc1` that local file loads inside `dsh`. The plugin
+subscribes to Cordis `agent/assistant-stream` and writes JSON-RPC `on_chunk`
+on the same stdout as `session.event`. The frame is unchanged, plus
+`sessionId` copied from `agent.session.id` when the frame does not already
+have one, which is what the published Python client requires before it will
+deliver the notification. The pinned SDK does not emit `assistant/chunk`.
+`text-delta`, `reasoning-delta`, and `tool-call-delta` travel as `on_chunk`.
+`usage` and `finish` frames are stored and are not painted as tokens.
 
 Genesis emits JSON logs. The completion record contains `genesis_run_id`,
 `rule`, `agent`, `run_dir`, `deepseek_session_id`, `finish_reason`,

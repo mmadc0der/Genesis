@@ -4,7 +4,7 @@ import {
   applyPanelLoad,
   buildMessage,
   driftLabel,
-  eventLine,
+  activityLines,
   maxCursor,
   mergeEvents,
   mergeRuns,
@@ -400,18 +400,15 @@ export function App() {
               </div>
               <div class="transcript" ref={transcriptRef}>
                 {events.length === 0 ? <p class="empty">This run has no journal lines yet.</p> : null}
-                {events.map((item) => {
-                  const line = eventLine(item);
-                  return (
-                    <article key={`${item.sequence}-${item.id ?? item.type}`} class={`line line-${line.kind}`}>
-                      <header>
-                        <span>{line.kind}</span>
-                        <time>{item.time || ""}</time>
-                      </header>
-                      <p>{line.text}</p>
-                    </article>
-                  );
-                })}
+                {activityLines(events).map((line) => (
+                  <article key={line.key || line.text} class={`line line-${line.kind}`}>
+                    <header>
+                      <span>{line.kind}</span>
+                      <time>{line.time || ""}</time>
+                    </header>
+                    <p>{line.text}</p>
+                  </article>
+                ))}
               </div>
             </>
           ) : null}

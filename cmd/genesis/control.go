@@ -1010,11 +1010,21 @@ func summarizeRun(events []lifecycleEvent) runSummary {
 			}
 			_ = json.Unmarshal(event.Data, &payload)
 			summary.FinishReason = payload.FinishReason
+		case lifecycleTypeTurn:
+			if message, ok := journalTurnFailure(event.Data); ok {
+				if message == "" {
+					message = "turn/end recorded a provider failure"
+				}
+				summary.Error = message
+			}
 		case lifecycleTypeError:
 			var payload struct {
 				Message string `json:"message"`
 			}
 			_ = json.Unmarshal(event.Data, &payload)
+			if summary.Error != "" && isFinishWrapper(&runnerFailure{Message: payload.Message}) {
+				continue
+			}
 			summary.Error = payload.Message
 		case lifecycleTypeEnd:
 			summary.EndedAt = event.Time

@@ -218,9 +218,14 @@ export function maxCursor(events: LifecycleEvent[]): string {
 }
 
 export interface ChatLine {
-  kind: "result" | "error" | "turn" | "tool" | "meta";
+  kind: "result" | "error" | "turn" | "tool" | "meta" | "assistant" | "retry";
   text: string;
+  key?: string;
+  time?: string;
 }
+
+const PANEL_TEXT_CAP_BYTES = 16 * 1024;
+const textEncoder = new TextEncoder();
 
 export function eventLine(event: LifecycleEvent): ChatLine {
   const data = event.data ?? {};
@@ -230,12 +235,15 @@ export function eventLine(event: LifecycleEvent): ChatLine {
     case "dev.genesis.run.error":
       return { kind: "error", text: stringField(data, "message") || "error" };
     case "dev.genesis.run.turn":
-      return { kind: "turn", text: `Turn ${stringField(data, "phase") || "update"}` };
-    case "dev.genesis.run.tool": {
-      const name = stringField(data, "name");
-      const phase = stringField(data, "phase") || "update";
-      return { kind: "tool", text: name ? `Tool ${phase} ${name}` : `Tool ${phase}` };
-    }
+      return turnLine(data);
+    case "dev.genesis.run.tool":
+      return toolLine(data);
+    case "dev.genesis.run.assistant":
+      return { kind: "assistant", text: assistantText(data) };
+    case "dev.genesis.run.retry":
+      return { kind: "retry", text: retryText(data) };
+    case "dev.genesis.run.chunk":
+      return { kind: "assistant", text: chunkText(data) };
     case "dev.genesis.run.accepted":
       return { kind: "meta", text: `Accepted ${stringField(data, "event_type") || "event"}` };
     case "dev.genesis.run.start":
@@ -247,6 +255,311 @@ export function eventLine(event: LifecycleEvent): ChatLine {
     default:
       return { kind: "meta", text: event.type };
   }
+}
+
+interface OpenAssistant {
+  line: ChatLine;
+  reasoning: string;
+  body: string;
+  settled: boolean;
+  frozen: boolean;
+}
+
+interface OpenTool {
+  line: ChatLine;
+  name: string;
+  args: string;
+  settled: boolean;
+  frozen: boolean;
+}
+
+export function activityLines(events: LifecycleEvent[]): ChatLine[] {
+  const lines: ChatLine[] = [];
+  const assistants = new Map<string, OpenAssistant>();
+  const tools = new Map<string, OpenTool>();
+  let latestAttempt = "";
+
+  for (const event of events) {
+    const data = event.data ?? {};
+    if (event.type === "dev.genesis.run.chunk") {
+      applyChunk(event, data, lines, assistants, tools, (attemptId) => {
+        latestAttempt = attemptId;
+      });
+      continue;
+    }
+    if (event.type === "dev.genesis.run.assistant") {
+      const text = assistantText(data);
+      const open = latestAttempt ? assistants.get(latestAttempt) : undefined;
+      if (open && !open.settled && text) {
+        open.line.text = text;
+        open.line.time = event.time || open.line.time;
+        open.settled = true;
+        continue;
+      }
+      if (text) lines.push({ ...eventLine(event), key: event.sequence, time: event.time, text });
+      continue;
+    }
+    if (event.type === "dev.genesis.run.tool" && stringField(data, "phase") === "call") {
+      const name = toolName(data);
+      const args = toolArguments(data);
+      const open = findOpenTool(tools, name, args);
+      if (open) {
+        open.name = name || open.name;
+        open.args = args || open.args;
+        open.line.text = capPanelText([open.name, open.args].filter(Boolean).join("\n"));
+        open.line.time = event.time || open.line.time;
+        open.settled = true;
+        continue;
+      }
+    }
+    const line = eventLine(event);
+    if (!line.text) continue;
+    lines.push({ ...line, key: event.sequence, time: event.time });
+  }
+  return lines.filter((line) => line.text.trim() !== "");
+}
+
+function applyChunk(
+  event: LifecycleEvent,
+  data: Record<string, unknown>,
+  lines: ChatLine[],
+  assistants: Map<string, OpenAssistant>,
+  tools: Map<string, OpenTool>,
+  rememberAttempt: (attemptId: string) => void,
+): void {
+  const frame = chunkFrame(data);
+  if (!frame || frame.type !== "chunk") return;
+  const attemptId = typeof frame.attemptId === "string" ? frame.attemptId : "";
+  if (attemptId) rememberAttempt(attemptId);
+  const chunk = asRecord(frame.chunk);
+  if (!chunk) return;
+  if (chunk.type === "text-delta" || chunk.type === "reasoning-delta") {
+    const extra = typeof chunk.text === "string" ? chunk.text : "";
+    if (!extra) return;
+    let open = assistants.get(attemptId);
+    if (open?.settled) return;
+    if (!open) {
+      open = {
+        line: { key: `live-${attemptId || event.sequence}`, kind: "assistant", text: "", time: event.time },
+        reasoning: "",
+        body: "",
+        settled: false,
+        frozen: false,
+      };
+      assistants.set(attemptId, open);
+      lines.push(open.line);
+    }
+    if (open.frozen) return;
+    const appended = appendCapped(chunk.type === "reasoning-delta" ? open.reasoning : open.body, extra);
+    if (chunk.type === "reasoning-delta") open.reasoning = appended.text;
+    else open.body = appended.text;
+    open.frozen = appended.frozen;
+    open.line.text = capPanelText([open.reasoning, open.body].filter(Boolean).join("\n\n"));
+    return;
+  }
+  if (chunk.type === "tool-call-delta") {
+    const id = typeof chunk.id === "string" && chunk.id ? chunk.id : attemptId || event.sequence;
+    const key = `${attemptId}:${id}`;
+    let open = tools.get(key);
+    if (open?.settled) return;
+    if (!open) {
+      open = {
+        line: { key: `tool-${key}`, kind: "tool", text: "", time: event.time },
+        name: "",
+        args: "",
+        settled: false,
+        frozen: false,
+      };
+      tools.set(key, open);
+      lines.push(open.line);
+    }
+    if (typeof chunk.name === "string" && chunk.name) open.name = chunk.name;
+    if (open.frozen) {
+      open.line.text = capPanelText([open.name, open.args].filter(Boolean).join("\n"));
+      return;
+    }
+    const delta = typeof chunk.argumentsDelta === "string" ? chunk.argumentsDelta : "";
+    const appended = appendCapped(open.args, delta);
+    open.args = appended.text;
+    open.frozen = appended.frozen;
+    open.line.text = capPanelText([open.name, open.args].filter(Boolean).join("\n"));
+  }
+}
+
+function findOpenTool(tools: Map<string, OpenTool>, name: string, args: string): OpenTool | undefined {
+  for (const open of tools.values()) {
+    if (open.settled) continue;
+    if (name && open.name === name) return open;
+    if (open.args && args.startsWith(open.args)) return open;
+  }
+  return undefined;
+}
+
+function turnLine(data: Record<string, unknown>): ChatLine {
+  const failure = turnFailure(data);
+  if (!failure) return { kind: "turn", text: `Turn ${stringField(data, "phase") || "update"}` };
+  const parts = [failure.message, failure.code, failure.status].filter(Boolean);
+  return { kind: "error", text: parts.join("\n") || "Turn end" };
+}
+
+function toolLine(data: Record<string, unknown>): ChatLine {
+  const name = toolName(data);
+  const phase = stringField(data, "phase") || "update";
+  if (phase === "call") {
+    const args = toolArguments(data);
+    const text = [name, args].filter(Boolean).join("\n");
+    return { kind: "tool", text: args ? capPanelText(text) : text || "Tool call" };
+  }
+  if (phase === "result") {
+    const result = toolResultText(data);
+    const text = [name, result].filter(Boolean).join("\n");
+    return { kind: "tool", text: result ? capPanelText(text) : text || "Tool result" };
+  }
+  return { kind: "tool", text: name ? `Tool ${phase} ${name}` : `Tool ${phase}` };
+}
+
+function assistantText(data: Record<string, unknown>): string {
+  const pieces = assistantPieces(data);
+  return capPanelText([pieces.reasoning, pieces.text].filter(Boolean).join("\n\n"));
+}
+
+function retryText(data: Record<string, unknown>): string {
+  const body = sessionData(data);
+  const failure = asRecord(body?.failure);
+  const retry = body?.retry ?? data.retry;
+  const count = typeof retry === "number" && Number.isFinite(retry) ? String(retry) : "";
+  const code = typeof failure?.code === "string" ? failure.code : stringField(data, "code");
+  const message = typeof failure?.message === "string" ? failure.message : stringField(data, "message");
+  return ["retry", count, code, message].filter(Boolean).join(" ");
+}
+
+function chunkText(data: Record<string, unknown>): string {
+  const frame = chunkFrame(data);
+  const chunk = asRecord(frame?.chunk);
+  if (!chunk) return "";
+  if (chunk.type === "text-delta" || chunk.type === "reasoning-delta") {
+    return typeof chunk.text === "string" ? capPanelText(chunk.text) : "";
+  }
+  if (chunk.type === "tool-call-delta") {
+    const name = typeof chunk.name === "string" ? chunk.name : "";
+    const args = typeof chunk.argumentsDelta === "string" ? chunk.argumentsDelta : "";
+    return capPanelText([name, args].filter(Boolean).join("\n"));
+  }
+  return "";
+}
+
+function turnFailure(data: Record<string, unknown>): { message: string; code: string; status: string } | null {
+  const reason = asRecord(sessionData(data)?.reason);
+  if (reason?.kind === "error") {
+    const error = asRecord(reason.error);
+    if (error) {
+      return {
+        message: typeof error.message === "string" ? error.message : stringField(data, "error_message"),
+        code: typeof error.code === "string" ? error.code : stringField(data, "error_code"),
+        status: statusText(error.status ?? data.error_status),
+      };
+    }
+  }
+  if (data.turn_failure === true || stringField(data, "error_message") || stringField(data, "error_code")) {
+    return {
+      message: stringField(data, "error_message"),
+      code: stringField(data, "error_code"),
+      status: statusText(data.error_status),
+    };
+  }
+  return null;
+}
+
+function assistantPieces(data: Record<string, unknown>): { reasoning: string; text: string } {
+  const message = asRecord(sessionData(data)?.message);
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const reasoning: string[] = [];
+  const text: string[] = [];
+  for (const block of content) {
+    const record = asRecord(block);
+    if (!record || typeof record.text !== "string") continue;
+    if (record.type === "reasoning") reasoning.push(record.text);
+    if (record.type === "text") text.push(record.text);
+  }
+  return { reasoning: reasoning.join(""), text: text.join("") };
+}
+
+function toolName(data: Record<string, unknown>): string {
+  return stringField(data, "name") || stringField(sessionData(data) ?? {}, "name");
+}
+
+function toolArguments(data: Record<string, unknown>): string {
+  const args = sessionData(data)?.arguments ?? data.arguments;
+  if (typeof args === "string") return args;
+  if (args && typeof args === "object") return JSON.stringify(args);
+  return "";
+}
+
+function toolResultText(data: Record<string, unknown>): string {
+  const parts: string[] = [];
+  collectVisibleText(asRecord(sessionData(data)?.message)?.content, parts, 0);
+  return parts.join("");
+}
+
+function collectVisibleText(value: unknown, parts: string[], depth: number): void {
+  if (depth > 6 || value == null) return;
+  if (typeof value === "string") {
+    parts.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectVisibleText(item, parts, depth + 1);
+    return;
+  }
+  const record = asRecord(value);
+  if (!record) return;
+  if ((record.type === "text" || record.type === "reasoning") && typeof record.text === "string") {
+    parts.push(record.text);
+    return;
+  }
+  if (record.type === "tool-result" || "content" in record) collectVisibleText(record.content, parts, depth + 1);
+}
+
+function sessionData(data: Record<string, unknown>): Record<string, unknown> | null {
+  const raw = asRecord(data.raw);
+  const payload = asRecord(raw?.payload);
+  return asRecord(asRecord(payload?.event)?.data);
+}
+
+function chunkFrame(data: Record<string, unknown>): Record<string, unknown> | null {
+  const raw = asRecord(data.raw);
+  const payload = asRecord(raw?.payload);
+  if (payload && typeof payload.type === "string") return payload;
+  return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function statusText(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value) return value;
+  return "";
+}
+
+export function capPanelText(text: string): string {
+  const encoded = textEncoder.encode(text);
+  if (encoded.length <= PANEL_TEXT_CAP_BYTES) return text;
+  let decoded = new TextDecoder("utf-8", { fatal: false }).decode(encoded.slice(0, PANEL_TEXT_CAP_BYTES));
+  decoded = decoded.replace(/\uFFFD$/, "");
+  return `${decoded}\n… truncated`;
+}
+
+function appendCapped(current: string, extra: string): { text: string; frozen: boolean } {
+  if (!extra) return { text: current, frozen: false };
+  if (current.endsWith("\n… truncated") || textEncoder.encode(current).length >= PANEL_TEXT_CAP_BYTES) {
+    return { text: current, frozen: true };
+  }
+  const next = current + extra;
+  if (textEncoder.encode(next).length <= PANEL_TEXT_CAP_BYTES) return { text: next, frozen: false };
+  return { text: capPanelText(next), frozen: true };
 }
 
 export function buildMessage(input: {

@@ -107,6 +107,41 @@ class ErrorHarness(FakeHarness):
         )
 
 
+class TurnFailureHarness(ErrorHarness):
+    def complete(self, message, on_notification=None):
+        self.message = message
+        return SimpleNamespace(
+            session_id=self.session_id,
+            finish_reason="error",
+            final_response="",
+            events=[
+                {
+                    "type": "turn/end",
+                    "data": {
+                        "reason": {
+                            "kind": "error",
+                            "error": {
+                                "message": "bad key",
+                                "code": "AUTH",
+                                "status": 401,
+                            },
+                        }
+                    },
+                }
+            ],
+            notifications=[
+                SimpleNamespace(
+                    method="on_chunk",
+                    payload={
+                        "type": "chunk",
+                        "sessionId": self.session_id,
+                        "chunk": {"type": "text-delta", "text": "x"},
+                    },
+                )
+            ],
+        )
+
+
 class NotifyingHarness(FakeHarness):
     def complete(self, message, on_notification=None):
         self.message = message
@@ -260,7 +295,9 @@ class RunnerTests(unittest.TestCase):
         ):
             runner.execute(invocation, harness_factory=FakeHarness)
         harness = FakeHarness.instances[-1]
-        self.assertEqual(harness.environment["GITHUB_TOKEN"], "ghs_from_process_0123456789")
+        self.assertEqual(
+            harness.environment["GITHUB_TOKEN"], "ghs_from_process_0123456789"
+        )
         self.assertEqual(harness.environment["SSH_AUTH_SOCK"], "/tmp/run.sock")
         self.assertNotIn("GH_TOKEN", harness.environment)
         self.assertNotIn("ghs_from_invocation_0123456789", harness.environment.values())
@@ -328,6 +365,7 @@ class RunnerTests(unittest.TestCase):
         patch_path = Path(harness.kwargs["dsh_home"]) / "session-log-off.patch.yml"
         self.assertEqual(harness.kwargs["patches"], (str(patch_path),))
         self.assertTrue(harness.patch_existed)
+        plugin_path = Path(harness.kwargs["dsh_home"]) / "genesis-assistant-stream.mjs"
         self.assertEqual(
             harness.patch_contents,
             """\
@@ -335,9 +373,22 @@ class RunnerTests(unittest.TestCase):
   name: '@deepseek-ai/dsh-session-log-deepseek'
   config:
     enabled: false
-""",
+- insert:
+    - id: genesis-assistant-stream
+      name: """
+            + json.dumps(str(plugin_path))
+            + "\n",
         )
         self.assertTrue(patch_path.is_file())
+        self.assertEqual(
+            plugin_path.read_text(encoding="utf-8"), runner.ASSISTANT_STREAM_PLUGIN
+        )
+        source = (
+            Path(__file__)
+            .with_name("assistant_stream_plugin.mjs")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(source, runner.ASSISTANT_STREAM_PLUGIN)
 
     def test_execute_uses_supplied_dsh_home_and_start_session(self):
         created = []
@@ -410,6 +461,45 @@ class RunnerTests(unittest.TestCase):
         frames = [json.loads(line) for line in stdout.getvalue().splitlines()]
         self.assertEqual(frames[-1]["type"], "result")
         self.assertEqual(frames[-1]["error"]["type"], "DeepSeekRunError")
+
+    def test_turn_end_failure_omits_empty_response_wrapper(self):
+        result = runner.execute(
+            self.invocation(
+                event={
+                    "specversion": "1.0",
+                    "id": "event-turn-failure",
+                    "source": "urn:test",
+                    "type": "dev.genesis.test",
+                },
+                rule="error.yaml",
+                run_id="gen_turn_failure",
+                env={"DEEPSEEK_API_KEY": "test-key"},
+            ),
+            harness_factory=TurnFailureHarness,
+        )
+        self.assertEqual(result["finish_reason"], "error")
+        self.assertIsNone(result["error"])
+        self.assertEqual(
+            result["diagnostics"]["turn_end"]["data"]["reason"]["error"]["code"], "AUTH"
+        )
+        self.assertEqual(result["diagnostics"]["notifications"], [])
+        stdin = io.StringIO(json.dumps(self.invocation()))
+        stdout = io.StringIO()
+        original = runner.execute
+
+        def wrapped(invocation, harness_factory=None, **kwargs):
+            return original(invocation, harness_factory=TurnFailureHarness, **kwargs)
+
+        with (
+            mock.patch.object(sys, "stdin", stdin),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(runner, "execute", wrapped),
+        ):
+            status = runner.main()
+        self.assertEqual(status, 1)
+        frames = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertIsNone(frames[-1]["error"])
+        self.assertEqual(frames[-1]["finish_reason"], "error")
 
     def test_validation_rejects_non_string_environment_values(self):
         with self.assertRaisesRegex(TypeError, "env"):

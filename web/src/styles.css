@@ -123,8 +123,10 @@ button.row.selected, button.run:hover, button.row:hover { background: #222; }
 .line { padding: 0.45rem 0.8rem 0.55rem; border-bottom: 1px solid #1d1d1d; }
 .line header { display: flex; justify-content: space-between; color: #8d8d8d; font-size: 11px; text-transform: uppercase; }
 .line p { margin: 0.2rem 0 0; white-space: pre-wrap; }
-.line-result { background: #17191c; }
-.line-result p { color: #eee; }
+.line-result, .line-assistant { background: #17191c; }
+.line-result p, .line-assistant p { color: #eee; }
+.line-tool p { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.line-retry { color: #e0b15a; }
 .line-meta { color: #9a9a9a; }
 
 .drawer dl { display: grid; grid-template-columns: 4.5rem 1fr; gap: 0.25rem 0.4rem; margin: 0 0 0.8rem; }

@@ -162,8 +162,15 @@ the published binding is `127.0.0.1:8790`.
 
 ## What this does not do
 
-- No live token stream. The pinned SDK does not emit `assistant/chunk` on the
-  runner pipe. Chat text is the settled `result` line.
+- No second live bus. Trajectory rows come from `events.jsonl`: assistant
+  text, tool name plus arguments or result text, `turn/end` `reason.error`
+  message, code, and status, and `llm/retry` count, code, and message. Live
+  `on_chunk` deltas append onto the open assistant or tool row when the
+  runtime actually forwards them. `usage` and `finish` frames are not painted.
+  A displayed assistant body or tool result is capped at 16 KiB; the journal
+  line keeps the redacted frame up to the existing 16 MiB cap. The run-level
+  error stays the wrapper string only when no `turn/end` failure object was
+  journaled.
 - No database, SSE channel, or external broker.
 - No YAML form editor, charts, or component library.
 - No cancel, retry, queue, or run timeout.
