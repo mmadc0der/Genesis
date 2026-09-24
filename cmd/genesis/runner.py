@@ -11,11 +11,39 @@ from pathlib import Path
 from typing import Any
 
 # These rows are coupled to the pinned 0.1.5rc1 sdk-minimal profile.
-SESSION_LOG_OFF_PATCH = """\
+# The Python SDK has no retry constructor. dsh-llm-retry executes
+# retryPolicy on plugin id llm-deepseek (@deepseek-ai/dsh-llm-deepseek).
+# A Cordis id patch replaces that row's config wholesale, so the profile
+# fields are restated and only the retry budget changes.
+#
+# Before, when retryPolicy is omitted:
+#   mode normal, maxRetries 5, initialDelayMs 500, maxDelayMs 10000,
+#   jitterRatio 0.1, retryableCodes EMPTY_RESPONSE, RATE_LIMIT, SERVER,
+#   TIMEOUT, TRANSPORT.
+# After: maxRetries 10 and maxDelayMs 60000. The other policy fields stay
+# at those defaults, so TRANSPORT stays eligible. Normal mode still fails
+# the turn when the budget is exhausted, and llm/retry events still append.
+HARNESS_MAX_RETRIES = 10
+HARNESS_MAX_BACKOFF_MS = 60_000
+
+SESSION_LOG_OFF_PATCH = f"""\
 - id: session-log-deepseek
   name: '@deepseek-ai/dsh-session-log-deepseek'
   config:
     enabled: false
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    defaultContextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? 1000000)
+    streamIdleTimeoutMs: 172800000
+    retryPolicy:
+      mode: normal
+      maxRetries: {HARNESS_MAX_RETRIES}
+      backoff:
+        initialDelayMs: 500
+        maxDelayMs: {HARNESS_MAX_BACKOFF_MS}
+        jitterRatio: 0.1
 """
 
 ASSISTANT_STREAM_PLUGIN_NAME = "genesis-assistant-stream.mjs"
