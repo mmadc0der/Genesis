@@ -56,7 +56,7 @@ func containsPrivateKey(value string) bool {
 
 func droppedChildEnv(key string) bool {
 	switch key {
-	case sshAuthSockEnv, sshAgentPIDEnv, gitSSHEnv, gitSSHCommand:
+	case sshAuthSockEnv, sshAgentPIDEnv, gitSSHEnv, gitSSHCommand, githubTokenEnv, ghTokenEnv:
 		return true
 	default:
 		return false

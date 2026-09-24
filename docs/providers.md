@@ -148,8 +148,11 @@ secret references:
 }
 ```
 
-`credential_active` stays false. Sync does not deliver an App token,
-installation token, or `GH_TOKEN`. `key_material` on this HTTP plan stays
+`credential_active` on this HTTP plan stays false. Sync does not deliver
+an App token, installation token, or `GH_TOKEN`. A later dedicated run may
+mint one installation token; that flag is true only while the token is in
+the run process, and the sync body never reports it active. `key_material`
+on this HTTP plan stays
 `pending` or `none`, and `remote_registration` stays `unsupported` or
 `none` because those summary fields are the listener's classification.
 When launch is root, the coordinator may also return `material`: stable
@@ -288,12 +291,49 @@ The same App's repos sync now creates a missing adopted repository and
 applies settings, Actions, the declared ruleset, and missing bootstrap
 files. Bootstrap uses a second installation token, exactly
 `contents: write` and `metadata: read`, so the App also needs Contents
-write. Secrets, environments, webhooks, per-run App tokens, deletion, and
+write. Secrets, environments, webhook configuration, deletion, and
 rotation stay unsupported. App delivery ingress is separate from those
-repository webhook writes. See [webhooks.md](webhooks.md). The contract is
+repository webhook writes and does not mint a run token or check out a
+repository. See [webhooks.md](webhooks.md). The contract is
 [repositories.md](repositories.md). CI uses a local fake GitHub API. The
 manual probes in
 [wsl-readonly-observation.md](wsl-readonly-observation.md) and
 [ssh-client-verification.md](ssh-client-verification.md) were written when
 a repos sync only read. A current repos sync writes the adopted shape, so
 do not rerun them expecting GitHub to stay unchanged.
+
+## Per-run installation token and checkout
+
+Root keeps the deploy key it already registered and the per-run
+`SSH_AUTH_SOCK`. This stage does not register that key again, and it does
+not change repository create, apply, or webhook ingress.
+
+When a dedicated run's grant requires an API credential, root mints one
+installation token for that run only. The request permissions are exactly
+the permissions the grant already declares. GitHub must return that same
+set, scoped to the bound repository. Any other permission set, or any mint
+error, fails closed: the DeepSeek session does not start and the run is
+not reported as success. The token's lifetime ends with the run. Root
+removes it from the process environment when the run ends and does not
+write it to disk.
+
+The token is placed only in that run's process environment as
+`GITHUB_TOKEN`. It is not put in a remote URL, an invocation JSON field,
+`GH_TOKEN`, or the listener environment. Logs, journals, lifecycle events,
+control responses, `dsh_home`, and errors are redacted. A token that would
+not match that redaction is refused before the session starts.
+`credential_active` may be true only while that token is actually in the
+run process. The sync plan and the control panel keep it false. Public-read
+grants and `git: none` grants, which already use no credential, are
+unchanged and receive no token.
+
+If git access is `read` or `write` and the deploy-key socket is ready, root
+clones or fetches the bound `org/name` with that socket before the session
+starts. Clone runs only when the agent `cwd` is empty. If `cwd` is already
+that repository, root fetches. If `cwd` contains anything else, the run
+fails closed and the session does not start. `git: none` is not cloned.
+The remote is `git@github.com:org/name.git`. A failed checkout does not
+start the session.
+
+Tests mint against a fake token endpoint and check out a local git
+fixture. They do not use a live credential.

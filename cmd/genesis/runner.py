@@ -86,9 +86,26 @@ def execute(
 
     # Standing identity is DSH_SYSTEM_PROMPT (sdk-minimal personaPrefix hook).
     # The user message stays the compact CloudEvent JSON and is not prepended.
+    # GITHUB_TOKEN and SSH_AUTH_SOCK come only from the process environment
+    # that root set for this run. Invocation JSON cannot supply them.
+    delivered: dict[str, str] = {}
+    for key in ("SSH_AUTH_SOCK", "GITHUB_TOKEN"):
+        value = os.environ.get(key) or ""
+        if value:
+            delivered[key] = value
     environment = dict(invocation["env"])
+    for key in (
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "SSH_AUTH_SOCK",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "SSH_AGENT_PID",
+    ):
+        environment.pop(key, None)
     environment["HOME"] = invocation["home"]
     environment["DSH_SYSTEM_PROMPT"] = invocation["instructions"]
+    environment.update(delivered)
 
     message = json.dumps(
         invocation["event"],

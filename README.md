@@ -175,9 +175,11 @@ With that key, `existing: adopt` creates the repository when GitHub
 reports that it does not exist, binds its id, and applies visibility,
 description, features, merge settings, Actions, the declared ruleset, and
 missing bootstrap files. `existing: refuse` makes no HTTP call. `remote_mutation` is
-`applied` only for intents this sync wrote. Secrets, identities, webhooks,
-and per-run App tokens stay unsupported. The App needs Administration
-write and Contents write; bootstrap uses a separate contents token. Schema
+`applied` only for intents this sync wrote. Secrets, identities, and
+webhook configuration stay unsupported. A dedicated run can still mint its
+own short-lived installation token and check out the bound repository.
+The App needs Administration write and Contents write; bootstrap uses a
+separate contents token. Schema
 and fail-closed rules are in [docs/repositories.md](docs/repositories.md).
 
 ## Providers
@@ -205,8 +207,17 @@ that public key as a repository deploy key. The listener summary stays
 `pending` or `none`; the root result is `material.remote_status`. No socket
 is delivered until that status is `ready`, and a changed, removed, or refused
 grant drops the socket immediately. Public-read and `git: none`
-grants do not call GitHub. App tokens are not given to agents. Private
-keys, App JWTs, and installation tokens stay out of logs and APIs. See
+grants do not receive a token. A dedicated run whose grant requires an
+API credential receives one installation token as `GITHUB_TOKEN` for that
+process only. Root redacts it from logs, journals, events, the control
+API, `dsh_home`, and errors, and removes it when the run ends.
+`credential_active` is true only while that token is in the run process;
+sync and the panel keep it false. If git access is read or write and the
+deploy-key socket is ready, root clones into an empty `cwd` or fetches
+when `cwd` is already that repository, using `SSH_AUTH_SOCK` and never the
+token in the remote URL. Any other `cwd` contents, a failed mint, or a
+failed checkout does not start the session. Private keys, App JWTs, and
+installation tokens stay out of logs and APIs. See
 [docs/providers.md](docs/providers.md).
 
 The policy header looks like this. The complete file, including settings,

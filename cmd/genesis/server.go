@@ -76,6 +76,8 @@ type invocation struct {
 	Env          map[string]string `json:"env"`
 	RunDir       string            `json:"run_dir"`
 	DshHome      string            `json:"dsh_home"`
+	Git          string            `json:"-"`
+	Credential   string            `json:"-"`
 }
 
 type acceptedRun struct {
@@ -256,6 +258,15 @@ func snapshotInvocation(
 	runID string,
 	secrets map[string]string,
 ) invocation {
+	gitAccess := ""
+	credential := ""
+	if definition.GitHub != nil {
+		gitAccess = definition.GitHub.Git
+		credential = definition.credentialMode
+		if credential != credentialNone {
+			credential = credentialPending
+		}
+	}
 	return invocation{
 		Event:        event,
 		Rule:         matched.name,
@@ -266,6 +277,8 @@ func snapshotInvocation(
 		Home:         definition.Home,
 		Instructions: definition.Instructions,
 		Env:          runtimeEnvironment(definition, secrets),
+		Git:          gitAccess,
+		Credential:   credential,
 	}
 }
 
@@ -582,6 +595,8 @@ func reservedEnvKey(name string, dedicated bool) (string, bool) {
 			return "user", true
 		}
 		return "", false
+	case githubTokenEnv, ghTokenEnv:
+		return "the run installation token", true
 	default:
 		return "", false
 	}

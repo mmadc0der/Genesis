@@ -15,13 +15,14 @@ import (
 )
 
 type spawnRequest struct {
-	Agent   string            `json:"agent"`
-	User    string            `json:"user"`
-	Cwd     string            `json:"cwd"`
-	Home    string            `json:"home"`
-	RunDir  string            `json:"run_dir"`
-	DshHome string            `json:"dsh_home"`
-	Env     map[string]string `json:"env"`
+	Agent      string            `json:"agent"`
+	User       string            `json:"user"`
+	Cwd        string            `json:"cwd"`
+	Home       string            `json:"home"`
+	RunDir     string            `json:"run_dir"`
+	DshHome    string            `json:"dsh_home"`
+	Env        map[string]string `json:"env"`
+	NeedsToken bool              `json:"needs_token,omitempty"`
 }
 
 type spawnReply struct {
@@ -42,12 +43,15 @@ type privilegedSpawner interface {
 }
 
 type spawnedChild struct {
-	cmd     *exec.Cmd
-	done    chan struct{}
-	err     error
-	ssh     *runSSHAgent
-	agent   string
-	grantID string
+	cmd              *exec.Cmd
+	done             chan struct{}
+	err              error
+	ssh              *runSSHAgent
+	agent            string
+	grantID          string
+	dshHome          string
+	token            string
+	credentialActive bool
 }
 
 type privilegedState struct {
@@ -71,6 +75,11 @@ type privilegedState struct {
 	registrar    grantRegistrar
 	held         map[string]heldGrant
 	uidGrants    map[uint32]*uidGrantHold
+	tokens       runTokenMinter
+	active       map[string]grantRecord
+	gitRemote    func(org, repo string) (string, error)
+	gitBin       string
+	observeGit   func(env, args []string)
 }
 
 type uidGrantHold struct {
@@ -128,12 +137,22 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 	if err != nil {
 		return 0, err
 	}
+	token, err := s.prepareRun(req, identity, sshAgent)
+	if err != nil {
+		if sshAgent != nil {
+			sshAgent.stop()
+		}
+		return 0, redactTokenError(err, token)
+	}
 
 	command := exec.Command(s.pythonPath, "-c", s.source)
 	command.Dir = identity.Cwd
 	command.Env = spawnEnv(identity, req.Env)
 	if sshAgent != nil {
 		command.Env = appendAuthSock(command.Env, sshAgent.Socket())
+	}
+	if token != "" {
+		command.Env = appendOneEnv(command.Env, githubTokenEnv, token)
 	}
 	command.Stdin = stdin
 	command.Stdout = stdout
@@ -147,13 +166,21 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 	if os.Geteuid() == 0 || int(identity.UID) != os.Geteuid() || int(identity.GID) != os.Getegid() {
 		command.SysProcAttr.Credential = cred
 	}
+	child := &spawnedChild{
+		cmd: command, done: make(chan struct{}), ssh: sshAgent, agent: req.Agent, grantID: grantID, dshHome: req.DshHome,
+	}
 	if err := command.Start(); err != nil {
 		if sshAgent != nil {
 			sshAgent.stop()
+			child.ssh = nil
 		}
 		return 0, err
 	}
-	child := &spawnedChild{cmd: command, done: make(chan struct{}), ssh: sshAgent, agent: req.Agent, grantID: grantID}
+	if token != "" {
+		child.token = token
+		child.credentialActive = true
+		s.logCredential(req.Agent, true)
+	}
 	s.mu.Lock()
 	if s.spawned == nil {
 		s.spawned = map[int]*spawnedChild{}
@@ -183,9 +210,7 @@ func (s *privilegedState) wait(pid int) (int, error) {
 		return -1, fmt.Errorf("unknown spawned pid %d", pid)
 	}
 	<-child.done
-	if child.ssh != nil {
-		child.ssh.stop()
-	}
+	s.finishChild(child)
 	s.mu.Lock()
 	delete(s.spawned, pid)
 	s.mu.Unlock()
@@ -203,15 +228,13 @@ func (s *privilegedState) killAll() {
 	}
 	s.mu.Unlock()
 	for _, child := range children {
-		if child.ssh != nil {
-			child.ssh.stop()
-		}
 		if child.cmd != nil && child.cmd.Process != nil {
 			_ = child.cmd.Process.Kill()
 		}
 	}
 	for _, child := range children {
 		<-child.done
+		s.finishChild(child)
 	}
 	s.mu.Lock()
 	s.spawned = map[int]*spawnedChild{}

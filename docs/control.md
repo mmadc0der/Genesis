@@ -100,7 +100,10 @@ bodies are stripped of OpenSSH private-key blocks before they are served.
 A ready deploy key is reported on sync `material` and can be delivered as
 a per-run SSH socket. A changed or refused grant is not left deliverable.
 The panel does not show App ids, secret references,
-or private keys, and it does not treat an App token as active. See
+private keys, or a run's `GITHUB_TOKEN`. Sync `credential_active` stays
+false. That flag may be true only while root has delivered the token into
+the run process, and journals redact installation-token text before it is
+served. See
 [providers.md](providers.md).
 `sync_configured` and `syncing` are listener facts on `active` and
 `listener`; a file snapshot omits them.
