@@ -52,6 +52,8 @@ for privileged coordination. `-data` (default `genesis-data`) is the per-run
 journal root; an invalid path refuses to listen. Root `launch` also takes
 `-credentials` (default `genesis-credentials`) for SSH grant material and
 `-secrets` (default `genesis-secrets`) for the reconciler App private key.
+The App webhook secret is the sibling file `GITHUB_APP_WEBHOOK_SECRET`
+(mode `0600`). See [docs/webhooks.md](docs/webhooks.md).
 An
 empty `-sync-token` / `GENESIS_SYNC_TOKEN` disables `POST /sync` (`401`
 `sync is disabled`); set a token to activate filesystem edits. When `launch` runs as root it requires
@@ -258,7 +260,11 @@ the `202`:
 }
 ```
 
-No match returns `204`. Each accepted match snapshots the resolved agent into
+No match returns `204`. `POST /webhooks/github` is the GitHub App ingress
+described in [docs/webhooks.md](docs/webhooks.md). A verified delivery for a
+persisted repository becomes one CloudEvent on this same matcher.
+
+Each accepted match snapshots the resolved agent into
 its invocation. Each one-shot runner uses a Genesis-owned `dsh_home` under
 `-data/runs/<run_id>/`, invokes `provider="deepseek-official"`, model
 `deepseek-v4-flash`, and profile `sdk-minimal`, and **retains** that home

@@ -102,6 +102,10 @@ func runListen(logger *slog.Logger, args []string) {
 		coordinator: coordinator,
 		store:       store,
 	}
+	if ipcClient, ok := coordinator.(*ipcCoordinator); ok {
+		handler.verifyWebhook = ipcClient.VerifyWebhook
+		handler.repositoryBound = ipcClient.RepositoryBound
+	}
 	if err := handler.loadInitialGeneration(); err != nil {
 		fail(logger, "load agents, rules, and repositories", err)
 	}

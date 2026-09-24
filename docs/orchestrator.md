@@ -182,6 +182,9 @@ rules, repositories, digest, whether a sync token is configured, and whether
 a sync is in progress. `repositories_active` is false when `repos.d` is
 absent. Agent objects include optional `user` and `setup`. It does not
 return the token or any secret value. `POST /events` is unchanged.
+`POST /webhooks/github` verifies a GitHub App delivery with the root webhook
+secret and dispatches one CloudEvent through that same matcher. See
+[webhooks.md](webhooks.md).
 
 `genesis control` is a second process. It reads the config directories and
 the run journals, proxies CloudEvents and authorized sync to the listener,
