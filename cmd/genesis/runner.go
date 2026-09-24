@@ -42,13 +42,15 @@ type runnerFailure struct {
 }
 
 type streamState struct {
-	gotSession     bool
-	gotResult      bool
-	result         runnerResult
-	failed         bool
-	errorPublished bool
-	errorType      string
-	errorMsg       string
+	gotSession         bool
+	gotResult          bool
+	result             runnerResult
+	failed             bool
+	errorPublished     bool
+	errorType          string
+	errorMsg           string
+	turnEndFailure     bool
+	turnFailureMessage string
 }
 
 func (r processRunner) Run(document invocation) {
@@ -238,6 +240,15 @@ func (r processRunner) handleFrame(journal *runJournal, document invocation, lin
 		}
 		state.gotResult = true
 		state.result = frame.result()
+		if message, ok := diagnosticsTurnFailure(state.result.Diagnostics); ok {
+			state.turnEndFailure = true
+			if state.turnFailureMessage == "" {
+				state.turnFailureMessage = message
+			}
+		}
+		if state.turnEndFailure && isFinishWrapper(state.result.Error) {
+			state.result.Error = nil
+		}
 		if err := journal.Publish(lifecycleTypeResult, originPython, resultPayload(state.result)); err != nil {
 			r.recordStorageFailure(journal, state, r.logger, document.RunID, err)
 			state.failed = true
@@ -256,6 +267,14 @@ func (r processRunner) handleNotification(journal *runJournal, document invocati
 	eventType, origin, data, ok := mapSDKNotification(journal.session(), frame.Method, frame.Payload)
 	if !ok {
 		return
+	}
+	if eventType == lifecycleTypeTurn {
+		if message, failed := mappedTurnFailure(data); failed {
+			state.turnEndFailure = true
+			if message != "" {
+				state.turnFailureMessage = message
+			}
+		}
 	}
 	if err := journal.Publish(eventType, origin, data); err != nil {
 		r.recordStorageFailure(journal, state, r.logger, document.RunID, err)
@@ -279,25 +298,34 @@ func (r processRunner) finish(
 	if internalErr != nil && !state.gotResult {
 		result = runnerResult{}
 	}
-	if result.Error == nil &&
-		state.gotResult &&
-		(result.FinishReason == nil || *result.FinishReason != "completed") {
-		reason := "<missing>"
-		errorType := "DeepSeekRunIncomplete"
-		if result.FinishReason != nil {
-			reason = *result.FinishReason
-			if reason == "error" {
-				errorType = "DeepSeekRunError"
-			}
-		}
-		message := fmt.Sprintf("DeepSeek run finished with finish_reason=%q", reason)
-		if result.FinalResponse == nil || *result.FinalResponse == "" {
-			message += " and an empty final response"
-		}
-		result.Error = &runnerFailure{Type: errorType, Message: message}
+	if state.turnEndFailure && isFinishWrapper(result.Error) {
+		result.Error = nil
 	}
-	if processErr != nil && result.Error == nil {
+	incomplete := state.gotResult && (result.FinishReason == nil || *result.FinishReason != endStateCompleted)
+	if result.Error == nil && incomplete {
+		if state.turnEndFailure {
+			state.failed = true
+		} else {
+			reason := "<missing>"
+			errorType := "DeepSeekRunIncomplete"
+			if result.FinishReason != nil {
+				reason = *result.FinishReason
+				if reason == "error" {
+					errorType = "DeepSeekRunError"
+				}
+			}
+			message := fmt.Sprintf("DeepSeek run finished with finish_reason=%q", reason)
+			if result.FinalResponse == nil || *result.FinalResponse == "" {
+				message += " and an empty final response"
+			}
+			result.Error = &runnerFailure{Type: errorType, Message: message}
+		}
+	}
+	if processErr != nil && result.Error == nil && !state.turnEndFailure {
 		result.Error = &runnerFailure{Type: processErrorType, Message: processErr.Error()}
+	}
+	if processErr != nil && state.turnEndFailure {
+		state.failed = true
 	}
 	if !state.gotResult && internalErr == nil && processErr == nil {
 		state.failed = true
@@ -315,7 +343,8 @@ func (r processRunner) finish(
 		result.Error = &runnerFailure{Type: state.errorType, Message: state.errorMsg}
 	}
 
-	if !state.errorPublished && (state.failed || result.Error != nil) {
+	skipTurnWrapper := state.turnEndFailure && result.Error == nil && state.errorMsg == "" && internalErr == nil
+	if !state.errorPublished && !skipTurnWrapper && (state.failed || result.Error != nil) {
 		errorType := state.errorType
 		message := state.errorMsg
 		if result.Error != nil {
@@ -344,8 +373,15 @@ func (r processRunner) finish(
 	}
 
 	logErr := internalErr
-	if logErr == nil && !state.gotResult && processErr != nil {
+	if logErr == nil && !state.gotResult && processErr != nil && !state.turnEndFailure {
 		logErr = processErr
+	}
+	if result.Error == nil && state.turnEndFailure {
+		message := state.turnFailureMessage
+		if message == "" {
+			message = "turn/end recorded a provider failure"
+		}
+		result.Error = &runnerFailure{Type: "DeepSeekRunError", Message: message}
 	}
 	logged := result
 	if journal != nil && journal.redactor != nil {

@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-# This row and id are coupled to the pinned 0.1.5rc1 sdk-minimal profile.
+# These rows are coupled to the pinned 0.1.5rc1 sdk-minimal profile.
 SESSION_LOG_OFF_PATCH = """\
 - id: session-log-deepseek
   name: '@deepseek-ai/dsh-session-log-deepseek'
@@ -18,10 +18,92 @@ SESSION_LOG_OFF_PATCH = """\
     enabled: false
 """
 
+ASSISTANT_STREAM_PLUGIN_NAME = "genesis-assistant-stream.mjs"
+
+# Kept in lockstep with assistant_stream_plugin.mjs. The runner is executed
+# as `python -c`, so the child cannot read that file from the source tree.
+ASSISTANT_STREAM_PLUGIN = r"""/**
+ * Forward Cordis `agent/assistant-stream` frames as JSON-RPC `on_chunk`
+ * notifications on the stdout the SDK server already uses for `session.event`.
+ *
+ * AssistantStreamFrame has no sessionId. The published Python client only
+ * delivers notifications whose payload sessionId belongs to the running
+ * session, so this plugin copies `agent.session.id` when the frame itself
+ * does not already carry one. Every other frame field is left unchanged.
+ */
+export const name = 'genesis-assistant-stream'
+
+function sessionIdOf(agent) {
+  const session = agent && agent.session
+  if (!session) return ''
+  const id = session.id
+  if (typeof id === 'string') return id
+  if (typeof id === 'number' && Number.isFinite(id)) return String(id)
+  return ''
+}
+
+function writeFrame(frame, agent) {
+  if (!frame || typeof frame !== 'object') return
+  const params = { ...frame }
+  if (typeof params.sessionId !== 'string' || params.sessionId.length === 0) {
+    const sessionId = sessionIdOf(agent)
+    if (sessionId) params.sessionId = sessionId
+  }
+  process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'on_chunk', params })}\n`)
+}
+
+export function apply(ctx) {
+  if (!ctx || typeof ctx.on !== 'function') return
+  ctx.on('agent/assistant-stream', (payload) => {
+    try {
+      const body = payload || {}
+      writeFrame(body.frame, body.agent)
+    } catch {
+      // A tee must not fail the model turn.
+    }
+  })
+}
+"""
+
 MAX_STDOUT_FRAME_BYTES = 16 * 1024 * 1024
 SESSION_CREATED = "session.created"
 NOTIFICATION = "notification"
 RESULT = "result"
+
+
+def write_runtime_patch(home: Path) -> Path:
+    plugin_path = home / ASSISTANT_STREAM_PLUGIN_NAME
+    plugin_path.write_text(ASSISTANT_STREAM_PLUGIN, encoding="utf-8")
+    patch_path = home / "session-log-off.patch.yml"
+    plugin_name = json.dumps(str(plugin_path))
+    patch_path.write_text(
+        SESSION_LOG_OFF_PATCH
+        + "- insert:\n"
+        + "    - id: genesis-assistant-stream\n"
+        + f"      name: {plugin_name}\n",
+        encoding="utf-8",
+    )
+    return patch_path
+
+
+def has_turn_end_failure(result: Any) -> bool:
+    events = getattr(result, "events", None) or []
+    return any(
+        isinstance(event, dict)
+        and event.get("type") == "turn/end"
+        and _turn_end_failure(event)
+        for event in events
+    )
+
+
+def _turn_end_failure(event: Mapping[str, Any]) -> bool:
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return False
+    reason = data.get("reason")
+    if not isinstance(reason, dict) or reason.get("kind") != "error":
+        return False
+    return isinstance(reason.get("error"), dict)
 
 
 @contextmanager
@@ -122,8 +204,7 @@ def execute(
     if home_path.resolve() == Path(invocation["cwd"]).resolve():
         raise ValueError("dsh_home must be distinct from cwd")
 
-    patch_path = home_path / "session-log-off.patch.yml"
-    patch_path.write_text(SESSION_LOG_OFF_PATCH, encoding="utf-8")
+    patch_path = write_runtime_patch(home_path)
     with (
         complete_environment(environment),
         harness_factory(
@@ -147,18 +228,27 @@ def execute(
         error = None
         diagnostics = None
     else:
-        error_type = (
-            "DeepSeekRunError" if finish_reason == "error" else "DeepSeekRunIncomplete"
-        )
-        reason = repr(finish_reason)
-        empty_response = " with an empty final response" if not final_response else ""
-        error = {
-            "type": error_type,
-            "message": (
-                f"DeepSeek run finished with finish_reason={reason}{empty_response}"
-            ),
-        }
         diagnostics = extract_diagnostics(result)
+        # The panel reads turn/end reason.error from the journal. This wrapper
+        # is only the run-level error when that failure object was not recorded.
+        if has_turn_end_failure(result):
+            error = None
+        else:
+            error_type = (
+                "DeepSeekRunError"
+                if finish_reason == "error"
+                else "DeepSeekRunIncomplete"
+            )
+            reason = repr(finish_reason)
+            empty_response = (
+                " with an empty final response" if not final_response else ""
+            )
+            error = {
+                "type": error_type,
+                "message": (
+                    f"DeepSeek run finished with finish_reason={reason}{empty_response}"
+                ),
+            }
 
     return {
         "deepseek_session_id": result.session_id,
@@ -190,7 +280,9 @@ def extract_diagnostics(result: Any) -> dict[str, Any]:
     notifications = []
     for notification in getattr(result, "notifications", None) or []:
         method = getattr(notification, "method", None)
-        if method != "session.event":
+        # on_chunk is one line per token. The journal already stores those
+        # frames; copying them into the terminal result would blow the frame cap.
+        if method not in {"session.event", "on_chunk"}:
             notifications.append(
                 {
                     "method": method,
@@ -260,7 +352,9 @@ def main() -> int:
             on_session_created=on_session_created,
             on_notification=emit_notification,
         )
-        status = 0 if output["error"] is None else 1
+        finish = output.get("finish_reason")
+        failed = output["error"] is not None or finish not in (None, "completed")
+        status = 1 if failed else 0
     except Exception as error:  # noqa: BLE001 - return process errors to Go.
         output = {
             "deepseek_session_id": None,

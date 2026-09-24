@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,9 @@ const (
 	lifecycleTypeSessionCreated = "dev.genesis.run.session.created"
 	lifecycleTypeTurn           = "dev.genesis.run.turn"
 	lifecycleTypeTool           = "dev.genesis.run.tool"
+	lifecycleTypeAssistant      = "dev.genesis.run.assistant"
+	lifecycleTypeRetry          = "dev.genesis.run.retry"
+	lifecycleTypeChunk          = "dev.genesis.run.chunk"
 	lifecycleTypeResult         = "dev.genesis.run.result"
 	lifecycleTypeError          = "dev.genesis.run.error"
 	lifecycleTypeEnd            = "dev.genesis.run.end"
@@ -24,6 +28,7 @@ const (
 	originPython    = "python"
 	originSDKEvent  = "sdk.session.event"
 	originSDKStatus = "sdk.session.status"
+	originSDKChunk  = "sdk.on_chunk"
 	originSDKOther  = "sdk.other"
 
 	pythonFrameSessionCreated = "session.created"
@@ -122,6 +127,8 @@ func mapSDKNotification(sessionID, method string, payload json.RawMessage) (even
 	switch method {
 	case "session.event":
 		origin = originSDKEvent
+	case "on_chunk":
+		return mapOnChunk(sessionID, payload)
 	case "session.status":
 		return "", originSDKStatus, nil, false
 	default:
@@ -154,17 +161,74 @@ func mapSDKNotification(sessionID, method string, payload json.RawMessage) (even
 		return lifecycleTypeTurn, origin, turnPayload("start", sessionEvent, raw), true
 	case "turn/end":
 		body := turnPayload("end", sessionEvent, raw)
-		if kind := reasonKind(sessionEvent.Data); kind != "" {
+		if kind, failure, failed := reasonFailure(sessionEvent.Data); kind != "" {
 			body["reason_kind"] = kind
+			if failed {
+				body["turn_failure"] = true
+				if message, ok := failure["message"].(string); ok {
+					body["error_message"] = message
+				}
+				if code, ok := failure["code"].(string); ok {
+					body["error_code"] = code
+				}
+				if status, ok := jsonNumberInt(failure["status"]); ok {
+					body["error_status"] = status
+				}
+			}
 		}
 		return lifecycleTypeTurn, origin, body, true
 	case "tool/call":
 		return lifecycleTypeTool, origin, toolPayload("call", sessionEvent, raw), true
 	case "tool/result":
 		return lifecycleTypeTool, origin, toolPayload("result", sessionEvent, raw), true
+	case "assistant/message":
+		return lifecycleTypeAssistant, origin, assistantPayload("message", sessionEvent, raw), true
+	case "assistant/attempt":
+		return lifecycleTypeAssistant, origin, assistantPayload("attempt", sessionEvent, raw), true
+	case "llm/retry":
+		return lifecycleTypeRetry, origin, retryPayload(sessionEvent, raw), true
 	default:
 		return "", origin, nil, false
 	}
+}
+
+func mapOnChunk(sessionID string, payload json.RawMessage) (eventType, origin string, data map[string]any, ok bool) {
+	var frame map[string]any
+	if err := json.Unmarshal(payload, &frame); err != nil {
+		return "", originSDKChunk, nil, false
+	}
+	sid, _ := frame["sessionId"].(string)
+	if sessionID == "" || sid != sessionID {
+		return "", originSDKOther, nil, false
+	}
+	frameType, _ := frame["type"].(string)
+	switch frameType {
+	case "start", "chunk", "end":
+	default:
+		return "", originSDKChunk, nil, false
+	}
+	var decoded any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		decoded = json.RawMessage(payload)
+	}
+	body := map[string]any{
+		"frame": frameType,
+		"raw": map[string]any{
+			"method":  "on_chunk",
+			"payload": decoded,
+		},
+	}
+	if attempt, ok := frame["attemptId"].(string); ok && attempt != "" {
+		body["attempt_id"] = attempt
+	}
+	if frameType == "chunk" {
+		if chunk, ok := frame["chunk"].(map[string]any); ok {
+			if kind, ok := chunk["type"].(string); ok && kind != "" {
+				body["chunk_type"] = kind
+			}
+		}
+	}
+	return lifecycleTypeChunk, originSDKChunk, body, true
 }
 
 func turnPayload(phase string, event sdkSessionEvent, raw map[string]any) map[string]any {
@@ -191,7 +255,7 @@ func toolPayload(phase string, event sdkSessionEvent, raw map[string]any) map[st
 		if name, ok := data["name"].(string); ok && name != "" {
 			payload["name"] = name
 		}
-		for _, key := range []string{"toolCallId", "tool_call_id", "id"} {
+		for _, key := range []string{"callId", "toolCallId", "tool_call_id", "id"} {
 			if id, ok := data[key].(string); ok && id != "" {
 				payload["tool_call_id"] = id
 				break
@@ -221,14 +285,145 @@ func decodeSDKSeq(raw json.RawMessage) any {
 	return nil
 }
 
-func reasonKind(raw json.RawMessage) string {
+func assistantPayload(phase string, event sdkSessionEvent, raw map[string]any) map[string]any {
+	payload := map[string]any{
+		"phase": phase,
+		"raw":   raw,
+	}
+	if seq := decodeSDKSeq(event.Seq); seq != nil {
+		payload["sdk_seq"] = seq
+	}
+	return payload
+}
+
+func retryPayload(event sdkSessionEvent, raw map[string]any) map[string]any {
+	payload := map[string]any{"raw": raw}
+	if seq := decodeSDKSeq(event.Seq); seq != nil {
+		payload["sdk_seq"] = seq
+	}
+	var data map[string]any
+	if len(event.Data) == 0 || json.Unmarshal(event.Data, &data) != nil {
+		return payload
+	}
+	if retry, ok := jsonNumberInt(data["retry"]); ok {
+		payload["retry"] = retry
+	}
+	failure, _ := data["failure"].(map[string]any)
+	if failure == nil {
+		return payload
+	}
+	if message, ok := failure["message"].(string); ok {
+		payload["message"] = message
+	}
+	if code, ok := failure["code"].(string); ok {
+		payload["code"] = code
+	}
+	if status, ok := jsonNumberInt(failure["status"]); ok {
+		payload["status"] = status
+	}
+	return payload
+}
+
+func reasonFailure(raw json.RawMessage) (kind string, failure map[string]any, ok bool) {
 	var data map[string]any
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return ""
+		return "", nil, false
 	}
 	reason, _ := data["reason"].(map[string]any)
-	kind, _ := reason["kind"].(string)
-	return kind
+	if reason == nil {
+		return "", nil, false
+	}
+	kind, _ = reason["kind"].(string)
+	failure, _ = reason["error"].(map[string]any)
+	return kind, failure, kind == "error" && failure != nil
+}
+
+func jsonNumberInt(value any) (int, bool) {
+	switch typed := value.(type) {
+	case float64:
+		if typed != float64(int(typed)) {
+			return 0, false
+		}
+		return int(typed), true
+	case int:
+		return typed, true
+	case json.Number:
+		integer, err := typed.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(integer), true
+	default:
+		return 0, false
+	}
+}
+
+func journalTurnFailure(raw json.RawMessage) (string, bool) {
+	var data map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &data) != nil {
+		return "", false
+	}
+	return mappedTurnFailure(data)
+}
+
+func mappedTurnFailure(data map[string]any) (message string, ok bool) {
+	if data == nil {
+		return "", false
+	}
+	failed, _ := data["turn_failure"].(bool)
+	if !failed {
+		return "", false
+	}
+	message, _ = data["error_message"].(string)
+	return message, true
+}
+
+func diagnosticsTurnFailure(diagnostics any) (string, bool) {
+	root, ok := diagnostics.(map[string]any)
+	if !ok || root == nil {
+		return "", false
+	}
+	if message, found := turnEndFailureMessage(root["turn_end"]); found {
+		return message, true
+	}
+	events, _ := root["events"].([]any)
+	for index := len(events) - 1; index >= 0; index-- {
+		if message, found := turnEndFailureMessage(events[index]); found {
+			return message, true
+		}
+	}
+	return "", false
+}
+
+func turnEndFailureMessage(value any) (string, bool) {
+	event, ok := value.(map[string]any)
+	if !ok || event == nil {
+		return "", false
+	}
+	if eventType, _ := event["type"].(string); eventType != "" && eventType != "turn/end" {
+		return "", false
+	}
+	data, _ := event["data"].(map[string]any)
+	reason, _ := data["reason"].(map[string]any)
+	if reason == nil {
+		return "", false
+	}
+	if kind, _ := reason["kind"].(string); kind != "error" {
+		return "", false
+	}
+	failure, ok := reason["error"].(map[string]any)
+	if !ok || failure == nil {
+		return "", false
+	}
+	message, _ := failure["message"].(string)
+	return message, true
+}
+
+func isFinishWrapper(err *runnerFailure) bool {
+	if err == nil || err.Message == "" {
+		return false
+	}
+	return strings.Contains(err.Message, "DeepSeek run finished with finish_reason=")
 }
 
 func resultPayload(result runnerResult) map[string]any {

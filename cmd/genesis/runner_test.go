@@ -411,19 +411,109 @@ printf '%s\n' 'this is not json'
 	})
 }
 
-func TestMapperIgnoresAssistantMessageAsDomainTurn(t *testing.T) {
-	eventType, origin, _, ok := mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+func TestMapperAcceptsTrajectoryEvents(t *testing.T) {
+	eventType, origin, data, ok := mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
-		"event":{"type":"assistant/message","seq":9,"data":{"text":"hello"}}
+		"event":{"type":"assistant/message","seq":9,"data":{"message":{"content":[{"type":"text","text":"hello"}]}}}
 	}`))
-	if ok || eventType != "" {
-		t.Fatalf("assistant/message became domain event type=%q origin=%q", eventType, origin)
+	if !ok || eventType != lifecycleTypeAssistant || origin != originSDKEvent {
+		t.Fatalf("assistant/message mapping = type %q origin %q ok %v", eventType, origin, ok)
 	}
-	if origin != originSDKEvent {
-		t.Fatalf("origin = %q", origin)
+	if data["phase"] != "message" {
+		t.Fatalf("assistant payload = %#v", data)
+	}
+	raw, _ := data["raw"].(map[string]any)
+	payload, _ := raw["payload"].(map[string]any)
+	sessionEvent, _ := payload["event"].(map[string]any)
+	messageData, _ := sessionEvent["data"].(map[string]any)
+	message, _ := messageData["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	block, _ := content[0].(map[string]any)
+	if block["text"] != "hello" {
+		t.Fatalf("assistant text = %#v", messageData)
 	}
 
-	eventType, origin, data, ok := mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	eventType, origin, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+		"sessionId":"session-1",
+		"event":{"type":"assistant/attempt","seq":8,"data":{"stream":[]}}
+	}`))
+	if !ok || eventType != lifecycleTypeAssistant || data["phase"] != "attempt" {
+		t.Fatalf("assistant/attempt mapping = type %q phase %v ok %v", eventType, data["phase"], ok)
+	}
+
+	eventType, origin, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+		"sessionId":"session-1",
+		"event":{"type":"tool/call","seq":5,"data":{"callId":"c1","name":"bash","arguments":"{\"command\":\"pwd\"}"}}
+	}`))
+	if !ok || eventType != lifecycleTypeTool || origin != originSDKEvent {
+		t.Fatalf("tool/call mapping = type %q origin %q ok %v", eventType, origin, ok)
+	}
+	if data["name"] != "bash" || data["tool_call_id"] != "c1" {
+		t.Fatalf("tool payload = %#v", data)
+	}
+	raw, _ = data["raw"].(map[string]any)
+	payload, _ = raw["payload"].(map[string]any)
+	sessionEvent, _ = payload["event"].(map[string]any)
+	toolData, _ := sessionEvent["data"].(map[string]any)
+	if toolData["arguments"] != `{"command":"pwd"}` {
+		t.Fatalf("tool arguments = %#v", toolData)
+	}
+
+	eventType, _, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+		"sessionId":"session-1",
+		"event":{"type":"turn/end","seq":6,"data":{"reason":{"kind":"error","error":{"message":"bad key","code":"AUTH","status":401}}}}
+	}`))
+	if !ok || eventType != lifecycleTypeTurn || data["reason_kind"] != "error" || data["turn_failure"] != true {
+		t.Fatalf("turn/end mapping = type %q data %#v ok %v", eventType, data, ok)
+	}
+	if data["error_message"] != "bad key" || data["error_code"] != "AUTH" || data["error_status"] != 401 {
+		t.Fatalf("turn failure fields = %#v", data)
+	}
+
+	eventType, origin, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+		"sessionId":"session-1",
+		"event":{"type":"llm/retry","seq":3,"data":{"retry":2,"failure":{"message":"slow down","code":"RATE_LIMIT","status":429}}}
+	}`))
+	if !ok || eventType != lifecycleTypeRetry || origin != originSDKEvent {
+		t.Fatalf("llm/retry mapping = type %q origin %q ok %v", eventType, origin, ok)
+	}
+	if data["retry"] != 2 || data["code"] != "RATE_LIMIT" || data["message"] != "slow down" || data["status"] != 429 {
+		t.Fatalf("retry payload = %#v", data)
+	}
+
+	eventType, origin, data, ok = mapSDKNotification("session-1", "on_chunk", json.RawMessage(`{
+		"type":"chunk",
+		"attemptId":"a1",
+		"sessionId":"session-1",
+		"chunk":{"type":"text-delta","index":0,"text":"hello"}
+	}`))
+	if !ok || eventType != lifecycleTypeChunk || origin != originSDKChunk {
+		t.Fatalf("on_chunk mapping = type %q origin %q ok %v", eventType, origin, ok)
+	}
+	if data["frame"] != "chunk" || data["chunk_type"] != "text-delta" || data["attempt_id"] != "a1" {
+		t.Fatalf("chunk payload = %#v", data)
+	}
+	raw, _ = data["raw"].(map[string]any)
+	chunkPayload, _ := raw["payload"].(map[string]any)
+	chunk, _ := chunkPayload["chunk"].(map[string]any)
+	if chunk["text"] != "hello" {
+		t.Fatalf("chunk text = %#v", chunkPayload)
+	}
+
+	_, origin, _, ok = mapSDKNotification("session-1", "on_chunk", json.RawMessage(`{"type":"chunk","chunk":{"type":"usage","usage":{}}}`))
+	if ok || origin != originSDKOther {
+		t.Fatalf("chunk without session mapping ok=%v origin=%q", ok, origin)
+	}
+
+	eventType, origin, _, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+		"sessionId":"session-1",
+		"event":{"type":"user/message","seq":1,"data":{}}
+	}`))
+	if ok || eventType != "" || origin != originSDKEvent {
+		t.Fatalf("user/message mapping = type %q origin %q ok %v", eventType, origin, ok)
+	}
+
+	eventType, origin, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
 		"event":{"type":"turn/start","seq":1,"data":{}}
 	}`))
@@ -433,7 +523,7 @@ func TestMapperIgnoresAssistantMessageAsDomainTurn(t *testing.T) {
 	if data["phase"] != "start" {
 		t.Fatalf("payload = %#v", data)
 	}
-	raw, _ := data["raw"].(map[string]any)
+	raw, _ = data["raw"].(map[string]any)
 	if raw["method"] != "session.event" {
 		t.Fatalf("raw = %#v", raw)
 	}
@@ -453,6 +543,93 @@ func TestMapperIgnoresAssistantMessageAsDomainTurn(t *testing.T) {
 	if ok || origin != originSDKOther {
 		t.Fatalf("foreign session mapping ok=%v origin=%q", ok, origin)
 	}
+}
+
+func TestTurnEndFailureSkipsWrapperError(t *testing.T) {
+	dir := t.TempDir()
+	frames := filepath.Join(dir, "frames")
+	body := strings.Join([]string{
+		`{"v":1,"type":"session.created","run_id":"gen_traj","session_id":"session-1"}`,
+		`{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"session-1","event":{"type":"assistant/message","seq":4,"data":{"message":{"role":"assistant","content":[{"type":"reasoning","text":"look"},{"type":"text","text":"bench is clean ghp_abcdefghijklmnopqrstuvwxyz"}]}}}}}`,
+		`{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"session-1","event":{"type":"tool/call","seq":5,"data":{"callId":"c1","name":"bash","arguments":"{\"command\":\"pwd\"}"}}}}`,
+		`{"v":1,"type":"notification","method":"on_chunk","payload":{"type":"chunk","attemptId":"a1","sessionId":"session-1","revision":1,"index":0,"chunk":{"type":"text-delta","index":0,"text":"bench"}}}`,
+		`{"v":1,"type":"notification","method":"on_chunk","payload":{"type":"chunk","attemptId":"a1","sessionId":"session-1","chunk":{"type":"usage","usage":{"inputTokens":1,"outputTokens":1}}}}`,
+		`{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"session-1","event":{"type":"llm/retry","seq":3,"data":{"retry":1,"failure":{"message":"slow down","code":"RATE_LIMIT"}}}}}`,
+		`{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"session-1","event":{"type":"turn/end","seq":6,"data":{"reason":{"kind":"error","error":{"message":"bad key","code":"AUTH","status":401}}}}}}`,
+		`{"v":1,"type":"result","deepseek_session_id":"session-1","finish_reason":"error","final_response":"","error":{"type":"DeepSeekRunError","message":"DeepSeek run finished with finish_reason='error' and an empty final response"},"diagnostics":{"turn_end":{"type":"turn/end","data":{"reason":{"kind":"error","error":{"message":"bad key","code":"AUTH","status":401}}}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(frames, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakePython := writeExecutable(t, "#!/bin/sh\ncat >/dev/null\ncat "+frames+"\nexit 1\n")
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	store := newRunStore(t.TempDir(), newEventBus(), logger)
+	document := sampleRunInvocation("gen_traj")
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	processRunner{pythonPath: fakePython, source: "src", logger: logger, store: store}.Run(document)
+	events := readRunEvents(t, store, document.RunID)
+	assertEventTypes(t, events, []string{
+		lifecycleTypeAccepted,
+		lifecycleTypeStart,
+		lifecycleTypeSessionCreated,
+		lifecycleTypeAssistant,
+		lifecycleTypeTool,
+		lifecycleTypeChunk,
+		lifecycleTypeChunk,
+		lifecycleTypeRetry,
+		lifecycleTypeTurn,
+		lifecycleTypeResult,
+		lifecycleTypeEnd,
+	})
+	joined := string(mustReadEvents(t, store, document.RunID))
+	if strings.Contains(joined, "ghp_abcdefghijklmnopqrstuvwxyz") {
+		t.Fatal("journal kept a GitHub token")
+	}
+	if !strings.Contains(joined, redactedSecret) {
+		t.Fatal("journal did not redact the assistant text")
+	}
+	if strings.Contains(joined, "empty final response") {
+		t.Fatal("wrapper replaced the turn/end failure")
+	}
+	var turn map[string]any
+	if err := json.Unmarshal(events[8].Data, &turn); err != nil {
+		t.Fatal(err)
+	}
+	if turn["error_message"] != "bad key" || turn["error_code"] != "AUTH" || turn["error_status"] != float64(401) {
+		t.Fatalf("turn data = %#v", turn)
+	}
+	var chunk map[string]any
+	if err := json.Unmarshal(events[5].Data, &chunk); err != nil {
+		t.Fatal(err)
+	}
+	if chunk["chunk_type"] != "text-delta" {
+		t.Fatalf("chunk = %#v", chunk)
+	}
+	var usage map[string]any
+	if err := json.Unmarshal(events[6].Data, &usage); err != nil {
+		t.Fatal(err)
+	}
+	if usage["chunk_type"] != "usage" {
+		t.Fatalf("usage chunk = %#v", usage)
+	}
+	var end map[string]any
+	if err := json.Unmarshal(events[len(events)-1].Data, &end); err != nil {
+		t.Fatal(err)
+	}
+	if end["state"] != endStateFailed {
+		t.Fatalf("end = %#v", end)
+	}
+}
+
+func mustReadEvents(t *testing.T, store *runStore, runID string) []byte {
+	t.Helper()
+	payload, err := os.ReadFile(filepath.Join(store.dataDir, runsDirName, runID, eventsFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }
 
 func TestPrepareDataDirRejectsFile(t *testing.T) {

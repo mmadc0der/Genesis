@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyPanelLoad, buildMessage, driftLabel, driftLine, eventLine, githubGrantSummary, maxCursor, mergeEvents, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
+import { activityLines, applyPanelLoad, buildMessage, driftLabel, driftLine, eventLine, githubGrantSummary, maxCursor, mergeEvents, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
 import type { Agent, ControlState, LifecycleEvent, Repository, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
@@ -37,8 +37,230 @@ describe("control panel model", () => {
         raw: { method: "session.event", payload: { event: { type: "assistant/message", text: "hidden stream" } } },
       }),
     );
-    expect(raw.text).toBe("Tool call read");
+    expect(raw.text).toBe("read");
     expect(raw.text).not.toContain("hidden stream");
+    expect(raw.text).not.toBe("Tool call");
+  });
+
+  it("shows assistant text, a bash command, turn errors, and retries", () => {
+    const assistant = eventLine(
+      event("6", "dev.genesis.run.assistant", {
+        phase: "message",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "assistant/message",
+              data: {
+                message: {
+                  content: [
+                    { type: "reasoning", text: "look at the tree" },
+                    { type: "text", text: "the bench is clean" },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(assistant.text).toContain("look at the tree");
+    expect(assistant.text).toContain("the bench is clean");
+    expect(assistant.text).not.toBe("Tool call");
+
+    const tool = eventLine(
+      event("7", "dev.genesis.run.tool", {
+        phase: "call",
+        name: "bash",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "tool/call",
+              data: { name: "bash", callId: "c1", arguments: '{"command":"pwd"}' },
+            },
+          },
+        },
+      }),
+    );
+    expect(tool.text).toContain("bash");
+    expect(tool.text).toContain("pwd");
+    expect(tool.text).not.toBe("Tool call");
+
+    const result = eventLine(
+      event("8", "dev.genesis.run.tool", {
+        phase: "result",
+        name: "bash",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "tool/result",
+              data: {
+                name: "bash",
+                message: { content: [{ type: "tool-result", content: [{ type: "text", text: "total 1" }] }] },
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(result.text).toContain("bash");
+    expect(result.text).toContain("total 1");
+
+    const failure = eventLine(
+      event("9", "dev.genesis.run.turn", {
+        phase: "end",
+        reason_kind: "error",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "turn/end",
+              data: { reason: { kind: "error", error: { message: "bad key", code: "AUTH", status: 401 } } },
+            },
+          },
+        },
+      }),
+    );
+    expect(failure.kind).toBe("error");
+    expect(failure.text).toContain("bad key");
+    expect(failure.text).toContain("AUTH");
+    expect(failure.text).toContain("401");
+    expect(failure.text).not.toContain("empty final response");
+    expect(failure.text).not.toBe("Turn end");
+
+    const retry = eventLine(
+      event("10", "dev.genesis.run.retry", {
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "llm/retry",
+              data: { retry: 2, failure: { code: "RATE_LIMIT", message: "slow down" } },
+            },
+          },
+        },
+      }),
+    );
+    expect(retry.text).toContain("retry");
+    expect(retry.text).toContain("2");
+    expect(retry.text).toContain("RATE_LIMIT");
+    expect(retry.text).toContain("slow down");
+  });
+
+  it("appends live deltas onto the open row and does not paint usage or finish", () => {
+    const lines = activityLines([
+      event("1", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: { type: "chunk", attemptId: "a1", chunk: { type: "text-delta", index: 0, text: "hello " } },
+        },
+      }),
+      event("2", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: { type: "chunk", attemptId: "a1", chunk: { type: "reasoning-delta", index: 0, text: "thinking" } },
+        },
+      }),
+      event("3", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: { type: "chunk", attemptId: "a1", chunk: { type: "text-delta", index: 1, text: "bench" } },
+        },
+      }),
+      event("4", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: {
+            type: "chunk",
+            attemptId: "a1",
+            chunk: { type: "usage", usage: { inputTokens: 3, outputTokens: 4 } },
+          },
+        },
+      }),
+      event("5", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: {
+            type: "chunk",
+            attemptId: "a1",
+            chunk: { type: "tool-call-delta", index: 1, id: "c1", name: "bash", argumentsDelta: '{"command":"pw' },
+          },
+        },
+      }),
+      event("6", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: {
+            type: "chunk",
+            attemptId: "a1",
+            chunk: { type: "tool-call-delta", index: 1, id: "c1", argumentsDelta: 'd"}' },
+          },
+        },
+      }),
+      event("7", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: { type: "chunk", attemptId: "a1", chunk: { type: "finish", reason: { kind: "tool-calls" } } },
+        },
+      }),
+      event("8", "dev.genesis.run.assistant", {
+        phase: "message",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "assistant/message",
+              data: {
+                message: {
+                  content: [
+                    { type: "reasoning", text: "thinking" },
+                    { type: "text", text: "hello bench" },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      }),
+      event("9", "dev.genesis.run.tool", {
+        phase: "call",
+        name: "bash",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: { type: "tool/call", data: { name: "bash", arguments: '{"command":"pwd"}' } },
+          },
+        },
+      }),
+    ]);
+    const assistant = lines.find((line) => line.kind === "assistant");
+    const tool = lines.find((line) => line.kind === "tool");
+    expect(assistant?.text).toContain("thinking");
+    expect(assistant?.text).toContain("hello bench");
+    expect(assistant?.text).not.toContain("hello hello");
+    expect(tool?.text).toContain("bash");
+    expect(tool?.text).toContain("pwd");
+    expect(lines.some((line) => line.text === "Tool call")).toBe(false);
+    expect(lines.some((line) => line.text.includes("inputTokens"))).toBe(false);
+    expect(lines.some((line) => line.text.includes("tool-calls"))).toBe(false);
+
+    const huge = eventLine(
+      event("11", "dev.genesis.run.assistant", {
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "assistant/message",
+              data: { message: { content: [{ type: "text", text: "x".repeat(20 * 1024) }] } },
+            },
+          },
+        },
+      }),
+    );
+    expect(huge.text.endsWith("\n… truncated")).toBe(true);
+    expect(new TextEncoder().encode(huge.text.split("\n… truncated")[0]).length).toBeLessThanOrEqual(16 * 1024);
   });
 
   it("builds a message for a selected rule without a bearer token", () => {
