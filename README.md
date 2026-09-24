@@ -278,7 +278,7 @@ persisted repository becomes one CloudEvent on this same matcher.
 Each accepted match snapshots the resolved agent into
 its invocation. Each one-shot runner uses a Genesis-owned `dsh_home` under
 `-data/runs/<run_id>/`, invokes `provider="deepseek-official"`, model
-`deepseek-v4.1-flash`, and profile `sdk-minimal`, and **retains** that home
+`deepseek-flash`, and profile `sdk-minimal`, and **retains** that home
 (including DeepSeek session JSONL) after the child exits. `dsh_home` is not
 the agent `home`. The compact JSON serialization of the complete CloudEvent is
 the sole session user message. Instructions are standing identity, not
