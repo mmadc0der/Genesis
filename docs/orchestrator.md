@@ -135,8 +135,10 @@ chown paths under `/tmp`, `/opt`, or other unmanaged trees.
 Allowlisted setup today: `workspace` (`private` / `shared-read` /
 `shared-write`) and existing supplementary `groups` (not `root`/`sudo`/other
 reserved groups). The shell is always `/bin/bash`. Deliberately deferred:
-packages, file copies, git clone, extra shells, crontab, mounts, capabilities,
-sudo, and any `command` / script field.
+packages, file copies, extra shells, crontab, mounts, capabilities,
+sudo, and any `command` / script field. Checkout of a bound repository is
+not a setup command; a dedicated run does it with the deploy-key socket, as
+described in [providers.md](providers.md).
 
 Dedicated runs are a second privileged op (`spawn` / `wait`) that passes
 stdio fds over the same socketpair. The parent execs the embedded Python

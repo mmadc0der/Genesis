@@ -274,11 +274,13 @@ func TestSpawnEnvStripsPrivilegedKeysAndIgnoresParentPath(t *testing.T) {
 	blocked := spawnEnv(reconciledIdentity{Username: "workspace-janitor", Home: "/home/workspace-janitor"}, map[string]string{
 		"SSH_AUTH_SOCK": "/tmp/attacker.sock",
 		"GIT_SSH":       "/tmp/askpass",
+		"GITHUB_TOKEN":  "ghs_attacker_token_value",
+		"GH_TOKEN":      "ghp_attacker_token_value",
 		"LEAK":          "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
 	})
 	for _, item := range blocked {
 		key, value, _ := strings.Cut(item, "=")
-		if key == "SSH_AUTH_SOCK" || key == "GIT_SSH" || strings.Contains(value, "PRIVATE KEY") {
+		if key == "SSH_AUTH_SOCK" || key == "GIT_SSH" || key == "GITHUB_TOKEN" || key == "GH_TOKEN" || strings.Contains(value, "PRIVATE KEY") {
 			t.Fatalf("spawn env kept %s", item)
 		}
 	}

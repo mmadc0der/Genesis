@@ -104,6 +104,8 @@ type grantDecision struct {
 	Unsupported *unsupportedChange
 	Observation *grantObservation
 	GrantID     string
+	Record      grantRecord
+	HasRecord   bool
 }
 
 func openCredentialStore(root string, bounds credentialBounds) (*credentialStore, error) {
@@ -574,6 +576,11 @@ func recordFromIntent(intent privilegedIntent, id, material, remote string, gene
 	}
 }
 
+func cloneGrantRecord(record grantRecord) grantRecord {
+	record.Permissions = clonePermissions(record.Permissions)
+	return record
+}
+
 func clonePermissions(permissions map[string]string) map[string]string {
 	if len(permissions) == 0 {
 		return nil
@@ -762,7 +769,7 @@ func (s *privilegedState) consumeGrantIntent(intent privilegedIntent) (grantDeci
 			return grantDecision{}, err
 		}
 		obs := record.observation()
-		decision := grantDecision{GrantID: record.GrantID, Observation: &obs}
+		decision := grantDecision{GrantID: record.GrantID, Observation: &obs, Record: cloneGrantRecord(record), HasRecord: true}
 		if intent.Credential == credentialPending && intent.Git == gitNone {
 			decision.Unsupported = &unsupportedChange{
 				Kind:   intent.Kind,
@@ -783,7 +790,7 @@ func (s *privilegedState) consumeGrantIntent(intent privilegedIntent) (grantDeci
 			return grantDecision{}, err
 		}
 		obs := record.observation()
-		decision := grantDecision{GrantID: record.GrantID, Observation: &obs}
+		decision := grantDecision{GrantID: record.GrantID, Observation: &obs, Record: cloneGrantRecord(record), HasRecord: true}
 		if record.KeyMaterial == keyMaterialLocal && record.RemoteStatus == remoteStatusReady {
 			decision.Applied = intent.Kind + ":" + intent.Agent
 			s.logGrant(obs)
@@ -820,6 +827,7 @@ func (s *privilegedState) logGrant(obs grantObservation) {
 
 func (s *privilegedState) revokeAgentAccess(agent string) {
 	s.revokeGrantSockets(agent, "", false)
+	s.clearActiveGrant(agent)
 }
 
 func (s *privilegedState) revokeOtherGrant(agent, keepID string) {

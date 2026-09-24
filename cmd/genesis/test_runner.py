@@ -189,6 +189,8 @@ class RunnerTests(unittest.TestCase):
                 "DEEPSEEK_API_KEY": "ambient-key-must-not-win",
                 "AMBIENT_ONLY": "must-not-leak",
                 "HOME": "/ambient/home",
+                "SSH_AUTH_SOCK": "",
+                "GITHUB_TOKEN": "",
             },
         ):
             environment_before = dict(os.environ)
@@ -238,6 +240,31 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(Path(harness.kwargs["dsh_home"]).is_dir())
         self.assertEqual(harness.environment["DEEPSEEK_API_KEY"], "genesis-key")
         self.assertNotIn("AMBIENT_ONLY", harness.environment)
+
+    def test_execute_keeps_root_delivered_socket_and_token_only(self):
+        invocation = self.invocation(
+            env={
+                "ONLY_DECLARED": "yes",
+                "GITHUB_TOKEN": "ghs_from_invocation_0123456789",
+                "GH_TOKEN": "ghp_from_invocation_0123456789",
+                "SSH_AUTH_SOCK": "/tmp/invocation.sock",
+            }
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GITHUB_TOKEN": "ghs_from_process_0123456789",
+                "SSH_AUTH_SOCK": "/tmp/run.sock",
+                "GH_TOKEN": "ghp_from_process_0123456789",
+            },
+        ):
+            runner.execute(invocation, harness_factory=FakeHarness)
+        harness = FakeHarness.instances[-1]
+        self.assertEqual(harness.environment["GITHUB_TOKEN"], "ghs_from_process_0123456789")
+        self.assertEqual(harness.environment["SSH_AUTH_SOCK"], "/tmp/run.sock")
+        self.assertNotIn("GH_TOKEN", harness.environment)
+        self.assertNotIn("ghs_from_invocation_0123456789", harness.environment.values())
+        self.assertNotIn("/tmp/invocation.sock", harness.environment.values())
 
     def test_execute_sets_home_and_system_prompt_from_agent_snapshot(self):
         invocation = self.invocation(

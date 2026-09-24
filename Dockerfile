@@ -22,7 +22,7 @@ RUN uv sync --locked --no-dev --compile-bytecode
 
 FROM python:3.12-bookworm
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends openssh-client \
+	&& apt-get install -y --no-install-recommends openssh-client git \
 	&& rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 65532 genesis \
 	&& useradd --create-home --uid 65532 --gid 65532 --shell /usr/sbin/nologin genesis \

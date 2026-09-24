@@ -78,6 +78,16 @@ func (r processRunner) Run(document invocation) {
 		return
 	}
 
+	if document.User == "" && grantNeedsAPIToken(document.Git, document.Credential) {
+		err := errors.New("installation token was refused")
+		r.finish(logger, journal, document, streamState{
+			failed:    true,
+			errorType: processErrorType,
+			errorMsg:  err.Error(),
+		}, err, err, -1, "")
+		return
+	}
+
 	if document.User != "" {
 		r.runDedicated(logger, journal, document, input)
 		return
@@ -465,13 +475,14 @@ func (r processRunner) runDedicated(logger *slog.Logger, journal *runJournal, do
 	}
 
 	pid, err := r.spawner.Spawn(context.Background(), spawnRequest{
-		Agent:   document.Agent,
-		User:    document.User,
-		Cwd:     document.Cwd,
-		Home:    document.Home,
-		RunDir:  document.RunDir,
-		DshHome: document.DshHome,
-		Env:     document.Env,
+		Agent:      document.Agent,
+		User:       document.User,
+		Cwd:        document.Cwd,
+		Home:       document.Home,
+		RunDir:     document.RunDir,
+		DshHome:    document.DshHome,
+		Env:        document.Env,
+		NeedsToken: grantNeedsAPIToken(document.Git, document.Credential),
 	}, stdinR, stdoutW, stderrW)
 	stdinR.Close()
 	stdoutW.Close()

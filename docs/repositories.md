@@ -295,9 +295,12 @@ administration token before it writes:
 
 `ensure_secrets`, `ensure_identities`, and `retain_on_remove` stay
 unsupported. This stage does not write secrets, environments, webhooks,
-deploy keys, or per-run App tokens, and it does not clone a workspace.
+or deploy keys, and it does not clone a workspace. A dedicated run may
+mint a short-lived installation token and check out the bound repository
+afterward; that is not part of create or apply. See
+[providers.md](providers.md).
 GitHub App webhook deliveries are accepted on the listener. That ingress
-does not write repository webhooks, mint per-run App tokens, or clone a
+does not write repository webhooks, mint a per-run App token, or clone a
 workspace. See [webhooks.md](webhooks.md).
 An intent that was not written remains unsupported with a concrete reason,
 including "already matches" when no write was required.

@@ -142,6 +142,7 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 	sawAgentLayer := false
 	activeGrants := map[string]struct{}{}
 	observations := map[string]grantObservation{}
+	grantRecords := map[string]grantRecord{}
 	for _, intent := range plan.Intents {
 		switch intent.Kind {
 		case intentEnsureAgentUser:
@@ -194,6 +195,9 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 			if decision.Observation != nil {
 				observations[decision.GrantID] = *decision.Observation
 			}
+			if decision.HasRecord && intent.Agent != "" {
+				grantRecords[intent.Agent] = decision.Record
+			}
 		}
 	}
 	if sawAgentLayer || plan.Agents {
@@ -211,6 +215,7 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 			return coordinateResult{}, err
 		}
 		s.replaceHeld(held)
+		s.replaceActiveGrants(grantRecords)
 	}
 	return result, nil
 }
