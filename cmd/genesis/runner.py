@@ -128,7 +128,7 @@ def execute(
         complete_environment(environment),
         harness_factory(
             provider="deepseek-official",
-            model="deepseek-v4-flash",
+            model="deepseek-v4.1-flash",
             cwd=invocation["cwd"],
             runtime_cwd=dsh_home,
             dsh_home=dsh_home,
