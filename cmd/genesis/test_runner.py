@@ -366,6 +366,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(harness.kwargs["patches"], (str(patch_path),))
         self.assertTrue(harness.patch_existed)
         plugin_path = Path(harness.kwargs["dsh_home"]) / "genesis-assistant-stream.mjs"
+        self.assertEqual(runner.HARNESS_MAX_RETRIES, 10)
+        self.assertEqual(runner.HARNESS_MAX_BACKOFF_MS, 60_000)
         self.assertEqual(
             harness.patch_contents,
             """\
@@ -373,6 +375,19 @@ class RunnerTests(unittest.TestCase):
   name: '@deepseek-ai/dsh-session-log-deepseek'
   config:
     enabled: false
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    defaultContextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? 1000000)
+    streamIdleTimeoutMs: 172800000
+    retryPolicy:
+      mode: normal
+      maxRetries: 10
+      backoff:
+        initialDelayMs: 500
+        maxDelayMs: 60000
+        jitterRatio: 0.1
 - insert:
     - id: genesis-assistant-stream
       name: """

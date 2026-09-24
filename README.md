@@ -285,7 +285,17 @@ the sole session user message. Instructions are standing identity, not
 prepended onto that payload. For the pinned `0.1.5rc1` profile, the runner also
 supplies a per-run Cordis patch setting `session-log-deepseek.enabled: false`;
 canonical DeepSeek API requests therefore do not upload or append session-trace
-suffixes.
+suffixes. The same patch replaces the `llm-deepseek` row
+(`@deepseek-ai/dsh-llm-deepseek`) because a Cordis id patch replaces that
+row's whole config. It restates `apiKeyEnv: DEEPSEEK_API_KEY`, the
+`DSH_CONTEXT_WINDOW` context-window expression (otherwise 1,000,000), and
+`streamIdleTimeoutMs: 172800000`, and sets the provider `retryPolicy` to
+normal mode with `maxRetries: 10` and `backoff.maxDelayMs: 60000`
+(initial delay 500 ms, jitter 0.1). Omitting `retryPolicy` on this pin
+resolves `maxRetries: 5` and `maxDelayMs: 10000` with the same initial
+delay and jitter. Eligible codes stay omitted, so the harness defaults
+remain, including `TRANSPORT`. When that budget is exhausted the turn
+still fails, and `llm/retry` events are still appended.
 
 The embedded Python runner writes flushed NDJSON on stdout: `session.created`
 as soon as `start_session()` returns, then raw SDK `on_notification` frames,
@@ -316,7 +326,8 @@ transport. A non-completed finish publishes the wrapper
 `DeepSeek run finished with finish_reason=…` error only when the journal has
 no `turn/end` failure object (`reason.error`).
 
-The per-run Cordis patch still disables `session-log-deepseek`. It also
+The per-run Cordis patch still disables `session-log-deepseek` and sets
+the DeepSeek retry budget described above. It also
 inserts `cmd/genesis/assistant_stream_plugin.mjs` by absolute path. On
 `deepseek-harness` `0.1.5rc1` that local file loads inside `dsh`. The plugin
 subscribes to Cordis `agent/assistant-stream` and writes JSON-RPC `on_chunk`
@@ -333,8 +344,9 @@ Genesis emits JSON logs. The completion record contains `genesis_run_id`,
 `stderr`. Any finish reason other than `completed` is logged at `ERROR`, even
 when the SDK returned no explicit exception. Diagnostics include the relevant
 `turn/end`, related error events, and non-session notifications. Exceptions
-and runner stderr are retained. Failures remain asynchronous and are not
-retried. Secret values never appear in journals, slog, or `stderr.log`.
+and runner stderr are retained. A failed run stays asynchronous and is not
+started again. Model-request retries stay inside the harness policy above.
+Secret values never appear in journals, slog, or `stderr.log`.
 
 ## Credential-free verification
 
