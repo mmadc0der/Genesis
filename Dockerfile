@@ -26,16 +26,17 @@ RUN apt-get update \
 	&& rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 65532 genesis \
 	&& useradd --create-home --uid 65532 --gid 65532 --shell /usr/sbin/nologin genesis \
-	&& mkdir -p /var/lib/genesis/config /var/lib/genesis/data /var/lib/genesis/credentials /var/lib/genesis/secrets /usr/share/genesis/defaults /usr/share/genesis/web /etc/genesis/providers.d
+	&& mkdir -p /var/lib/genesis/config /var/lib/genesis/data /var/lib/genesis/credentials /var/lib/genesis/secrets /usr/share/genesis/defaults /usr/share/genesis/web /usr/share/genesis/schema /etc/genesis/providers.d
 WORKDIR /app
 COPY --from=build /out/genesis /usr/local/bin/genesis
 COPY --from=python-deps /app/.venv /app/.venv
 COPY --from=web /src/dist /usr/share/genesis/web
 COPY agents.d /usr/share/genesis/defaults/agents.d
 COPY rules.d /usr/share/genesis/defaults/rules.d
+COPY schema/repository-declaration.txt /usr/share/genesis/schema/repository-declaration.txt
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/genesis /usr/local/bin/docker-entrypoint.sh \
-	&& chmod -R a+rX /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web \
+	&& chmod -R a+rX /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web /usr/share/genesis/schema \
 	&& chmod -R go-w /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web \
 	&& chown root:root /etc/genesis \
 	&& chown root:genesis /etc/genesis/providers.d \

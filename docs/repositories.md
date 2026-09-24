@@ -14,6 +14,12 @@ directory leaves the layer inactive. The generation digest then stays the
 agents-and-rules digest, so existing configs keep matching. An empty
 `repos.d` is active: the digest includes `"repositories": []`.
 
+The image installs this contract for the designer at
+`/usr/share/genesis/schema/repository-declaration.txt`. That text is
+generated from the loader structs. Designer instructions tell the agent to
+read it instead of inspecting the genesis binary. `repos.d/example.yaml`
+and the lab-widget template are examples, not that contract.
+
 ## File
 
 One repository per `.yaml` or `.yml` file. The filename stem is the id

@@ -1,0 +1,165 @@
+Repository declaration schema
+
+This file is the contract for one repository declaration in repos.d.
+It is generated from the loader structs. Read it when writing
+repos.d/*.yaml or repos.d/*.yml. Do not inspect the genesis binary.
+Do not run strings, grep, or readelf on the genesis binary.
+Sample YAML and the lab-widget template are examples, not this contract.
+
+Installed at /usr/share/genesis/schema/repository-declaration.txt.
+
+File rules
+- One repository per .yaml or .yml file. The filename stem is the id.
+- The id matches ^[A-Za-z0-9][A-Za-z0-9._-]*$ and cannot contain "..".
+- id is not a YAML field. A key named id is rejected.
+- One YAML document. Unknown fields and duplicate keys are rejected.
+- The repos directory and the file must not be symlinks. The file must be a regular file of at most 1048576 bytes.
+- Two files cannot declare the same org and name, ignoring case.
+- Non-YAML names in the directory are ignored. A directory whose name ends in .yaml is rejected.
+- Do not put secret values in any string. Rejected substrings, matched case-insensitively: -----begin, ghp_, github_pat_, gho_, ghu_, ghs_, ghr_, x-access-token.
+- Writing this file records desired state only. It does not create an organization and it does not call a provider.
+
+Fields
+- provider: string, required
+  Allowed value: github. Not a URL or a token.
+
+- org: string, required
+  GitHub organization login. Must match ^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ and must not contain ".." or "--".
+
+- name: string, required
+  GitHub repository name. Must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$. It cannot be "." or "..", cannot contain "..", and cannot end with ".git" in any case.
+
+- lifecycle: object, required
+  How Genesis classifies the remote. Both keys are required. This file cannot archive or delete the repository.
+  - lifecycle.remove: string, required
+    Allowed value: retain. archive and delete are rejected.
+  - lifecycle.existing: string, required
+    Allowed values: adopt or refuse.
+
+- settings: object, required
+  Visibility, description, default branch, features, and merge settings.
+  - settings.visibility: string, required
+    Allowed values: public or private.
+  - settings.description: string, optional
+    Optional. One trimmed UTF-8 line of at most 350 characters. No carriage return, line feed, or NUL.
+  - settings.default_branch: string, required
+    Required branch name. Must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$. No "..", no trailing ".", not HEAD in any case, and not a name ending in ".lock".
+  - settings.features: object, required
+    issues, wiki, and projects are all required booleans.
+    - settings.features.issues: boolean, required
+      Explicit true or false. Omitting the key is rejected.
+    - settings.features.wiki: boolean, required
+      Explicit true or false. Omitting the key is rejected.
+    - settings.features.projects: boolean, required
+      Explicit true or false. Omitting the key is rejected.
+  - settings.merge: object, required
+    All four booleans are required. At least one of allow_squash, allow_merge_commit, and allow_rebase must be true.
+    - settings.merge.allow_squash: boolean, required
+      Explicit true or false. Omitting the key is rejected.
+    - settings.merge.allow_merge_commit: boolean, required
+      Explicit true or false. Omitting the key is rejected.
+    - settings.merge.allow_rebase: boolean, required
+      Explicit true or false. Omitting the key is rejected.
+    - settings.merge.delete_branch_on_merge: boolean, required
+      Explicit true or false. Omitting the key is rejected.
+
+- bootstrap: object, optional
+  Optional. When present, template is required. The value is a template id, not a path, URL, or file body.
+  - bootstrap.template: string, required
+    Lowercase kebab name. Must match ^[a-z][a-z0-9-]{0,62}$. No "/", "\", or "..".
+
+- actions: object, required
+  Required. enabled and allowed are always required.
+  - actions.enabled: boolean, required
+    Explicit true or false. Omitting the key is rejected.
+  - actions.allowed: string, required
+    Allowed values: all, local_only, or selected.
+  - actions.selected: list of strings, optional
+    Required only when actions.allowed is selected, and then the list must be non-empty. Omit the key for all and local_only; a present empty list is rejected. Each pattern is owner/name, 2 to 8 slash-separated segments, an optional @ref, and * wildcards. A pattern is at most 256 bytes. Segments match ^[A-Za-z0-9_.*-]+$. Refs match ^[A-Za-z0-9_.*-]+$. No "..", backslash, space, NUL, or "://". Duplicates are rejected.
+
+- secrets: object, optional
+  Optional. When present, include at least one repository secret name or one environment. Names only. There is no value field.
+  - secrets.repository: list of strings, optional
+    Optional list of secret names. Each name matches ^[A-Z][A-Z0-9_]{0,63}$. Duplicates are rejected.
+  - secrets.environments: list of objects, optional
+    Optional list. Each environment name is unique.
+    - secrets.environments.name: string, required
+      Lowercase kebab name. Must match ^[a-z][a-z0-9-]{0,62}$. No "/", "\", or "..".
+    - secrets.environments.secrets: list of strings, optional
+      Optional secret names inside this environment. Each name matches ^[A-Z][A-Z0-9_]{0,63}$. Duplicates inside one environment are rejected.
+
+- protection: object, optional
+  Optional. When present, ruleset is required.
+  - protection.ruleset: object, required
+    The one ruleset this file declares. name, required_approving_reviews, dismiss_stale_reviews, and strict_checks are required when protection is present.
+    - protection.ruleset.name: string, required
+      Lowercase kebab name. Must match ^[a-z][a-z0-9-]{0,62}$. No "/", "\", or "..".
+    - protection.ruleset.required_approving_reviews: integer, required
+      Required integer from 0 through 6.
+    - protection.ruleset.dismiss_stale_reviews: boolean, required
+      Explicit true or false. Omitting the key is rejected.
+    - protection.ruleset.required_checks: list of strings, optional
+      Optional list of check contexts. Each context is one trimmed line of at most 255 characters. Allowed characters are letters, digits, space, and _./:()-,+. No "..", leading "/", backslash, or "://". Duplicates are rejected.
+    - protection.ruleset.strict_checks: boolean, required
+      Explicit true or false. true requires at least one required_checks entry.
+
+- identities: list of objects, optional
+  Optional. When present, the list must not be empty. Names are unique and roles are unique. This is not an agent github grant, and there is no grants key.
+  - identities.name: string, required
+    Lowercase kebab name. Must match ^[a-z][a-z0-9-]{0,62}$. No "/", "\", or "..".
+  - identities.role: string, required
+    Allowed values: devops, manager, programmer, reviewer. Any other role is rejected.
+
+Not part of this file
+- There is no grants field. Agent github grants are not written here.
+- Do not put provider identity files, secret values, or root-only policy in this file.
+
+Example
+BEGIN EXAMPLE
+provider: github
+org: octo-org
+name: lab-widget
+lifecycle:
+  remove: retain
+  existing: adopt
+settings:
+  visibility: private
+  description: Schema example widget. Desired state only.
+  default_branch: main
+  features:
+    issues: true
+    wiki: false
+    projects: false
+  merge:
+    allow_squash: true
+    allow_merge_commit: false
+    allow_rebase: false
+    delete_branch_on_merge: true
+bootstrap:
+  template: lab-widget
+actions:
+  enabled: true
+  allowed: selected
+  selected:
+    - actions/checkout@v4
+secrets:
+  repository:
+    - EXAMPLE_TOKEN
+  environments:
+    - name: ci
+      secrets:
+        - CI_BOT_TOKEN
+protection:
+  ruleset:
+    name: protect-main
+    required_approving_reviews: 1
+    dismiss_stale_reviews: true
+    required_checks:
+      - ci
+    strict_checks: true
+identities:
+  - name: programmer
+    role: programmer
+  - name: reviewer
+    role: reviewer
+END EXAMPLE

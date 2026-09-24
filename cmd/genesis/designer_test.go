@@ -83,6 +83,10 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"Do not run privileged host setup",
 		"no GitHub capability",
 		"providers.d",
+		repositorySchemaImagePath,
+		"instead of inspecting the genesis binary",
+		"Do not run strings, grep, or readelf on the genesis binary",
+		"not the contract",
 	} {
 		if !strings.Contains(designer.Instructions, phrase) {
 			t.Fatalf("designer instructions missing %q", phrase)

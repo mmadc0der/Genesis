@@ -11,13 +11,19 @@ OS user, and not an authorized `/sync` client.
 | Agent | `agents.d/designer.yaml` | No `user` / `setup`. `cwd` is `/var/lib/genesis/config`. `home` is `/home/genesis`. |
 | Rule | `rules.d/designer.yaml` | Exact match on `type=dev.genesis.user.message`, `source=urn:genesis:control`, `subject=designer`. |
 | Panel | Control composer | Select `designer.yaml` (shown as `dev.genesis.user.message`). Type a message. Send. Then Sync after it writes YAML. |
+| Schema | `/usr/share/genesis/schema/repository-declaration.txt` | Loader contract for `repos.d`. World-readable in the image. Not copied into the config volume. |
 
 The listener UID (`genesis` in Compose, uid `65532`) runs this agent. The
 panel Details row is **Shared listener UID**. Output files it creates under
 the config volume are owned by `genesis`. That is expected, not a dedicated-user
 proof.
 
-The designer may create or update agent, rule, and repository YAML. It must
+The designer may create or update agent, rule, and repository YAML. Before
+it writes `repos.d`, it reads `/usr/share/genesis/schema/repository-declaration.txt`
+and follows that file instead of inspecting the genesis binary. The schema
+is generated from the loader structs. `repos.d/example.yaml` and the
+lab-widget template are examples, not that contract. Provider files, secret
+values, and root-only policy are not installed next to the schema. It must
 not add a `github` block to itself, and it must not create `providers.d`
 inside the config volume. Provider identities live outside that volume;
 see [providers.md](providers.md). It must not run privileged host setup,
