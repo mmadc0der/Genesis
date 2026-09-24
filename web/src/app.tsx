@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { getJSON, postText } from "./api";
+import { ActivityLine } from "./activity-line";
 import {
   applyPanelLoad,
   buildMessage,
@@ -401,13 +402,7 @@ export function App() {
               <div class="transcript" ref={transcriptRef}>
                 {events.length === 0 ? <p class="empty">This run has no journal lines yet.</p> : null}
                 {activityLines(events).map((line) => (
-                  <article key={line.key || line.text} class={`line line-${line.kind}`}>
-                    <header>
-                      <span>{line.kind}</span>
-                      <time>{line.time || ""}</time>
-                    </header>
-                    <p>{line.text}</p>
-                  </article>
+                  <ActivityLine key={line.key || line.text} line={line} />
                 ))}
               </div>
             </>

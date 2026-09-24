@@ -222,6 +222,48 @@ export interface ChatLine {
   text: string;
   key?: string;
   time?: string;
+  /** Tool-call row. Collapsed preview compacts arguments; `text` stays the mapped journal line. */
+  toolCall?: boolean;
+}
+
+/** Collapsed activity rows longer than this end with an ellipsis. */
+export const ACTIVITY_PREVIEW_LIMIT = 120;
+
+export function activityPreview(line: Pick<ChatLine, "text" | "toolCall">): string {
+  const source = line.toolCall ? compactToolCall(line.text) : line.text;
+  return singleLine(source, ACTIVITY_PREVIEW_LIMIT);
+}
+
+function compactToolCall(text: string): string {
+  const minified = tryMinify(text);
+  if (minified !== null) return minified;
+  const splitAt = text.indexOf("\n");
+  if (splitAt === -1) return text;
+  const name = text.slice(0, splitAt).trim();
+  const args = text.slice(splitAt + 1);
+  const compactArgs = tryMinify(args) ?? args;
+  if (!name) return compactArgs;
+  if (!compactArgs.trim()) return name;
+  return `${name} ${compactArgs}`;
+}
+
+function tryMinify(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed !== null && typeof parsed === "object") return JSON.stringify(parsed);
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function singleLine(text: string, limit: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const chars = Array.from(flat);
+  if (chars.length <= limit) return flat;
+  return `${chars.slice(0, limit - 1).join("").trimEnd()}…`;
 }
 
 const PANEL_TEXT_CAP_BYTES = 16 * 1024;
@@ -364,7 +406,7 @@ function applyChunk(
     if (open?.settled) return;
     if (!open) {
       open = {
-        line: { key: `tool-${key}`, kind: "tool", text: "", time: event.time },
+        line: { key: `tool-${key}`, kind: "tool", text: "", time: event.time, toolCall: true },
         name: "",
         args: "",
         settled: false,
@@ -408,7 +450,7 @@ function toolLine(data: Record<string, unknown>): ChatLine {
   if (phase === "call") {
     const args = toolArguments(data);
     const text = [name, args].filter(Boolean).join("\n");
-    return { kind: "tool", text: args ? capPanelText(text) : text || "Tool call" };
+    return { kind: "tool", text: args ? capPanelText(text) : text || "Tool call", toolCall: true };
   }
   if (phase === "result") {
     const result = toolResultText(data);

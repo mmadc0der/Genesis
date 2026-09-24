@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activityLines, applyPanelLoad, buildMessage, driftLabel, driftLine, eventLine, githubGrantSummary, maxCursor, mergeEvents, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
+import { ACTIVITY_PREVIEW_LIMIT, activityLines, activityPreview, applyPanelLoad, buildMessage, driftLabel, driftLine, eventLine, githubGrantSummary, maxCursor, mergeEvents, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
 import type { Agent, ControlState, LifecycleEvent, Repository, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
@@ -490,5 +490,186 @@ describe("control panel model", () => {
     expect(JSON.stringify(secretNames(previousRepository))).not.toContain("ghp_");
     expect(kept.state?.drift).toBe("desired_invalid");
     expect(kept.runs.map((item) => item.run_id)).toEqual(["gen_1"]);
+  });
+
+  it("previews activity rows on one line and leaves the mapped text intact", () => {
+    const assistant = eventLine(
+      event("6", "dev.genesis.run.assistant", {
+        phase: "message",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "assistant/message",
+              data: {
+                message: {
+                  content: [
+                    { type: "reasoning", text: "look at the tree" },
+                    { type: "text", text: "the bench is clean" },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(assistant.text).toBe("look at the tree\n\nthe bench is clean");
+    expect(activityPreview(assistant)).toBe("look at the tree the bench is clean");
+    expect(activityPreview(assistant)).not.toContain("…");
+
+    const call = eventLine(
+      event("7", "dev.genesis.run.tool", {
+        phase: "call",
+        name: "bash",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "tool/call",
+              data: { name: "bash", arguments: '{\n  "command": "pwd",\n  "cwd": "/tmp"\n}' },
+            },
+          },
+        },
+      }),
+    );
+    expect(call.toolCall).toBe(true);
+    expect(call.text).toBe('bash\n{\n  "command": "pwd",\n  "cwd": "/tmp"\n}');
+    expect(activityPreview(call)).toBe('bash {"command":"pwd","cwd":"/tmp"}');
+    expect(activityPreview(call)).not.toContain("\n");
+
+    const result = eventLine(
+      event("8", "dev.genesis.run.tool", {
+        phase: "result",
+        name: "bash",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "tool/result",
+              data: {
+                name: "bash",
+                message: { content: [{ type: "tool-result", content: [{ type: "text", text: '{\n  "ok": true\n}' }] }] },
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(result.toolCall).toBeUndefined();
+    expect(result.text).toContain("\n");
+    expect(activityPreview(result)).toBe('bash { "ok": true }');
+
+    const failure = eventLine(
+      event("9", "dev.genesis.run.turn", {
+        phase: "end",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "turn/end",
+              data: { reason: { kind: "error", error: { message: "bad key", code: "AUTH", status: 401 } } },
+            },
+          },
+        },
+      }),
+    );
+    expect(failure.text).toBe("bad key\nAUTH\n401");
+    expect(activityPreview(failure)).toBe("bad key AUTH 401");
+
+    const retry = eventLine(
+      event("10", "dev.genesis.run.retry", {
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "llm/retry",
+              data: { retry: 2, failure: { code: "RATE_LIMIT", message: `slow down ${"x".repeat(200)}` } },
+            },
+          },
+        },
+      }),
+    );
+    const retryPreview = activityPreview(retry);
+    expect(retry.text.startsWith("retry 2 RATE_LIMIT slow down")).toBe(true);
+    expect(retry.text.length).toBeGreaterThan(ACTIVITY_PREVIEW_LIMIT);
+    expect(retryPreview.startsWith("retry 2 RATE_LIMIT slow down")).toBe(true);
+    expect(retryPreview.endsWith("…")).toBe(true);
+    expect(retryPreview).not.toContain("\n");
+    expect(Array.from(retryPreview).length).toBeLessThanOrEqual(ACTIVITY_PREVIEW_LIMIT);
+
+    const longResult = eventLine(
+      event("11", "dev.genesis.run.tool", {
+        phase: "result",
+        name: "bash",
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "tool/result",
+              data: {
+                name: "bash",
+                message: {
+                  content: [{ type: "tool-result", content: [{ type: "text", text: "line\n".repeat(40) }] }],
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const resultPreview = activityPreview(longResult);
+    expect(longResult.text).toContain("\n");
+    expect(resultPreview.startsWith("bash line")).toBe(true);
+    expect(resultPreview.endsWith("…")).toBe(true);
+    expect(resultPreview).not.toContain("\n");
+    expect(Array.from(resultPreview).length).toBeLessThanOrEqual(ACTIVITY_PREVIEW_LIMIT);
+
+    const huge = eventLine(
+      event("12", "dev.genesis.run.assistant", {
+        raw: {
+          method: "session.event",
+          payload: {
+            event: {
+              type: "assistant/message",
+              data: { message: { content: [{ type: "text", text: "x".repeat(20 * 1024) }] } },
+            },
+          },
+        },
+      }),
+    );
+    expect(huge.text.endsWith("\n… truncated")).toBe(true);
+    const hugePreview = activityPreview(huge);
+    expect(hugePreview.endsWith("…")).toBe(true);
+    expect(hugePreview).not.toContain("\n");
+    expect(Array.from(hugePreview).length).toBeLessThanOrEqual(ACTIVITY_PREVIEW_LIMIT);
+
+    const streamed = activityLines([
+      event("1", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: {
+            type: "chunk",
+            attemptId: "a1",
+            chunk: { type: "tool-call-delta", id: "c1", name: "bash", argumentsDelta: '{\n  "command": "' },
+          },
+        },
+      }),
+      event("2", "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: {
+            type: "chunk",
+            attemptId: "a1",
+            chunk: { type: "tool-call-delta", id: "c1", argumentsDelta: 'pwd"\n}' },
+          },
+        },
+      }),
+    ]);
+    const liveTool = streamed.find((line) => line.kind === "tool");
+    expect(liveTool?.toolCall).toBe(true);
+    expect(liveTool?.text).toBe('bash\n{\n  "command": "pwd"\n}');
+    expect(activityPreview(liveTool!)).toBe('bash {"command":"pwd"}');
+    expect(activityPreview({ text: 'bash\n{\n  "command": "pw', toolCall: true })).toBe('bash { "command": "pw');
   });
 });
