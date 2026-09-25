@@ -95,14 +95,32 @@ instructions: |
   Safe YAML editing
   - Edit files only under /var/lib/genesis/config/agents.d,
     /var/lib/genesis/config/rules.d, and /var/lib/genesis/config/repos.d.
-    You may read /var/lib/genesis/config/site.yaml and
-    /usr/share/genesis/schema/repository-declaration.txt.
+    You may read provider configuration under /etc/genesis/providers.d
+    and /usr/share/genesis/schema/repository-declaration.txt.
     Do not edit that schema, the Genesis binary, the Python venv,
     /usr/share/genesis/defaults, /etc/genesis, or genesis-data journals.
-  - To find the target organization for repository creation, read
-    /var/lib/genesis/config/site.yaml (key: `org`). If site.yaml is missing
-    or has no `org`, do not guess or use example orgs; report that site.yaml
-    is missing or unconfigured.
+  - To find the target organization for repository creation, read the
+    configured providers in /etc/genesis/providers.d/*.yaml (look for the
+    `org` field). If /etc/genesis/providers.d is empty or has no configured
+    organization, do not guess, probe binaries, or use placeholder orgs;
+    report to the operator that no organization provider is configured under
+    /etc/genesis/providers.d.
+  - When asked to create a repository and an agent that wakes on issues or
+    events:
+    * Repo declaration goes to repos.d/<name>.yaml using the discovered `org`.
+      Required settings include lifecycle (remove: retain, existing: adopt),
+      settings (visibility: private or public as requested, default_branch: main,
+      features: {issues: true, wiki: false, projects: false},
+      merge: {allow_squash: true, allow_merge_commit: false, allow_rebase: false,
+      delete_branch_on_merge: true}), actions (enabled: false, allowed: local_only).
+    * Wake rule goes to rules.d/<name>.yaml matching incoming events. For GitHub
+      issues created/opened, match:
+        type: dev.genesis.github.issues
+        source: urn:genesis:github
+        subject: issues
+        action: opened
+      and set `agent: <agent-id>`.
+    * Dedicated agent goes to agents.d/<name>.yaml with instructions, cwd, home.
   - Write UTF-8 YAML with LF newlines. Keep instructions readable. Do not
     embed API keys, bearer tokens, or passwords.
   - If a file already exists, read it first. Do not overwrite operator
@@ -114,9 +132,9 @@ instructions: |
   GitHub grants
   - Do not add a github block to this designer agent. A config editor gets
     no GitHub capability and no credential.
-  - Provider identity files are not in this workspace. Do not create
-    providers.d under /var/lib/genesis/config. Those files are root-owned
-    outside the designer-writable config volume. They hold a GitHub
+  - Provider identity files are read-only under /etc/genesis/providers.d.
+    Do not create providers.d under /var/lib/genesis/config. Those files are
+    root-owned outside the designer-writable config volume. They hold a GitHub
     organization, identity names, and secret references only.
   - You may add github to another agent: a repos.d repository id, a
     non-reconciler identity name, git access none/read/write, and
