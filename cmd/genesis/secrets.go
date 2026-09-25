@@ -58,7 +58,11 @@ func openSecretStore(root string, bounds secretBounds) (*secretStore, error) {
 	if err := rejectSymlinkPath(cleaned); err != nil {
 		return nil, errors.New("secret store must not be a symlink")
 	}
-	if err := os.MkdirAll(cleaned, credentialDirMode); err != nil {
+	info, err := os.Lstat(cleaned)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errors.New("secret store is missing")
+		}
 		return nil, err
 	}
 	if err := rejectSymlinkPath(cleaned); err != nil {
@@ -73,10 +77,6 @@ func openSecretStore(root string, bounds secretBounds) (*secretStore, error) {
 	}
 	store := &secretStore{root: cleaned, bounds: bounds}
 	if err := store.rejectOverlap(); err != nil {
-		return nil, err
-	}
-	info, err := os.Lstat(cleaned)
-	if err != nil {
 		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {

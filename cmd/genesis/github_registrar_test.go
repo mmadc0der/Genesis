@@ -1364,6 +1364,9 @@ func testAppKey(t *testing.T) *rsa.PrivateKey {
 func openTestSecretStore(t *testing.T) *secretStore {
 	t.Helper()
 	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	store, err := openSecretStore(filepath.Join(root, "secrets"), secretBounds{})
 	if err != nil {
 		t.Fatal(err)
@@ -1413,6 +1416,14 @@ func TestEntrypointSecretDirectoryStaysPrivate(t *testing.T) {
 	defaults := t.TempDir()
 	credentials := t.TempDir()
 	secrets := filepath.Join(t.TempDir(), "secrets")
+	if err := os.Mkdir(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"GITHUB_APP_RECONCILER_PEM", "GITHUB_APP_ID", "GITHUB_APP_WEBHOOK_SECRET"} {
+		if err := os.WriteFile(filepath.Join(secrets, name), []byte("present"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	outside := filepath.Join(t.TempDir(), "outside")
 	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1428,7 +1439,23 @@ func TestEntrypointSecretDirectoryStaysPrivate(t *testing.T) {
 		)
 		return cmd.CombinedOutput()
 	}
-	output, err := run(secrets, "own-config")
+	missing := filepath.Join(t.TempDir(), "absent")
+	output, err := run(missing, "own-config")
+	if err == nil || !bytes.Contains(output, []byte("secrets directory is missing")) {
+		t.Fatalf("missing secrets directory error = %v\n%s", err, output)
+	}
+	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+		t.Fatalf("entrypoint created a secrets directory: %v", statErr)
+	}
+	empty := t.TempDir()
+	output, err = run(empty, "own-config")
+	if err == nil || !bytes.Contains(output, []byte("secret file is missing")) {
+		t.Fatalf("missing secret file error = %v\n%s", err, output)
+	}
+	if _, statErr := os.Stat(filepath.Join(empty, "GITHUB_APP_ID")); !os.IsNotExist(statErr) {
+		t.Fatalf("entrypoint created a secret file: %v", statErr)
+	}
+	output, err = run(secrets, "own-config")
 	if err != nil {
 		t.Fatalf("own-config: %v\n%s", err, output)
 	}

@@ -240,7 +240,10 @@ Root `launch` takes `-secrets` (default `genesis-secrets`,
 `/var/lib/genesis/secrets` in the image). The directory is mode `0700`,
 owned by root, and is not a symlink. It must not overlap agents, rules,
 repos, providers, data, the designer config root, `/home`, or the
-credential store. Compose mounts it on the root service only. The listener
+credential store. Compose mounts it on the root service only. The entrypoint does not
+create that directory or any secret file. If the directory is missing, or
+if `GITHUB_APP_RECONCILER_PEM`, `GITHUB_APP_ID`, or
+`GITHUB_APP_WEBHOOK_SECRET` is missing, it exits. The listener
 process, control, and agents do not receive the flag or the mount.
 
 Each file is a regular file whose name is the provider secret reference.

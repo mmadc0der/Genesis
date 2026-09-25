@@ -3,7 +3,10 @@
 # Missing default YAML files are copied onto an existing named volume so image
 # upgrades can deliver newly shipped agents and rules. repos.d is created when
 # missing; image defaults are copied only if that directory exists in the image.
-# providers.d is not seeded. It stays outside this volume. When
+# providers.d is not seeded. It stays outside this volume. The secrets
+# directory is not created. A missing directory, or a missing
+# GITHUB_APP_RECONCILER_PEM, GITHUB_APP_ID, or GITHUB_APP_WEBHOOK_SECRET,
+# exits. When
 # GENESIS_PROVIDERS_DIR or /etc/genesis/providers.d exists, root tightens
 # that directory in place (0750 root:genesis, files 0640) and does not
 # follow symlinks. The example provider file is not copied here.
@@ -203,7 +206,17 @@ lock_secrets() {
 			exit 1
 			;;
 	esac
-	mkdir -p "$path"
+	if [ ! -d "$path" ]; then
+		echo "genesis: secrets directory is missing: $path" >&2
+		exit 1
+	fi
+	for name in GITHUB_APP_RECONCILER_PEM GITHUB_APP_ID GITHUB_APP_WEBHOOK_SECRET; do
+		file=$path/$name
+		if [ -L "$file" ] || [ ! -f "$file" ]; then
+			echo "genesis: secret file is missing: $name" >&2
+			exit 1
+		fi
+	done
 	parent=$(dirname "$path")
 	if [ "$(id -u)" = 0 ] && [ "$parent" = "/var/lib/genesis" ]; then
 		if [ -L "$parent" ]; then

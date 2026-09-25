@@ -195,7 +195,10 @@ outside the designer-writable config volume. Docker keeps an empty
 `/etc/genesis/providers.d` (`root:genesis`, mode `0750`) and does not copy
 it or `providers.d/example.yaml` into `genesis-config`. Provider files are
 tightened to `0640` on start so dedicated agent users cannot read secret
-references.
+references. The entrypoint does not create `/var/lib/genesis/secrets` or
+the files inside it. Startup exits when that directory is missing, or when
+`GITHUB_APP_RECONCILER_PEM`, `GITHUB_APP_ID`, or
+`GITHUB_APP_WEBHOOK_SECRET` is missing.
 
 An agent may declare an optional `github` capability: a `repos.d`
 repository, a non-reconciler identity, git access `none`/`read`/`write`,
