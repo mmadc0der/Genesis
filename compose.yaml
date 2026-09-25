@@ -20,8 +20,11 @@ services:
       - type: volume
         source: credentials
         target: /var/lib/genesis/credentials
-      - type: volume
-        source: secrets
+      - type: bind
+        source: ./runtime/providers
+        target: /etc/genesis/providers.d
+      - type: bind
+        source: ./runtime/secrets
         target: /var/lib/genesis/secrets
 
   control:
@@ -57,6 +60,10 @@ services:
         source: data
         target: /var/lib/genesis/data
         read_only: true
+      - type: bind
+        source: ./runtime/providers
+        target: /etc/genesis/providers.d
+        read_only: true
 
 volumes:
   config:
@@ -65,5 +72,3 @@ volumes:
     name: genesis-data
   credentials:
     name: genesis-credentials
-  secrets:
-    name: genesis-secrets

@@ -95,9 +95,14 @@ instructions: |
   Safe YAML editing
   - Edit files only under /var/lib/genesis/config/agents.d,
     /var/lib/genesis/config/rules.d, and /var/lib/genesis/config/repos.d.
-    You may read /usr/share/genesis/schema/repository-declaration.txt.
+    You may read /var/lib/genesis/config/site.yaml and
+    /usr/share/genesis/schema/repository-declaration.txt.
     Do not edit that schema, the Genesis binary, the Python venv,
     /usr/share/genesis/defaults, /etc/genesis, or genesis-data journals.
+  - To find the target organization for repository creation, read
+    /var/lib/genesis/config/site.yaml (key: `org`). If site.yaml is missing
+    or has no `org`, do not guess or use example orgs; report that site.yaml
+    is missing or unconfigured.
   - Write UTF-8 YAML with LF newlines. Keep instructions readable. Do not
     embed API keys, bearer tokens, or passwords.
   - If a file already exists, read it first. Do not overwrite operator

@@ -168,24 +168,19 @@ Record the byte count. Do not print the file.
 ## 3. Provider file and Docker secret
 
 ```sh
+mkdir -p runtime/providers runtime/secrets
+cp "$PEM_FILE" runtime/secrets/GITHUB_APP_RECONCILER_PEM
+chmod 0600 runtime/secrets/GITHUB_APP_RECONCILER_PEM
+
 docker compose up --build -d
 curl -sf -o /dev/null --retry 30 --retry-delay 1 --retry-connrefused \
   http://127.0.0.1:8790/api/health
-
-docker compose exec -T -u 0 genesis sh -c '
-  umask 077
-  cat > /var/lib/genesis/secrets/GITHUB_APP_RECONCILER_PEM
-  chown root:root /var/lib/genesis/secrets /var/lib/genesis/secrets/GITHUB_APP_RECONCILER_PEM
-  chmod 0700 /var/lib/genesis/secrets
-  chmod 0600 /var/lib/genesis/secrets/GITHUB_APP_RECONCILER_PEM
-  find /var/lib/genesis/secrets -mindepth 1 -maxdepth 1 -printf "%y %m %s\n"
-' < "$PEM_FILE"
 
 python3 - <<'PY'
 import os
 from pathlib import Path
 org, repo = os.environ["ORG"], os.environ["REPO"]
-Path("/tmp/genesis-probe-provider.yaml").write_text(f"""provider: github
+Path("runtime/providers/probe.yaml").write_text(f"""provider: github
 org: {org}
 identities:
   - name: reconciler
@@ -225,11 +220,10 @@ identities:
 """)
 PY
 
-docker compose exec -T -u 0 genesis sh -c 'cat > /etc/genesis/providers.d/probe.yaml && chown root:genesis /etc/genesis/providers.d/probe.yaml && chmod 0640 /etc/genesis/providers.d/probe.yaml' \
-  < /tmp/genesis-probe-provider.yaml
+chmod 0640 runtime/providers/probe.yaml
 docker compose exec -T -u genesis genesis sh -c 'cat > /var/lib/genesis/config/repos.d/probe.yaml' \
   < /tmp/genesis-probe-repo.yaml
-rm -f /tmp/genesis-probe-provider.yaml /tmp/genesis-probe-repo.yaml
+rm -f /tmp/genesis-probe-repo.yaml
 
 docker compose exec -T -u genesis genesis sh -c 'cat > /var/lib/genesis/config/agents.d/workspace-janitor.yaml' <<'EOF'
 instructions: |

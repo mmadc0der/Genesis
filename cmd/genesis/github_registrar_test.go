@@ -926,7 +926,7 @@ func TestVerificationChecklistYAMLLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := string(docBytes)
-	provider := checklistTemplate(t, doc, "Path(\"/tmp/genesis-probe-provider.yaml\").write_text(f\"\"\"", "\"\"\")")
+	provider := checklistTemplate(t, doc, "Path(\"runtime/providers/probe.yaml\").write_text(f\"\"\"", "\"\"\")")
 	repository := checklistTemplate(t, doc, "Path(\"/tmp/genesis-probe-repo.yaml\").write_text(f\"\"\"", "\"\"\")")
 	replacer := strings.NewReplacer("{org}", "octo-org", "{repo}", "genesis-deploy-probe", "{app}", "100001", "{inst}", "100002")
 	provider = replacer.Replace(provider)
