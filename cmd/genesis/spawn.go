@@ -72,8 +72,9 @@ type privilegedState struct {
 	rulesDir     string
 	reposDir     string
 	providersDir string
-	registrar    grantRegistrar
-	held         map[string]heldGrant
+	registrar     grantRegistrar
+	installations map[string]string // org -> installation id; memory only, never disk or YAML
+	held          map[string]heldGrant
 	uidGrants    map[uint32]*uidGrantHold
 	tokens       runTokenMinter
 	active       map[string]grantRecord

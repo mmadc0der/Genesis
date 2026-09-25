@@ -81,8 +81,6 @@ func TestPublishedRepositorySchemaMatchesLoader(t *testing.T) {
 	}
 
 	for _, forbidden := range []string{
-		"app_id",
-		"installation_id",
 		"GENESIS_SYNC_TOKEN",
 		"/var/lib/genesis/secrets",
 		"/var/lib/genesis/credentials",
@@ -93,6 +91,12 @@ func TestPublishedRepositorySchemaMatchesLoader(t *testing.T) {
 		if strings.Contains(string(published), forbidden) {
 			t.Fatalf("published schema contains %q", forbidden)
 		}
+	}
+	if !strings.Contains(string(published), "Do not write app_id or installation_id.") || !strings.Contains(string(published), "Company App install is Genesis's job, not the designer's.") {
+		t.Fatal("schema does not forbid app_id and installation_id")
+	}
+	if strings.Contains(string(published), "app_id:") || strings.Contains(string(published), "installation_id:") {
+		t.Fatal("schema lists app_id or installation_id as a field")
 	}
 
 	example := schemaExample(t, string(published))

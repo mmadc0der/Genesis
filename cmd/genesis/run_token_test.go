@@ -513,6 +513,13 @@ func (f *runTokenFake) registrar(logger *slog.Logger) githubRegistrar {
 }
 
 func (f *runTokenFake) serve(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == "/orgs/octo-org/installation" {
+		if r.Header.Get("Accept") != "application/vnd.github+json" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			f.t.Errorf("installation headers = %#v", r.Header)
+		}
+		_, _ = w.Write([]byte(`{"id":100002}`))
+		return
+	}
 	if r.Method != http.MethodPost || r.URL.Path != "/app/installations/100002/access_tokens" {
 		http.NotFound(w, r)
 		return

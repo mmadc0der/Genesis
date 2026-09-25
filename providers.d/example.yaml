@@ -7,8 +7,6 @@ identities:
     role: reconciler
     credential: app
     secret: GITHUB_APP_RECONCILER_PEM
-    app_id: "100001"
-    installation_id: "100002"
   - name: programmer
     role: programmer
     credential: app

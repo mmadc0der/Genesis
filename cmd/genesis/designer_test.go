@@ -87,6 +87,8 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"instead of inspecting the genesis binary",
 		"Do not run strings, grep, or readelf on the genesis binary",
 		"not the contract",
+		"Do not write app_id, installation_id, or grants.",
+		"Company App install is Genesis's job, not the designer's.",
 	} {
 		if !strings.Contains(designer.Instructions, phrase) {
 			t.Fatalf("designer instructions missing %q", phrase)

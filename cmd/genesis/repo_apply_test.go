@@ -74,7 +74,14 @@ func TestRepositoryApplyCreatesBindsAndShapes(t *testing.T) {
 	if len(fake.tokenStatuses) == 0 || fake.tokenStatuses[0] != http.StatusUnprocessableEntity {
 		t.Fatalf("missing repository token statuses = %v", fake.tokenStatuses)
 	}
-	if len(fake.methods) < 3 || fake.methods[2] != "POST /orgs/octo-org/repos" {
+	createAt := -1
+	for i, method := range fake.methods {
+		if method == "POST /orgs/octo-org/repos" {
+			createAt = i
+			break
+		}
+	}
+	if createAt < 1 || fake.methods[createAt-1] != "POST /app/installations/100002/access_tokens" {
 		t.Fatalf("create did not follow the installation token: %#v", fake.methods)
 	}
 	createToken := ""
@@ -120,6 +127,9 @@ func TestRepositoryApplyCreatesBindsAndShapes(t *testing.T) {
 	}
 	if fake.count("POST", "/orgs/octo-org/repos") != 1 || fake.count("PUT", "/repos/octo-org/lab-widget/contents/.github/workflows/ci.yml") != 1 {
 		t.Fatalf("second apply repeated writes: %#v", fake.methods)
+	}
+	if fake.count("GET", "/orgs/octo-org/installation") != 1 {
+		t.Fatalf("installation lookup was not cached: %#v", fake.methods)
 	}
 }
 
@@ -542,6 +552,7 @@ func applyState(t *testing.T, fake *applyGitHub, now time.Time) (*privilegedStat
 	secretName := "GITHUB_APP_RECONCILER_PEM"
 	writeRepoFile(t, providersDir, "github.yaml", reconcilerProviderYAML(secretName))
 	writeSecretPEM(t, secrets.root, secretName, key)
+	writeAppID(t, secrets.root, "100001")
 	dataDir := t.TempDir()
 	if _, err := prepareDataDir(dataDir); err != nil {
 		t.Fatal(err)
@@ -635,6 +646,11 @@ func (f *applyGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/orgs/octo-org/installation":
+		if r.Header.Get("Accept") != "application/vnd.github+json" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			f.t.Errorf("installation headers = %#v", r.Header)
+		}
+		_, _ = w.Write([]byte(`{"id":100002}`))
 	case r.Method == http.MethodPost && r.URL.Path == "/app/installations/100002/access_tokens":
 		f.serveToken(w, body)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/octo-org/lab-widget":

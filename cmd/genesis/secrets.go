@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -18,6 +19,7 @@ const (
 	defaultSecretsDir = "genesis-secrets"
 	secretsDockerPath = "/var/lib/genesis/secrets"
 	maxSecretBytes    = 64 << 10
+	githubAppIDName   = "GITHUB_APP_ID"
 )
 
 var errReconcilerUnavailable = errors.New("reconciler app identity is unavailable")
@@ -33,10 +35,12 @@ type secretBounds struct {
 	CredentialsDir string
 }
 
-// secretStore is the root-only directory of GitHub App private keys and the
-// App webhook secret GITHUB_APP_WEBHOOK_SECRET. Names are secret references
+// secretStore is the root-only directory of GitHub App private keys, the
+// company App id GITHUB_APP_ID, and the App webhook secret
+// GITHUB_APP_WEBHOOK_SECRET. Names are secret references, that App id file,
 // or that webhook file, never paths. Listener, control, and agents do not
-// receive this directory. The webhook file is not a provider secret reference.
+// receive this directory. The App id and webhook files are not provider
+// secret references.
 type secretStore struct {
 	root   string
 	dir    *os.File
@@ -269,6 +273,28 @@ func (s *secretStore) read(name string) ([]byte, error) {
 		return nil, errors.New("reconciler private key is unavailable")
 	}
 	return payload, nil
+}
+
+// readAppID reads GITHUB_APP_ID from the root secrets directory. The file
+// is a decimal GitHub App id with no trailing newline. Anything else is
+// rejected. In the image the path is /var/lib/genesis/secrets/GITHUB_APP_ID.
+func (s *secretStore) readAppID() (string, error) {
+	if s == nil {
+		return "", errReconcilerUnavailable
+	}
+	payload, err := s.read(githubAppIDName)
+	if err != nil {
+		return "", errReconcilerUnavailable
+	}
+	defer clear(payload)
+	if bytes.IndexByte(payload, '\n') >= 0 || bytes.IndexByte(payload, '\r') >= 0 {
+		return "", errReconcilerUnavailable
+	}
+	id := string(payload)
+	if err := validateGitHubID(githubAppIDName, id); err != nil {
+		return "", errReconcilerUnavailable
+	}
+	return id, nil
 }
 
 func (s *secretStore) readWebhookSecret() ([]byte, error) {

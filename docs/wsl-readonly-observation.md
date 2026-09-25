@@ -137,7 +137,6 @@ python3 - <<'PY'
 import json, os
 from pathlib import Path
 org, repo = os.environ["ORG"], os.environ["REPO"]
-app, inst = os.environ["APP_ID"], os.environ["INSTALLATION_ID"]
 
 def gh(path):
     return json.loads(os.popen(f"gh api {path}").read())
@@ -203,8 +202,6 @@ identities:
     role: reconciler
     credential: app
     secret: GITHUB_APP_RECONCILER_PEM
-    app_id: "{app}"
-    installation_id: "{inst}"
 """)
 print("declaration_bytes", Path("/tmp/genesis-verification.yaml").stat().st_size)
 print("default_branch", live["default_branch"])
@@ -221,7 +218,11 @@ rm -f /tmp/genesis-probe-provider.yaml
 Expected: one secrets line, `f 600`, with the same byte count as
 `wc -c < "$PEM_FILE"`. The script exits if `repos.d` or `providers.d`
 already contains a file. Do not delete a file you did not create in this
-probe. Another declaration would be observed too.
+probe. Another declaration would be observed too. Before the repos sync,
+also place the company App id at `/var/lib/genesis/secrets/GITHUB_APP_ID`
+(mode `0600`, a decimal id, no trailing newline). Do not put `app_id` or
+`installation_id` in the provider file. Genesis discovers the installation
+from the organization.
 
 ## 4. Repos-only sync
 
