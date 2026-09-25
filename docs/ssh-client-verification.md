@@ -258,9 +258,9 @@ docker compose exec -T genesis getent passwd workspace-janitor
 
 Expected from `find`: one line, `f 600` and the same byte count as
 `wc -c`. The programmer secret name is only a reference. Do not create that
-file. The provider file is in the container filesystem and must be rewritten
-after `docker compose up --build`. The secret file is on the
-`genesis-secrets` volume. Before a repos sync, also place the company App id
+file. Provider files live in `./runtime/providers` and secret files live in
+`./runtime/secrets`. Both survive `docker compose up --build`. Before a
+repos sync, also place the company App id
 at `/var/lib/genesis/secrets/GITHUB_APP_ID` (mode `0600`, a decimal id, no
 trailing newline). Do not put `app_id` or `installation_id` in the provider
 file. Genesis discovers the installation from the organization.
@@ -724,10 +724,11 @@ rm -f "$PEM_FILE" "$HOME/genesis-collision.pub"
 docker compose down -v
 ```
 
-`down -v` deletes `genesis-config`, `genesis-data`, `genesis-credentials`,
-and `genesis-secrets`, including the generated deploy private key. Do this
-only after the evidence above is copied out. Confirm the deleted
-repository and the removed PEM. This `GET` uses the same user token:
+`down -v` deletes `genesis-config`, `genesis-data`, and
+`genesis-credentials`, including the generated deploy private key. It does
+not delete `./runtime/providers` or `./runtime/secrets`. Do this only after
+the evidence above is copied out. Confirm the deleted repository and the
+removed PEM. This `GET` uses the same user token:
 
 ```sh
 gh api "/repos/$ORG/$REPO" --jq '.message'

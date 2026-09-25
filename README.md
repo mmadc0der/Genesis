@@ -191,11 +191,14 @@ not that contract. Operator-facing rules are in
 directory leaves the layer inactive and does not change the agent/rule
 digest. Files name one GitHub organization, named identities, and secret
 references. They never contain secret values. The directory must sit
-outside the designer-writable config volume. Docker keeps an empty
+outside the designer-writable config volume. The image keeps an empty
 `/etc/genesis/providers.d` (`root:genesis`, mode `0750`) and does not copy
-it or `providers.d/example.yaml` into `genesis-config`. Provider files are
-tightened to `0640` on start so dedicated agent users cannot read secret
-references.
+`providers.d/example.yaml` into `genesis-config`. Compose bind-mounts
+`./runtime/providers` there for the listener and control services, and
+`./runtime/secrets` onto `/var/lib/genesis/secrets` for the root listener
+only. `runtime/` is gitignored. On start, root tightens provider files to
+`0640` and secret files to `0600`. Dedicated agent users cannot read the
+provider directory.
 
 An agent may declare an optional `github` capability: a `repos.d`
 repository, a non-reconciler identity, git access `none`/`read`/`write`,
@@ -596,10 +599,12 @@ read-only. The listener still writes journals.
    Ubuntu).
 3. Clone the repository **inside WSL**, for example `~/src/genesis`, so the
    image build context is a Linux filesystem. Do not build from `/mnt/c/...`.
-4. From a WSL shell, not PowerShell:
+4. From a WSL shell, not PowerShell. Create the gitignored runtime
+   directories before Compose starts; the bind mounts require them.
 
 ```sh
 cd ~/src/genesis
+mkdir -p runtime/providers runtime/secrets
 docker compose version
 export DEEPSEEK_API_KEY='replace-with-a-real-key'
 export GENESIS_SYNC_TOKEN='compose-sync-token'
@@ -650,10 +655,12 @@ Persistence:
 - `docker compose down` stops the container and **keeps** `genesis-config`
   and `genesis-data`. The next `up` reuses the same agents, rules, and run
   journals, then copies any **new** default filenames that are missing.
-  Existing file contents are not replaced.
-- `docker compose down -v` deletes both volumes. The next `up` reseeds the
-  image defaults into a new config volume and starts with empty run storage.
-  That is the explicit destructive reset.
+  Existing file contents are not replaced. `./runtime/providers` and
+  `./runtime/secrets` stay on the host either way.
+- `docker compose down -v` deletes `genesis-config`, `genesis-data`, and
+  `genesis-credentials`. The next `up` reseeds the image defaults into a
+  new config volume and starts with empty run storage. That is the explicit
+  destructive reset. It does not delete `runtime/`.
 
 If only the `genesis` OS user exists, agent output is owned by `genesis`, the
 UI says Shared listener UID, and active/draft digests match, that is reused

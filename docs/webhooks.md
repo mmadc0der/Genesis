@@ -37,7 +37,8 @@ The webhook secret is a root-only file beside the reconciler PEM:
 `/var/lib/genesis/secrets/GITHUB_APP_WEBHOOK_SECRET`
 
 The secrets directory is mode `0700`. The file is mode `0600`, owned by root.
-Local `-secrets` (default `genesis-secrets`) uses the same filename. The file
+Local `-secrets` (default `genesis-secrets`) uses the same filename. Compose
+bind-mounts `./runtime/secrets` onto `/var/lib/genesis/secrets`. The file
 contents are the exact secret bytes. Do not add a trailing newline.
 
 ```sh
