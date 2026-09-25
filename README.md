@@ -132,11 +132,15 @@ Several rules may point at the same agent. Concurrent matches share `cwd` and
 The committed `designer` agent omits `user` on purpose so it can keep
 `cwd: /var/lib/genesis/config` (the writable Compose config root). It runs as
 the shared listener UID. Its standing instructions describe agents, rules,
-event matching, `user`/`home`/`cwd`, safe YAML edits, active vs desired
-generations, and that an operator must Sync after it writes files. It may
-create or update agent and rule YAML. It must not reconcile OS users, install
-packages, or perform arbitrary root actions. Dedicated `cwd` cannot be that
-config path; do not add `user:` to the designer.
+event matching, `user`/`home`/`cwd`, automatic dedicated-user reconcile,
+safe YAML edits, active vs desired generations, and that an operator must
+Sync after it writes files. It may create or update agent and rule YAML. It
+must not reconcile OS users, install packages, or perform arbitrary root
+actions. Dedicated `cwd` cannot be that config path; do not add `user:` to
+the designer. Dedicated workers it writes must declare `user`,
+`home: /home/<user>`, `cwd: /home/<user>/workspace`, and
+`setup.workspace: private`; Genesis creates that account on launch or
+agents `/sync`.
 
 ## Rules
 

@@ -83,12 +83,24 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"Do not run privileged host setup",
 		"no GitHub capability",
 		"providers.d",
+		"/etc/genesis/providers.d",
 		repositorySchemaImagePath,
 		"instead of inspecting the genesis binary",
 		"Do not run strings, grep, or readelf on the genesis binary",
 		"not the contract",
 		"Do not write app_id, installation_id, or grants.",
 		"Company App install is Genesis's job, not the designer's.",
+		"automatically reconciles",
+		"/bin/bash",
+		"mode 0700",
+		"user: <username>",
+		"home: /home/<username>",
+		"cwd: /home/<username>/workspace",
+		"workspace: private",
+		"Do not produce a worker with home: /home/genesis",
+		"shared or ephemeral",
+		"type: dev.genesis.github.issues",
+		"source: urn:genesis:github",
 	} {
 		if !strings.Contains(designer.Instructions, phrase) {
 			t.Fatalf("designer instructions missing %q", phrase)
@@ -98,9 +110,12 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"You should POST /sync",
 		"run useradd",
 		"call /sync yourself",
+		"site.yaml",
+		"stub",
+		"stubs",
 	} {
 		if strings.Contains(designer.Instructions, phrase) {
-			t.Fatalf("designer instructions imply a privileged or self-sync action: %q", phrase)
+			t.Fatalf("designer instructions contain stale or privileged phrasing: %q", phrase)
 		}
 	}
 

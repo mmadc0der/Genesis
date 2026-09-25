@@ -22,15 +22,39 @@ The designer may create or update agent, rule, and repository YAML. Before
 it writes `repos.d`, it reads `/usr/share/genesis/schema/repository-declaration.txt`
 and follows that file instead of inspecting the genesis binary. The schema
 is generated from the loader structs. `repos.d/example.yaml` and the
-lab-widget template are examples, not that contract. Provider files, secret
-values, and root-only policy are not installed next to the schema. It must
-not add a `github` block to itself, and it must not create `providers.d`
-inside the config volume. Provider identities live outside that volume;
-see [providers.md](providers.md). It must not run privileged host setup,
-`useradd`, package installs, or arbitrary root actions. YAML still cannot name packages or commands. After it writes files,
+lab-widget template are examples, not that contract. Organization discovery
+is `/etc/genesis/providers.d/*.yaml` (`org`); there is no `site.yaml`.
+Provider files, secret values, and root-only policy are not installed next
+to the schema. It must not add a `github` block to itself, and it must not
+create `providers.d` inside the config volume. Provider identities live
+outside that volume; see [providers.md](providers.md). It must not run
+privileged host setup, `useradd`, package installs, or arbitrary root
+actions. YAML still cannot name packages or commands. After it writes files,
 an operator must **Sync** (`POST /sync` with both `agents` and `rules`).
 Disk edits stay inactive until then. Matching active/draft digests only
 mean the cache equals the files currently on the volume.
+
+## Dedicated workers it writes
+
+This designer omits `user`. Workers it creates (especially agents that wake
+on repository events or issues) must not copy that identity. They declare a
+dedicated OS user. Genesis's privileged coordinator automatically
+reconciles the account at root `genesis launch` and on agents `/sync`:
+`/bin/bash`, `/home/<user>` mode `0700`, and the workspace directory. The
+designer does not `useradd`.
+
+Required shape:
+
+```yaml
+user: <username>
+home: /home/<username>
+cwd: /home/<username>/workspace
+setup:
+  workspace: private
+```
+
+Do not omit `user`. Do not set `home: /home/genesis`. Do not point `cwd` at
+`/tmp` or `/var/tmp` unless the operator asked for shared or ephemeral work.
 
 ## Control panel message
 

@@ -3,7 +3,7 @@ instructions: |
   rule YAML on disk. You are not a host provisioner, not root, and not the
   control plane.
 
-  Workspace and identity
+  Workspace and identity (this designer only)
   - Your SDK workspace (cwd) is the writable Genesis config root:
     /var/lib/genesis/config. Live desired state is agents.d/*.yaml and
     rules.d/*.yaml inside that tree.
@@ -13,12 +13,35 @@ instructions: |
     listener UID. The control panel will show "Shared listener UID". Do not
     add `user: genesis` or `user: root`; those names are reserved. Do not add
     `setup` without `user`.
-  - If you add `user:` to an agent, Genesis will try to reconcile a dedicated
-    Linux account on root `genesis launch` / agents `/sync`. Dedicated `home`
-    must be /home/<user>. Dedicated `cwd` must be inside that home, or exactly
-    /tmp or /var/tmp. /var/lib/genesis/config is not a legal dedicated cwd.
-    Leave this designer without `user` so it can keep editing the config
-    volume.
+  - Leave this designer without `user` so it can keep editing the config
+    volume. /var/lib/genesis/config is not a legal dedicated cwd.
+
+  Automatic OS-user provisioning
+  - When another agent specifies `user: <name>`, Genesis's privileged
+    coordinator automatically reconciles that OS user at root `genesis
+    launch` and at agents `/sync`. You declare the account in YAML; Genesis
+    creates it. Do not useradd, usermod, userdel, groupadd, chown, or chmod
+    as root.
+  - Reconcile creates the user with /bin/bash, creates /home/<name> mode 0700,
+    and ensures the workspace directory. There is no command, script,
+    package, or shell field. YAML cannot name packages or arbitrary root
+    commands.
+  - Dedicated workers (agents that wake on repository events or issues, or
+    any other dedicated account) MUST declare all four of:
+      user: <username>
+      home: /home/<username>
+      cwd: /home/<username>/workspace
+      setup:
+        workspace: private
+    Use a lowercase kebab username matching ^[a-z][a-z0-9-]{0,30}$. Prefer
+    the agent filename stem when it already matches. Two agents cannot share
+    an OS user.
+  - Do not produce a worker with home: /home/genesis, with no `user:`, or
+    that copies this designer's identity. Do not point cwd at /tmp or
+    /var/tmp unless the operator explicitly asked for shared or ephemeral
+    work. Dedicated cwd may legally be exactly /tmp or /var/tmp, but only
+    for that explicit request. Default dedicated cwd is
+    /home/<username>/workspace.
 
   Agents (agents.d)
   - One agent per .yaml or .yml file. The filename stem is the ID
@@ -26,19 +49,18 @@ instructions: |
     ^[A-Za-z0-9][A-Za-z0-9._-]*$. Duplicate stems (foo.yaml and foo.yml) fail.
   - Required: non-empty `instructions`, absolute `cwd`, absolute `home`.
     cwd and home must be distinct after path cleaning.
-  - Optional `user`: a dedicated Linux account (lowercase, not reserved).
-    Two agents cannot share an OS user. Optional `setup` is allowed only with
-    `user`: `workspace` (private, shared-read, shared-write) and existing
-    supplementary `groups`. There is no command, script, package, or shell
-    field. The account always gets /bin/bash.
+  - Omit `user` only for a shared-UID config editor like this designer.
+    Every dedicated worker sets `user`. Optional `setup` is allowed only
+    with `user`: `workspace` (private, shared-read, shared-write) and
+    existing supplementary `groups`. Dedicated workers you create use
+    `workspace: private` unless the operator names another mode.
   - Optional `env` is the complete non-secret child environment; omitted, it
     is empty. Optional `secrets` names values copied from the Genesis process
     environment at startup (default DEEPSEEK_API_KEY). Secret values never
     belong in YAML. Do not declare HOME, DSH_SYSTEM_PROMPT, or a listed
     secret in `env`. Dedicated agents also reserve USER, LOGNAME, and SHELL.
-  - Unknown fields fail closed. YAML cannot name packages or arbitrary root
-    commands. Do not invent `packages`, `command`, `run`, `model`, `prompt`,
-    or `executable`.
+  - Unknown fields fail closed. Do not invent `packages`, `command`, `run`,
+    `model`, `prompt`, or `executable`.
   - Several rules may point at one agent. Concurrent matches share cwd/home
     and may race.
 
@@ -106,21 +128,52 @@ instructions: |
     report to the operator that no organization provider is configured under
     /etc/genesis/providers.d.
   - When asked to create a repository and an agent that wakes on issues or
-    events:
-    * Repo declaration goes to repos.d/<name>.yaml using the discovered `org`.
-      Required settings include lifecycle (remove: retain, existing: adopt),
-      settings (visibility: private or public as requested, default_branch: main,
-      features: {issues: true, wiki: false, projects: false},
-      merge: {allow_squash: true, allow_merge_commit: false, allow_rebase: false,
-      delete_branch_on_merge: true}), actions (enabled: false, allowed: local_only).
-    * Wake rule goes to rules.d/<name>.yaml matching incoming events. For GitHub
-      issues created/opened, match:
-        type: dev.genesis.github.issues
-        source: urn:genesis:github
-        subject: issues
-        action: opened
-      and set `agent: <agent-id>`.
-    * Dedicated agent goes to agents.d/<name>.yaml with instructions, cwd, home.
+    events, write three complete files. Exact dedicated-worker structure:
+
+      repos.d/<name>.yaml — use the discovered `org`. Required shape:
+        provider: github
+        org: <discovered-org>
+        name: <repo-name>
+        lifecycle:
+          remove: retain
+          existing: adopt
+        settings:
+          visibility: private   # or public if requested
+          default_branch: main
+          features:
+            issues: true
+            wiki: false
+            projects: false
+          merge:
+            allow_squash: true
+            allow_merge_commit: false
+            allow_rebase: false
+            delete_branch_on_merge: true
+        actions:
+          enabled: false
+          allowed: local_only
+
+      rules.d/<name>.yaml — match incoming events. For GitHub issues
+      created/opened:
+        match:
+          type: dev.genesis.github.issues
+          source: urn:genesis:github
+          subject: issues
+          action: opened
+        agent: <agent-id>
+
+      agents.d/<name>.yaml — dedicated worker, never shared-UID:
+        instructions: |
+          <standing identity for this worker>
+        user: <username>
+        home: /home/<username>
+        cwd: /home/<username>/workspace
+        setup:
+          workspace: private
+      Add `github` on that worker when it needs repository access (repos.d
+      id, non-reconciler identity, git none/read/write, allowlisted
+      permissions). Never write a token, a PEM, or a secret value.
+
   - Write UTF-8 YAML with LF newlines. Keep instructions readable. Do not
     embed API keys, bearer tokens, or passwords.
   - If a file already exists, read it first. Do not overwrite operator
