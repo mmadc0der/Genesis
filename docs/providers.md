@@ -12,13 +12,10 @@ agents-and-rules digest unchanged. An empty directory is active.
 
 Docker keeps an empty directory at `/etc/genesis/providers.d` in the image,
 owned `root:genesis` and mode `0750`. The example file is not copied there.
-The entrypoint does not copy providers into `/var/lib/genesis/config`.
-Compose bind-mounts `./runtime/providers` onto that path for the listener
-and the control service, and `./runtime/secrets` onto
-`/var/lib/genesis/secrets` for the root listener only. `runtime/` is
-gitignored. On start it tightens an existing providers directory in place:
-directories `0750`, regular files `0640`, owner `root:genesis` when launched
-as root, without following symlinks. Dedicated agent users are not in the `genesis`
+The entrypoint does not copy providers into `/var/lib/genesis/config`. On
+start it tightens an existing providers directory in place: directories
+`0750`, regular files `0640`, owner `root:genesis` when launched as root,
+without following symlinks. Dedicated agent users are not in the `genesis`
 group, so they cannot read secret references. The listener and control
 process run as `genesis` (uid/gid `65532`) and can. The shared-UID designer
 is that same user, so it can read the directory; it cannot write it.
@@ -243,9 +240,8 @@ Root `launch` takes `-secrets` (default `genesis-secrets`,
 `/var/lib/genesis/secrets` in the image). The directory is mode `0700`,
 owned by root, and is not a symlink. It must not overlap agents, rules,
 repos, providers, data, the designer config root, `/home`, or the
-credential store. Compose bind-mounts `./runtime/secrets` on the root
-service only. The listener process, control, and agents do not receive the
-flag or the mount.
+credential store. Compose mounts it on the root service only. The listener
+process, control, and agents do not receive the flag or the mount.
 
 Each file is a regular file whose name is the provider secret reference.
 Genesis opens it from a pinned directory descriptor with `O_NOFOLLOW`.
