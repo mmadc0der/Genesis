@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -453,12 +454,32 @@ func TestReconcilerSecretResolutionIsRootNamedAndFailClosed(t *testing.T) {
 	key := testAppKey(t)
 	secrets := openTestSecretStore(t)
 	writeSecretPEM(t, secrets.root, secretName, key)
+	writeAppID(t, secrets.root, "100001")
+	installationLookups := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/orgs/octo-org/installation" {
+			http.NotFound(w, r)
+			return
+		}
+		installationLookups++
+		if r.Header.Get("Accept") != "application/vnd.github+json" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Errorf("installation headers = %#v", r.Header)
+		}
+		_, _ = w.Write([]byte(`{"id":100002}`))
+	}))
+	t.Cleanup(server.Close)
 	state := &privilegedState{
 		secrets:      secrets,
 		agentsDir:    agentsDir,
 		rulesDir:     rulesDir,
 		reposDir:     reposDir,
 		providersDir: providersDir,
+	}
+	state.registrar = githubRegistrar{
+		baseURL:   server.URL,
+		transport: server.Client().Transport,
+		now:       func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) },
+		state:     state,
 	}
 	request := grantRegistration{
 		Agent: "worker", Repository: "lab", Identity: programmerIdentity, Git: gitRead,
@@ -485,8 +506,6 @@ identities:
     role: reconciler
     credential: app
     secret: EVIL_APP_RECONCILER_PEM
-    app_id: "300001"
-    installation_id: "300002"
 `)
 	evilKey := testAppKey(t)
 	writeSecretPEM(t, secrets.root, "EVIL_APP_RECONCILER_PEM", evilKey)
@@ -507,6 +526,9 @@ identities:
 	again, err := state.resolveReconcilerApp(context.Background(), request)
 	if err != nil || again.Key == nil || again.Key.N.Cmp(key.N) != 0 || again.Key.N.Cmp(evilKey.N) == 0 {
 		t.Fatalf("reconciler key changed after the cross-org probe: %v", err)
+	}
+	if installationLookups != 1 {
+		t.Fatalf("installation lookups = %d, want a cache hit", installationLookups)
 	}
 	if err := os.Remove(filepath.Join(secrets.root, secretName)); err != nil {
 		t.Fatal(err)
@@ -551,20 +573,227 @@ func TestSecretStoreRejectsLooseFilesAndOverlap(t *testing.T) {
 	}
 }
 
-func TestReconcilerAppIDsAreRequiredOnlyThere(t *testing.T) {
+func TestProviderIdentitiesRejectAppAndInstallationIDs(t *testing.T) {
 	agentsDir := t.TempDir()
 	rulesDir := t.TempDir()
 	reposDir := t.TempDir()
 	providersDir := t.TempDir()
-	without := strings.ReplaceAll(validProviderYAML(), "\n    app_id: \"910000000000000001\"\n    installation_id: \"910000000000000002\"", "")
-	writeRepoFile(t, providersDir, "github.yaml", without)
-	if _, _, err := loadProviders(providersDir, agentsDir, rulesDir, reposDir); err == nil || strings.Contains(err.Error(), providerSecretRef) {
-		t.Fatalf("missing app id error = %v", err)
+	writeRepoFile(t, providersDir, "github.yaml", validProviderYAML())
+	if _, _, err := loadProviders(providersDir, agentsDir, rulesDir, reposDir); err != nil {
+		t.Fatal(err)
 	}
-	withProgrammer := strings.Replace(validProviderYAML(), "secret: "+programmerSecret, "secret: "+programmerSecret+"\n    app_id: \"5\"", 1)
-	writeRepoFile(t, providersDir, "github.yaml", withProgrammer)
-	if _, _, err := loadProviders(providersDir, agentsDir, rulesDir, reposDir); err == nil || !strings.Contains(err.Error(), "reconciler") {
-		t.Fatalf("programmer app id error = %v", err)
+	for _, field := range []string{"app_id", "installation_id"} {
+		withField := strings.Replace(validProviderYAML(), "secret: "+providerSecretRef, "secret: "+providerSecretRef+"\n    "+field+`: "5"`, 1)
+		writeRepoFile(t, providersDir, "github.yaml", withField)
+		_, _, err := loadProviders(providersDir, agentsDir, rulesDir, reposDir)
+		if err == nil || !strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), providerSecretRef) {
+			t.Fatalf("%s error = %v", field, err)
+		}
+		onProgrammer := strings.Replace(validProviderYAML(), "secret: "+programmerSecret, "secret: "+programmerSecret+"\n    "+field+`: "5"`, 1)
+		writeRepoFile(t, providersDir, "github.yaml", onProgrammer)
+		_, _, err = loadProviders(providersDir, agentsDir, rulesDir, reposDir)
+		if err == nil || !strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("programmer %s error = %v", field, err)
+		}
+	}
+}
+
+func TestReadAppIDIsADecimalWithoutNewline(t *testing.T) {
+	store := openTestSecretStore(t)
+	writeAppID(t, store.root, "100001")
+	id, err := store.readAppID()
+	if err != nil || id != "100001" {
+		t.Fatalf("app id = %q %v", id, err)
+	}
+	for _, bad := range []string{"100001\n", "100001\r\n", "0100001", "0", "abc", "100001 ", ""} {
+		if err := os.WriteFile(filepath.Join(store.root, githubAppIDName), []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := store.readAppID()
+		if err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+		if bad != "" && strings.Contains(err.Error(), strings.TrimSpace(bad)) {
+			t.Fatalf("error leaked %q: %v", bad, err)
+		}
+	}
+}
+
+func TestCompanyAppBindsFromSecretAndCachesInstallation(t *testing.T) {
+	secrets := openTestSecretStore(t)
+	key := testAppKey(t)
+	writeSecretPEM(t, secrets.root, "GITHUB_APP_RECONCILER_PEM", key)
+	writeAppID(t, secrets.root, "100001")
+	lookups := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/orgs/octo-org/installation" {
+			http.NotFound(w, r)
+			return
+		}
+		lookups++
+		if r.Header.Get("Accept") != "application/vnd.github+json" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Errorf("installation headers = %#v", r.Header)
+		}
+		raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		parts := strings.Split(raw, ".")
+		if len(parts) != 3 {
+			t.Errorf("authorization was not a jwt")
+		} else if payload, err := base64.RawURLEncoding.DecodeString(parts[1]); err != nil {
+			t.Errorf("jwt payload: %v", err)
+		} else {
+			var claims struct {
+				Iss string `json:"iss"`
+			}
+			if err := json.Unmarshal(payload, &claims); err != nil || claims.Iss != "100001" {
+				t.Errorf("jwt iss = %q %v", claims.Iss, err)
+			}
+		}
+		_, _ = w.Write([]byte(`{"id":100002}`))
+	}))
+	t.Cleanup(server.Close)
+	state := &privilegedState{secrets: secrets}
+	state.registrar = githubRegistrar{
+		baseURL:   server.URL,
+		transport: server.Client().Transport,
+		now:       func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) },
+		state:     state,
+	}
+	binding, err := state.bindCompanyApp(context.Background(), "octo-org", "lab-widget", "GITHUB_APP_RECONCILER_PEM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.AppID != "100001" || binding.InstallationID != "100002" || binding.Org != "octo-org" || binding.Repo != "lab-widget" {
+		t.Fatalf("binding = %#v", binding)
+	}
+	if binding.Key == nil || binding.Key.N.Cmp(key.N) != 0 {
+		t.Fatal("binding key did not match the reconciler secret")
+	}
+	again, err := state.bindCompanyApp(context.Background(), "octo-org", "lab-widget", "GITHUB_APP_RECONCILER_PEM")
+	if err != nil || again.InstallationID != "100002" || lookups != 1 {
+		t.Fatalf("again = %#v err=%v lookups=%d", again.InstallationID, err, lookups)
+	}
+	if cached, ok := state.cachedInstallation("octo-org"); !ok || cached != "100002" {
+		t.Fatalf("cache = %q %v", cached, ok)
+	}
+}
+
+func TestMintGrantRefreshesInstallationOnceOnNotFound(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	fake := newInstallationMintFake(t, now, false)
+	state := &privilegedState{installations: map[string]string{"octo-org": "100002"}}
+	client := companyMintClient(t, state, fake, now)
+	minted, err := client.mintGrant(context.Background(), map[string]string{"contents": "read", "metadata": "read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if minted.Token == "" || client.app.InstallationID != "100009" {
+		t.Fatalf("minted installation = %s token empty=%v", client.app.InstallationID, minted.Token == "")
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.lookups != 1 || len(fake.posts) != 2 || fake.posts[0] != "/app/installations/100002/access_tokens" || fake.posts[1] != "/app/installations/100009/access_tokens" {
+		t.Fatalf("lookups=%d posts=%v", fake.lookups, fake.posts)
+	}
+	if cached, ok := state.cachedInstallation("octo-org"); !ok || cached != "100009" {
+		t.Fatalf("cache = %q %v", cached, ok)
+	}
+}
+
+func TestMintGrantSecondNotFoundIsFinal(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	fake := newInstallationMintFake(t, now, true)
+	state := &privilegedState{installations: map[string]string{"octo-org": "100002"}}
+	client := companyMintClient(t, state, fake, now)
+	_, err := client.mintGrant(context.Background(), map[string]string{"contents": "read", "metadata": "read"})
+	if !githubKind(err, "missing") {
+		t.Fatalf("err = %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.lookups != 1 || len(fake.posts) != 2 {
+		t.Fatalf("lookups=%d posts=%v", fake.lookups, fake.posts)
+	}
+}
+
+func companyMintClient(t *testing.T, state *privilegedState, fake *installationMintFake, now time.Time) *githubClient {
+	t.Helper()
+	state.registrar = githubRegistrar{
+		baseURL:   fake.server.URL,
+		transport: fake.server.Client().Transport,
+		now:       func() time.Time { return now },
+		state:     state,
+	}
+	client, err := state.registrar.(githubRegistrar).client(githubAppBinding{
+		Org: "octo-org", Repo: "lab-widget", AppID: "100001", InstallationID: "100002", Key: fake.key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+type installationMintFake struct {
+	t            *testing.T
+	server       *httptest.Server
+	key          *rsa.PrivateKey
+	now          time.Time
+	mu           sync.Mutex
+	installation int64
+	lookups      int
+	posts        []string
+	failAll      bool
+	refreshed    bool
+}
+
+func newInstallationMintFake(t *testing.T, now time.Time, failAll bool) *installationMintFake {
+	t.Helper()
+	fake := &installationMintFake{
+		t: t, key: testAppKey(t), now: now, installation: 100002, failAll: failAll,
+	}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
+	t.Cleanup(fake.server.Close)
+	return fake
+}
+
+func (f *installationMintFake) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/orgs/octo-org/installation":
+		f.lookups++
+		if r.Header.Get("Accept") != "application/vnd.github+json" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			f.t.Errorf("installation headers = %#v", r.Header)
+		}
+		_, _ = w.Write([]byte(`{"id":` + strconv.FormatInt(f.installation, 10) + `}`))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/app/installations/") && strings.HasSuffix(r.URL.Path, "/access_tokens"):
+		f.posts = append(f.posts, r.URL.Path)
+		var request grantTokenRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			f.t.Errorf("token body: %v", err)
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		if len(request.Repositories) != 1 || request.Repositories[0] != "lab-widget" {
+			f.t.Errorf("repositories = %#v", request.Repositories)
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
+		if f.failAll || id == "100002" {
+			if !f.refreshed {
+				f.installation = 100009
+				f.refreshed = true
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(gitHubTokenResponse{
+			Token:               "ghs_run_token_value_0123456789",
+			ExpiresAt:           f.now.Add(time.Hour),
+			Permissions:         map[string]string{"contents": "read", "metadata": "read"},
+			RepositorySelection: "selected",
+			Repositories:        []gitHubRepoRef{{ID: 4242, Name: "lab-widget", FullName: "octo-org/lab-widget"}},
+		})
+	default:
+		http.NotFound(w, r)
 	}
 }
 
@@ -867,6 +1096,8 @@ func (f *gitHubFake) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.URL.Path == "/orgs/octo-org/installation" && r.Method == http.MethodGet:
+		f.serveOrgInstallation(w, r)
 	case r.URL.Path == "/app/installations/100002/access_tokens" && r.Method == http.MethodPost:
 		f.serveToken(w, r)
 	case r.URL.Path == "/repos/octo-org/lab-widget" && r.Method == http.MethodGet:
@@ -878,6 +1109,13 @@ func (f *gitHubFake) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (f *gitHubFake) serveOrgInstallation(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Accept") != "application/vnd.github+json" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		f.t.Errorf("installation headers = %#v", r.Header)
+	}
+	_, _ = w.Write([]byte(`{"id":100002}`))
 }
 
 func (f *gitHubFake) serveToken(w http.ResponseWriter, r *http.Request) {
@@ -1134,6 +1372,13 @@ func openTestSecretStore(t *testing.T) *secretStore {
 	return store
 }
 
+func writeAppID(t *testing.T, root, id string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, githubAppIDName), []byte(id), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeSecretPEM(t *testing.T, root, name string, key *rsa.PrivateKey) {
 	t.Helper()
 	payload := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
@@ -1150,8 +1395,6 @@ identities:
     role: reconciler
     credential: app
     secret: ` + secret + `
-    app_id: "100001"
-    installation_id: "100002"
   - name: ` + programmerIdentity + `
     role: programmer
     credential: app

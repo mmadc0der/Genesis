@@ -112,6 +112,8 @@ Fields
 
 Not part of this file
 - There is no grants field. Agent github grants are not written here.
+- Do not write app_id or installation_id. Company App install is Genesis's job, not the designer's.
+- Declare org, name, lifecycle, settings, actions, bootstrap, secrets, protection, and identities. Identity roles are manager, programmer, reviewer, and devops.
 - Do not put provider identity files, secret values, or root-only policy in this file.
 
 Example

@@ -101,12 +101,10 @@ type digestProvider struct {
 }
 
 type digestProviderIdentity struct {
-	Name           string `json:"name"`
-	Role           string `json:"role"`
-	Credential     string `json:"credential"`
-	SecretRef      string `json:"secret_ref,omitempty"`
-	AppID          string `json:"app_id,omitempty"`
-	InstallationID string `json:"installation_id,omitempty"`
+	Name       string `json:"name"`
+	Role       string `json:"role"`
+	Credential string `json:"credential"`
+	SecretRef  string `json:"secret_ref,omitempty"`
 }
 
 // rolePermissionCeilings are the maximum GitHub App permission levels a
@@ -577,12 +575,10 @@ func canonicalProviderDigests(providers map[string]providerDefinition) []digestP
 		digests := make([]digestProviderIdentity, 0, len(identities))
 		for _, identity := range identities {
 			digests = append(digests, digestProviderIdentity{
-				Name:           identity.Name,
-				Role:           identity.Role,
-				Credential:     identity.Credential,
-				SecretRef:      identity.Secret,
-				AppID:          identity.AppID,
-				InstallationID: identity.InstallationID,
+				Name:       identity.Name,
+				Role:       identity.Role,
+				Credential: identity.Credential,
+				SecretRef:  identity.Secret,
 			})
 		}
 		out = append(out, digestProvider{
@@ -601,7 +597,7 @@ func providerUTF8(providers map[string]providerDefinition) error {
 			return err
 		}
 		for _, identity := range provider.Identities {
-			if err := requireUTF8(identity.Name, identity.Role, identity.Credential, identity.Secret, identity.AppID, identity.InstallationID); err != nil {
+			if err := requireUTF8(identity.Name, identity.Role, identity.Credential, identity.Secret); err != nil {
 				return err
 			}
 		}

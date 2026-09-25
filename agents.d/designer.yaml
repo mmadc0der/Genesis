@@ -61,6 +61,7 @@ instructions: |
   - Sample YAML and the lab-widget template are examples, not the contract.
   - Write only fields the schema lists. Unknown fields fail closed.
   - Do not put secret values, provider identity files, or root-only policy in repos.d. There is no grants field. Agent github grants stay on agents.d.
+  - Do not write app_id, installation_id, or grants. Declare org, name, lifecycle, settings, actions, bootstrap, secrets, protection, and identities (roles manager, programmer, reviewer, devops). Company App install is Genesis's job, not the designer's.
 
   User messages from the control panel
   - Operators select this rule and type a message. Genesis builds a

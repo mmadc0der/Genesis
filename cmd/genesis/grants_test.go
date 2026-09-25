@@ -776,8 +776,6 @@ identities:
     role: reconciler
     credential: app
     secret: ` + providerSecretRef + `
-    app_id: "910000000000000001"
-    installation_id: "910000000000000002"
   - name: ` + programmerIdentity + `
     role: programmer
     credential: app

@@ -60,6 +60,7 @@ type githubRegistrar struct {
 	resolve     func(context.Context, grantRegistration) (githubAppBinding, error)
 	resolveRepo func(context.Context, repositoryDefinition) (githubAppBinding, error)
 	logger      *slog.Logger
+	state       *privilegedState
 }
 
 type githubAppBinding struct {
@@ -80,6 +81,10 @@ type gitHubTokenRequest struct {
 	Repositories  []string          `json:"repositories,omitempty"`
 	RepositoryIDs []int64           `json:"repository_ids,omitempty"`
 	Permissions   gitHubPermissions `json:"permissions"`
+}
+
+type gitHubInstallation struct {
+	ID int64 `json:"id"`
 }
 
 type gitHubRepoRef struct {
@@ -141,6 +146,7 @@ type githubClient struct {
 	jwt    string
 	jwtExp time.Time
 	logger *slog.Logger
+	state  *privilegedState
 }
 
 func newGitHubRegistrar(state *privilegedState) githubRegistrar {
@@ -155,6 +161,7 @@ func newGitHubRegistrar(state *privilegedState) githubRegistrar {
 		resolve:     state.resolveReconcilerApp,
 		resolveRepo: state.resolveReconcilerRepository,
 		logger:      logger,
+		state:       state,
 	}
 }
 
@@ -276,6 +283,7 @@ func (g githubRegistrar) client(app githubAppBinding) (*githubClient, error) {
 		sleep:  g.sleep,
 		app:    app,
 		logger: g.logger,
+		state:  g.state,
 	}, nil
 }
 
@@ -712,6 +720,25 @@ func (c *githubClient) endpoint(path string) (string, error) {
 	return c.base + path, nil
 }
 
+func (c *githubClient) getOrgInstallation(ctx context.Context, org, jwt string) (string, error) {
+	if err := validateGitHubOrg(org); err != nil || strings.TrimSpace(jwt) == "" {
+		return "", githubErr("auth")
+	}
+	body, _, err := c.do(ctx, http.MethodGet, "/orgs/"+url.PathEscape(org)+"/installation", jwt, nil)
+	if err != nil {
+		return "", err
+	}
+	var parsed gitHubInstallation
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.ID <= 0 {
+		return "", githubErr("partial")
+	}
+	id := strconv.FormatInt(parsed.ID, 10)
+	if err := validateGitHubID("installation", id); err != nil {
+		return "", githubErr("partial")
+	}
+	return id, nil
+}
+
 func (c *githubClient) appJWT() (string, error) {
 	now := c.now()
 	if c.jwt != "" && now.Add(30*time.Second).Before(c.jwtExp) {
@@ -1046,7 +1073,20 @@ func (s *privilegedState) resolveReconcilerApp(ctx context.Context, req grantReg
 	if err != nil {
 		return githubAppBinding{}, err
 	}
-	payload, err := s.secrets.read(chosen.Secret)
+	return s.bindCompanyApp(ctx, repo.Org, repo.Name, chosen.Secret)
+}
+
+func (s *privilegedState) bindCompanyApp(ctx context.Context, org, repo, secretName string) (githubAppBinding, error) {
+	if err := ctx.Err(); err != nil {
+		return githubAppBinding{}, err
+	}
+	if s == nil || s.secrets == nil {
+		return githubAppBinding{}, errReconcilerUnavailable
+	}
+	if err := validateGitHubOrg(org); err != nil || validateGitHubRepoName(repo) != nil {
+		return githubAppBinding{}, errReconcilerUnavailable
+	}
+	payload, err := s.secrets.read(secretName)
 	if err != nil {
 		return githubAppBinding{}, errReconcilerUnavailable
 	}
@@ -1055,13 +1095,90 @@ func (s *privilegedState) resolveReconcilerApp(ctx context.Context, req grantReg
 	if err != nil {
 		return githubAppBinding{}, errReconcilerUnavailable
 	}
+	appID, err := s.secrets.readAppID()
+	if err != nil {
+		return githubAppBinding{}, err
+	}
+	installationID, err := s.companyInstallation(ctx, org, appID, key)
+	if err != nil {
+		return githubAppBinding{}, err
+	}
 	return githubAppBinding{
-		Org:            repo.Org,
-		Repo:           repo.Name,
-		AppID:          chosen.AppID,
-		InstallationID: chosen.InstallationID,
+		Org:            org,
+		Repo:           repo,
+		AppID:          appID,
+		InstallationID: installationID,
 		Key:            key,
 	}, nil
+}
+
+func (s *privilegedState) companyInstallation(ctx context.Context, org, appID string, key *rsa.PrivateKey) (string, error) {
+	if id, ok := s.cachedInstallation(org); ok {
+		return id, nil
+	}
+	client, err := s.companyClient(githubAppBinding{Org: org, AppID: appID, Key: key})
+	if err != nil {
+		return "", err
+	}
+	jwt, err := client.appJWT()
+	if err != nil {
+		return "", err
+	}
+	id, err := client.getOrgInstallation(ctx, org, jwt)
+	if err != nil {
+		return "", err
+	}
+	s.rememberInstallation(org, id)
+	return id, nil
+}
+
+func (s *privilegedState) companyClient(app githubAppBinding) (*githubClient, error) {
+	registrar, ok := s.registrar.(githubRegistrar)
+	if !ok || registrar.transport == nil || strings.TrimSpace(registrar.baseURL) == "" {
+		return nil, errReconcilerUnavailable
+	}
+	client, err := registrar.client(app)
+	if err != nil {
+		return nil, err
+	}
+	if client.state == nil {
+		client.state = s
+	}
+	return client, nil
+}
+
+func (s *privilegedState) cachedInstallation(org string) (string, bool) {
+	if s == nil || org == "" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.installations[org]
+	if !ok || id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+func (s *privilegedState) rememberInstallation(org, id string) {
+	if s == nil || org == "" || id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.installations == nil {
+		s.installations = map[string]string{}
+	}
+	s.installations[org] = id
+}
+
+func (s *privilegedState) dropInstallation(org string) {
+	if s == nil || org == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.installations, org)
 }
 
 func selectReconciler(repo repositoryDefinition, providers map[string]providerDefinition, identityName string) (providerIdentity, error) {

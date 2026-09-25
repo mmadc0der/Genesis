@@ -185,7 +185,6 @@ python3 - <<'PY'
 import os
 from pathlib import Path
 org, repo = os.environ["ORG"], os.environ["REPO"]
-app, inst = os.environ["APP_ID"], os.environ["INSTALLATION_ID"]
 Path("/tmp/genesis-probe-provider.yaml").write_text(f"""provider: github
 org: {org}
 identities:
@@ -193,8 +192,6 @@ identities:
     role: reconciler
     credential: app
     secret: GITHUB_APP_RECONCILER_PEM
-    app_id: "{app}"
-    installation_id: "{inst}"
   - name: programmer
     role: programmer
     credential: app
@@ -263,7 +260,10 @@ Expected from `find`: one line, `f 600` and the same byte count as
 `wc -c`. The programmer secret name is only a reference. Do not create that
 file. The provider file is in the container filesystem and must be rewritten
 after `docker compose up --build`. The secret file is on the
-`genesis-secrets` volume.
+`genesis-secrets` volume. Before a repos sync, also place the company App id
+at `/var/lib/genesis/secrets/GITHUB_APP_ID` (mode `0600`, a decimal id, no
+trailing newline). Do not put `app_id` or `installation_id` in the provider
+file. Genesis discovers the installation from the organization.
 
 `example.yaml` matches `type=dev.genesis.run`, `source=urn:genesis:example`,
 `subject=hello`, and starts `workspace-janitor`.

@@ -258,6 +258,17 @@ func (c *githubClient) mintGrant(ctx context.Context, perms map[string]string) (
 }
 
 func (c *githubClient) mintGrantOnce(ctx context.Context, perms map[string]string) (tokenResult, error) {
+	minted, err := c.postGrantToken(ctx, perms)
+	if err == nil || !githubKind(err, "missing") {
+		return minted, err
+	}
+	if err := c.refreshCompanyInstallation(ctx); err != nil {
+		return tokenResult{}, err
+	}
+	return c.postGrantToken(ctx, perms)
+}
+
+func (c *githubClient) postGrantToken(ctx context.Context, perms map[string]string) (tokenResult, error) {
 	jwt, err := c.appJWT()
 	if err != nil {
 		return tokenResult{}, err
@@ -275,6 +286,28 @@ func (c *githubClient) mintGrantOnce(ctx context.Context, perms map[string]strin
 		return tokenResult{}, err
 	}
 	return parseTokenResponse(body)
+}
+
+// refreshCompanyInstallation drops the cached installation id for the org,
+// looks it up once, and updates the binding. The caller retries the mint
+// once. A second 404 is not refreshed again.
+func (c *githubClient) refreshCompanyInstallation(ctx context.Context) error {
+	if c == nil || c.state == nil {
+		return githubErr("missing")
+	}
+	org := c.app.Org
+	c.state.dropInstallation(org)
+	jwt, err := c.appJWT()
+	if err != nil {
+		return err
+	}
+	id, err := c.getOrgInstallation(ctx, org, jwt)
+	if err != nil {
+		return err
+	}
+	c.app.InstallationID = id
+	c.state.rememberInstallation(org, id)
+	return nil
 }
 
 func parsePositiveID(value string) (string, error) {

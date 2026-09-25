@@ -490,6 +490,7 @@ func observationState(t *testing.T, fake *observationFake, now time.Time) (*priv
 	secretName := "GITHUB_APP_RECONCILER_PEM"
 	writeRepoFile(t, providersDir, "github.yaml", reconcilerProviderYAML(secretName))
 	writeSecretPEM(t, secrets.root, secretName, key)
+	writeAppID(t, secrets.root, "100001")
 	state := &privilegedState{
 		logger: discardLogger(), host: unixHost{}, mutate: true,
 		dataDir: dataDir, secrets: secrets, agentsDir: agentsDir, rulesDir: rulesDir,
@@ -597,6 +598,11 @@ func (f *observationFake) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.URL.Path == "/orgs/octo-org/installation":
+		if r.Header.Get("Accept") != "application/vnd.github+json" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			f.t.Errorf("installation headers = %#v", r.Header)
+		}
+		_, _ = w.Write([]byte(`{"id":100002}`))
 	case r.URL.Path == "/repos/octo-org/lab-widget":
 		f.repoCalls.Add(1)
 		if f.blockRepo != nil {

@@ -319,22 +319,7 @@ func (s *privilegedState) resolveReconcilerRepository(ctx context.Context, defin
 	if err != nil {
 		return githubAppBinding{}, err
 	}
-	payload, err := s.secrets.read(chosen.Secret)
-	if err != nil {
-		return githubAppBinding{}, errReconcilerUnavailable
-	}
-	defer clear(payload)
-	key, err := parseAppPrivateKey(payload)
-	if err != nil {
-		return githubAppBinding{}, errReconcilerUnavailable
-	}
-	return githubAppBinding{
-		Org:            definition.Org,
-		Repo:           definition.Name,
-		AppID:          chosen.AppID,
-		InstallationID: chosen.InstallationID,
-		Key:            key,
-	}, nil
+	return s.bindCompanyApp(ctx, definition.Org, definition.Name, chosen.Secret)
 }
 
 func selectOrgReconciler(org string, providers map[string]providerDefinition) (providerIdentity, error) {
@@ -348,7 +333,7 @@ func selectOrgReconciler(org string, providers map[string]providerDefinition) (p
 			if identity.Role != roleReconciler {
 				continue
 			}
-			if identity.Credential != credentialApp || identity.Secret == "" || identity.AppID == "" || identity.InstallationID == "" {
+			if identity.Credential != credentialApp || identity.Secret == "" {
 				return providerIdentity{}, errReconcilerUnavailable
 			}
 			found = identity

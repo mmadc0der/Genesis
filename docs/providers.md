@@ -39,8 +39,6 @@ identities:
     role: reconciler
     credential: app
     secret: GITHUB_APP_RECONCILER_PEM
-    app_id: "100001"
-    installation_id: "100002"
   - name: programmer
     role: programmer
     credential: app
@@ -62,11 +60,23 @@ identities:
 | `identities[].role` | `reconciler`, `manager`, `programmer`, `reviewer`, `devops`, or `reader`. Unique within the file. `reconciler` is not an agent role. |
 | `identities[].credential` | `app` or `none`. `none` is allowed only for `reader`. |
 | `identities[].secret` | Required for `app`, forbidden for `none`. A name matching `^[A-Z][A-Z0-9_]{0,63}$`. Two identities cannot share a reference. |
-| `identities[].app_id` | Required on `reconciler`, forbidden on every other role. A decimal GitHub App id, not a secret and not a path. |
-| `identities[].installation_id` | Required on `reconciler`, forbidden on every other role. A decimal installation id. |
+
+`app_id` and `installation_id` are rejected on every identity, including
+`reconciler`. They fail closed as unknown fields, the same way any other
+illegal identity key fails. There is no migration that still accepts them.
 
 PEM markers and GitHub token prefixes are rejected in every string. The
 reference is not a path, URL, or file body. Genesis does not read it.
+
+The company GitHub App id is the file `GITHUB_APP_ID` in the root secrets
+directory, next to the reconciler PEM. In the image that path is
+`/var/lib/genesis/secrets/GITHUB_APP_ID`. The file is a decimal App id with
+no trailing newline. It is not a provider secret reference and it is not
+written in providers YAML. Every agent works under that one App. Given
+only the organization and repository name, Genesis discovers the
+installation with `GET /orgs/{org}/installation` and the App JWT (`iss` is
+the App id from that file). The installation id is cached in memory, keyed
+by organization. It is not written to disk or YAML.
 
 `providers.d/example.yaml` matches `repos.d/example.yaml`'s organization. It
 is not applied. The image does not install it into `/etc/genesis/providers.d`.
@@ -237,7 +247,9 @@ Each file is a regular file whose name is the provider secret reference.
 Genesis opens it from a pinned directory descriptor with `O_NOFOLLOW`.
 Symlinks, extra names, hard links, and group- or world-accessible files
 fail closed. The reconciler file is the GitHub App RSA private key.
-`GITHUB_APP_WEBHOOK_SECRET` may sit beside that key. It is the webhook HMAC
+`GITHUB_APP_ID` sits beside that key: a decimal App id, mode `0600`, with
+no trailing newline. It is not a provider `secret` reference.
+`GITHUB_APP_WEBHOOK_SECRET` may sit beside them. It is the webhook HMAC
 secret, mode `0600`, and is not a provider `secret` reference. See
 [webhooks.md](webhooks.md).
 Programmer and reviewer references are not read in this stage. Public-read
@@ -245,7 +257,9 @@ and `git: none` grants make no GitHub calls.
 
 For a non-public git `read` or `write` grant, the root coordinator mints a
 short-lived App JWT (`iat` 60 seconds in the past, `exp` eight minutes
-ahead, `iss` the app id) and repository-scoped installation tokens. It
+ahead, `iss` the App id from `GITHUB_APP_ID`) and repository-scoped
+installation tokens. The installation id comes from the in-memory cache,
+filled by `GET /orgs/{org}/installation` on first use. The coordinator
 discovers `GET /repos/{org}/{name}`, then lists deploy keys with a token
 scoped to that repository id and only `administration: write` plus
 `metadata: read`. The declared agent, identity, git access, and
@@ -309,11 +323,17 @@ Root keeps the deploy key it already registered and the per-run
 not change repository create, apply, or webhook ingress.
 
 When a dedicated run's grant requires an API credential, root mints one
-installation token for that run only. The request permissions are exactly
-the permissions the grant already declares. GitHub must return that same
-set, scoped to the bound repository. Any other permission set, or any mint
-error, fails closed: the DeepSeek session does not start and the run is
-not reported as success. The token's lifetime ends with the run. Root
+installation token for that run only. The request is
+`POST /app/installations/{installation_id}/access_tokens` with
+`repositories` set to that repository name, the same scope as before. The
+request permissions are exactly the permissions the grant already
+declares. GitHub must return that same set, scoped to the bound
+repository. If that mint returns HTTP 404, Genesis drops the cached
+installation id for the organization, calls `GET /orgs/{org}/installation`
+once, updates the binding, and retries the mint once. A second 404 is a
+hard error. Genesis does not loop. Any other permission set, or any other
+mint error, fails closed: the DeepSeek session does not start and the run
+is not reported as success. The token's lifetime ends with the run. Root
 removes it from the process environment when the run ends and does not
 write it to disk.
 
