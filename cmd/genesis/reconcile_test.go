@@ -170,8 +170,12 @@ func TestApplyPlanCreatesUserIdempotentlyAndRetainsRemovedUsers(t *testing.T) {
 		t.Fatalf("second = %#v", second)
 	}
 	home := host.dirs["/home/workspace-janitor"]
-	if home.mode != 0o700 || home.uid != 2000 {
+	if home.mode != 0o755 || home.uid != 2000 || home.mode&0o022 != 0 {
 		t.Fatalf("home = %#v", home)
+	}
+	workspace := host.dirs["/home/workspace-janitor/workspace"]
+	if workspace.mode != 0o755 || workspace.uid != 2000 || workspace.gid != 2000 || workspace.mode&0o022 != 0 {
+		t.Fatalf("private workspace = %#v", workspace)
 	}
 	removed, err := state.apply(privilegedPlan{Agents: true, Intents: []privilegedIntent{}})
 	if err != nil {
@@ -308,8 +312,34 @@ func TestApplySharedWorkspaceUsesGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	cwd := host.dirs["/home/workspace-janitor/workspace"]
-	if cwd.mode != 0o770 || cwd.gid != 42 {
+	if cwd.mode != 0o775 || cwd.gid != 42 || cwd.mode&0o002 != 0 {
 		t.Fatalf("cwd = %#v", cwd)
+	}
+	home := host.dirs["/home/workspace-janitor"]
+	if home.mode != 0o755 || home.mode&0o022 != 0 {
+		t.Fatalf("home = %#v", home)
+	}
+}
+
+func TestApplySharedReadWorkspaceIsWorldReadable(t *testing.T) {
+	host := newMemoryHost()
+	state := &privilegedState{host: host, mutate: true}
+	_, err := state.apply(privilegedPlan{Intents: []privilegedIntent{{
+		Kind:      intentEnsureAgentUser,
+		Agent:     "janitor",
+		User:      "workspace-janitor",
+		Home:      "/home/workspace-janitor",
+		Cwd:       "/home/workspace-janitor/workspace",
+		Shell:     agentShell,
+		Groups:    []string{"src"},
+		Workspace: workspaceSharedRead,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := host.dirs["/home/workspace-janitor/workspace"]
+	if cwd.mode != 0o755 || cwd.gid != 42 || cwd.mode&0o022 != 0 {
+		t.Fatalf("shared-read workspace = %#v", cwd)
 	}
 }
 

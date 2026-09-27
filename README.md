@@ -155,7 +155,8 @@ agent: workspace-janitor
 ```
 
 `match` entries are exact, case-sensitive comparisons against top-level string
-CloudEvent attributes. `agent` is a required agent ID. Every matching rule
+CloudEvent attributes. `subject` may use a single-segment `*` glob and other
+attributes stay exact. `agent` is a required agent ID. Every matching rule
 runs, in lexical filename order. The listener caches agents and rules at
 start; later filesystem edits are inactive until an authorized `POST /sync`.
 A missing agent reference or leftover `run` block fails closed at load or

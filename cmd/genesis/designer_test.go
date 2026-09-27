@@ -92,15 +92,17 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"Company App install is Genesis's job, not the designer's.",
 		"automatically reconciles",
 		"/bin/bash",
-		"mode 0700",
+		"mode 0755",
+		"Other agents can read that workspace and cannot write it.",
 		"user: <username>",
 		"home: /home/<username>",
 		"cwd: /home/<username>/workspace",
 		"workspace: private",
 		"Do not produce a worker with home: /home/genesis",
 		"shared or ephemeral",
-		"type: dev.genesis.github.issues",
-		"source: urn:genesis:github",
+		"The only provider value the loader accepts is github.",
+		"There is no local-project type.",
+		"does not create a local project",
 	} {
 		if !strings.Contains(designer.Instructions, phrase) {
 			t.Fatalf("designer instructions missing %q", phrase)

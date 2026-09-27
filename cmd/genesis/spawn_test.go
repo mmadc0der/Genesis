@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestPrivilegedSpawnAndWaitRoundTrip(t *testing.T) {
@@ -293,6 +295,69 @@ func TestSpawnEnvStripsPrivilegedKeysAndIgnoresParentPath(t *testing.T) {
 	}
 	if plainMap["PATH"] != "/usr/local/bin:/usr/bin:/bin" {
 		t.Fatalf("default PATH = %q", plainMap["PATH"])
+	}
+}
+
+func TestSpawnedAgentUmaskLeavesWorkspaceReadable(t *testing.T) {
+	umaskMu.Lock()
+	previous := unix.Umask(0o077)
+	umaskMu.Unlock()
+	t.Cleanup(func() {
+		umaskMu.Lock()
+		unix.Umask(previous)
+		umaskMu.Unlock()
+	})
+
+	_, identity, dataDir, runDir, dshHome := testSpawnIdentity(t)
+	state := newPrivilegedState(discardLogger(), "/usr/bin/python3", "import os\nos.mkdir('created-dir')\nopen('created-file','w').close()\n", "", dataDir)
+	state.host = newMemoryHost()
+	state.remember(identity)
+
+	pid, err := state.spawn(spawnRequest{
+		Agent:   identity.Agent,
+		User:    identity.Username,
+		Cwd:     identity.Cwd,
+		Home:    identity.Home,
+		RunDir:  runDir,
+		DshHome: dshHome,
+	}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	umaskMu.Lock()
+	restored := unix.Umask(0o077)
+	unix.Umask(0o077)
+	umaskMu.Unlock()
+	if restored != 0o077 {
+		t.Fatalf("parent umask after spawn = %#o, want 077", restored)
+	}
+	code, err := state.wait(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	dirInfo, err := os.Stat(filepath.Join(identity.Cwd, "created-dir"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm() != 0o755 {
+		t.Fatalf("created directory mode = %#o, want 0755", dirInfo.Mode().Perm())
+	}
+	fileInfo, err := os.Stat(filepath.Join(identity.Cwd, "created-file"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileInfo.Mode().Perm() != 0o644 {
+		t.Fatalf("created file mode = %#o, want 0644", fileInfo.Mode().Perm())
+	}
+	dshInfo, err := os.Stat(dshHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dshInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("dsh_home mode = %#o, want 0700", dshInfo.Mode().Perm())
 	}
 }
 

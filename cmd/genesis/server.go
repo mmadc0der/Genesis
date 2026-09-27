@@ -368,7 +368,46 @@ func (e cloudEvent) stringAttribute(name string) (string, bool) {
 func (r rule) matches(event cloudEvent) bool {
 	for attribute, expected := range r.Match {
 		actual, ok := event.stringAttribute(attribute)
-		if !ok || actual != expected {
+		if !ok {
+			return false
+		}
+		if attribute == "subject" {
+			if !subjectMatches(expected, actual) {
+				return false
+			}
+			continue
+		}
+		if actual != expected {
+			return false
+		}
+	}
+	return true
+}
+
+// subjectMatches compares a subject pattern to a CloudEvent subject.
+// A pattern with no '*' is exact equality, including values that contain
+// slashes. Otherwise the pattern is a '/'-separated list of segments. A
+// segment that is exactly "*" matches one non-empty subject segment and
+// does not match across '/'. Any other segment is exact, so "**", "?",
+// and character classes are not wildcards. An empty pattern is exact, not
+// match-all.
+func subjectMatches(pattern, subject string) bool {
+	if !strings.Contains(pattern, "*") {
+		return pattern == subject
+	}
+	patternSegments := strings.Split(pattern, "/")
+	subjectSegments := strings.Split(subject, "/")
+	if len(patternSegments) != len(subjectSegments) {
+		return false
+	}
+	for i, segment := range patternSegments {
+		if segment == "*" {
+			if subjectSegments[i] == "" {
+				return false
+			}
+			continue
+		}
+		if segment != subjectSegments[i] {
 			return false
 		}
 	}

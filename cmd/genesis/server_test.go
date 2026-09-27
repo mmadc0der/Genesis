@@ -324,6 +324,235 @@ func TestEventServerRequiresStructuredCloudEvent(t *testing.T) {
 	}
 }
 
+func TestRuleMatchesSubjectGlob(t *testing.T) {
+	stringEvent := func(t *testing.T, attributes map[string]string) cloudEvent {
+		t.Helper()
+		event := make(cloudEvent, len(attributes))
+		for key, value := range attributes {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event[key] = raw
+		}
+		return event
+	}
+
+	tests := []struct {
+		name    string
+		match   map[string]string
+		event   cloudEvent
+		matches bool
+	}{
+		{
+			name:    "worker star matches one child segment",
+			match:   map[string]string{"subject": "worker/*"},
+			event:   stringEvent(t, map[string]string{"subject": "worker/run-1"}),
+			matches: true,
+		},
+		{
+			name:    "worker star does not match an extra segment",
+			match:   map[string]string{"subject": "worker/*"},
+			event:   stringEvent(t, map[string]string{"subject": "worker/run-1/extra"}),
+			matches: false,
+		},
+		{
+			name:    "worker star does not match the parent subject",
+			match:   map[string]string{"subject": "worker/*"},
+			event:   stringEvent(t, map[string]string{"subject": "worker"}),
+			matches: false,
+		},
+		{
+			name:    "worker star does not match an empty segment",
+			match:   map[string]string{"subject": "worker/*"},
+			event:   stringEvent(t, map[string]string{"subject": "worker/"}),
+			matches: false,
+		},
+		{
+			name:    "single star matches a one-segment subject",
+			match:   map[string]string{"subject": "*"},
+			event:   stringEvent(t, map[string]string{"subject": "oracle"}),
+			matches: true,
+		},
+		{
+			name:    "single star does not match two segments",
+			match:   map[string]string{"subject": "*"},
+			event:   stringEvent(t, map[string]string{"subject": "oracle/1"}),
+			matches: false,
+		},
+		{
+			name:    "single star does not match an empty subject",
+			match:   map[string]string{"subject": "*"},
+			event:   stringEvent(t, map[string]string{"subject": ""}),
+			matches: false,
+		},
+		{
+			name:    "subject without a star is exact",
+			match:   map[string]string{"subject": "dev.genesis.run"},
+			event:   stringEvent(t, map[string]string{"subject": "dev.genesis.run"}),
+			matches: true,
+		},
+		{
+			name:    "subject without a star does not match a prefix",
+			match:   map[string]string{"subject": "dev.genesis.run"},
+			event:   stringEvent(t, map[string]string{"subject": "dev.genesis.run/extra"}),
+			matches: false,
+		},
+		{
+			name:    "slashed subject without a star is exact",
+			match:   map[string]string{"subject": "worker/run-1"},
+			event:   stringEvent(t, map[string]string{"subject": "worker/run-1"}),
+			matches: true,
+		},
+		{
+			name:    "slashed subject without a star does not match a sibling",
+			match:   map[string]string{"subject": "worker/run-1"},
+			event:   stringEvent(t, map[string]string{"subject": "worker/run-2"}),
+			matches: false,
+		},
+		{
+			name:  "exact type and glob subject both required",
+			match: map[string]string{"type": "dev.genesis.run", "subject": "worker/*"},
+			event: stringEvent(t, map[string]string{
+				"type":    "dev.genesis.run",
+				"subject": "worker/run-1",
+			}),
+			matches: true,
+		},
+		{
+			name:  "type mismatch fails even when the subject glob matches",
+			match: map[string]string{"type": "dev.genesis.run", "subject": "worker/*"},
+			event: stringEvent(t, map[string]string{
+				"type":    "dev.genesis.other",
+				"subject": "worker/run-1",
+			}),
+			matches: false,
+		},
+		{
+			name:    "star in type stays exact",
+			match:   map[string]string{"type": "*"},
+			event:   stringEvent(t, map[string]string{"type": "oracle"}),
+			matches: false,
+		},
+		{
+			name:    "literal star type matches only a star",
+			match:   map[string]string{"type": "*"},
+			event:   stringEvent(t, map[string]string{"type": "*"}),
+			matches: true,
+		},
+		{
+			name:    "star in source stays exact",
+			match:   map[string]string{"source": "urn:genesis:*"},
+			event:   stringEvent(t, map[string]string{"source": "urn:genesis:example"}),
+			matches: false,
+		},
+		{
+			name:    "double star is not a multi-segment glob",
+			match:   map[string]string{"subject": "**"},
+			event:   stringEvent(t, map[string]string{"subject": "oracle/1"}),
+			matches: false,
+		},
+		{
+			name:    "double star matches only the literal subject",
+			match:   map[string]string{"subject": "**"},
+			event:   stringEvent(t, map[string]string{"subject": "**"}),
+			matches: true,
+		},
+		{
+			name:    "question mark is not a wildcard",
+			match:   map[string]string{"subject": "?"},
+			event:   stringEvent(t, map[string]string{"subject": "a"}),
+			matches: false,
+		},
+		{
+			name:    "character class is not a wildcard",
+			match:   map[string]string{"subject": "[ab]"},
+			event:   stringEvent(t, map[string]string{"subject": "a"}),
+			matches: false,
+		},
+		{
+			name:    "literal segment is case-sensitive",
+			match:   map[string]string{"subject": "Worker/*"},
+			event:   stringEvent(t, map[string]string{"subject": "worker/run-1"}),
+			matches: false,
+		},
+		{
+			name:    "two single-segment stars match two segments",
+			match:   map[string]string{"subject": "*/*"},
+			event:   stringEvent(t, map[string]string{"subject": "oracle/1"}),
+			matches: true,
+		},
+		{
+			name:    "two single-segment stars do not match one segment",
+			match:   map[string]string{"subject": "*/*"},
+			event:   stringEvent(t, map[string]string{"subject": "oracle"}),
+			matches: false,
+		},
+		{
+			name:    "star does not match an empty middle segment",
+			match:   map[string]string{"subject": "worker/*/*"},
+			event:   stringEvent(t, map[string]string{"subject": "worker//extra"}),
+			matches: false,
+		},
+		{
+			name:    "empty subject pattern is exact and not match-all",
+			match:   map[string]string{"subject": ""},
+			event:   stringEvent(t, map[string]string{"subject": "oracle"}),
+			matches: false,
+		},
+		{
+			name:    "empty subject pattern matches an empty subject",
+			match:   map[string]string{"subject": ""},
+			event:   stringEvent(t, map[string]string{"subject": ""}),
+			matches: true,
+		},
+		{
+			name:    "missing subject does not match",
+			match:   map[string]string{"subject": "worker/*"},
+			event:   stringEvent(t, map[string]string{"type": "dev.genesis.run"}),
+			matches: false,
+		},
+		{
+			name:  "non-string subject does not match",
+			match: map[string]string{"subject": "worker/*"},
+			event: cloudEvent{
+				"subject": json.RawMessage(`{"id":"worker/run-1"}`),
+			},
+			matches: false,
+		},
+		{
+			name:  "nested data subject is not matched",
+			match: map[string]string{"subject": "worker/*"},
+			event: cloudEvent{
+				"data": json.RawMessage(`{"subject":"worker/run-1"}`),
+			},
+			matches: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := (rule{Match: test.match}).matches(test.event)
+			if got != test.matches {
+				t.Fatalf("matches = %v, want %v", got, test.matches)
+			}
+		})
+	}
+
+	agents := map[string]agentDefinition{"worker": {}}
+	globRule := rule{
+		Match: map[string]string{"type": "dev.genesis.run", "subject": "worker/*"},
+		Agent: "worker",
+	}
+	if err := globRule.validate(agents); err != nil {
+		t.Fatalf("subject glob validate: %v", err)
+	}
+	emptySubject := rule{Match: map[string]string{"subject": ""}, Agent: "worker"}
+	if err := emptySubject.validate(agents); err != nil {
+		t.Fatalf("empty subject validate: %v, want acceptance because empty match values are allowed", err)
+	}
+}
+
 func TestLoadRulesRejectsRunBlockAndRawArguments(t *testing.T) {
 	agentsDir := t.TempDir()
 	writeNamedAgent(t, agentsDir, "janitor.yaml", nil)

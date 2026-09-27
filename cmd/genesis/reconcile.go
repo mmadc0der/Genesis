@@ -387,7 +387,7 @@ func applyAgentUserIntent(host hostAPI, intent privilegedIntent) error {
 	}
 	uid := int(account.UID)
 	gid := int(account.GID)
-	if err := host.EnsureDir(spec.Home, uid, gid, 0o700); err != nil {
+	if err := host.EnsureDir(spec.Home, uid, gid, agentHomeMode); err != nil {
 		return fmt.Errorf("agent %s: home: %w", intent.Agent, err)
 	}
 
@@ -461,16 +461,26 @@ func lookupReconciledIdentity(host hostAPI, intent privilegedIntent) (reconciled
 	}, nil
 }
 
+// Other dedicated agent accounts can read homes and workspaces without a
+// shared group. Other never receives write. shared-write keeps group write
+// for the declared group. Credential stores and the run journal stay private.
+const (
+	agentHomeMode            os.FileMode = 0o755
+	workspacePrivateMode     os.FileMode = 0o755
+	workspaceSharedReadMode  os.FileMode = 0o755
+	workspaceSharedWriteMode os.FileMode = 0o775
+)
+
 func workspaceOwnership(host hostAPI, spec agentUserSpec, account *unixAccount) (uid, gid int, mode os.FileMode, err error) {
 	uid = int(account.UID)
 	gid = int(account.GID)
 	switch spec.Workspace {
 	case workspacePrivate, "":
-		return uid, gid, 0o700, nil
+		return uid, gid, workspacePrivateMode, nil
 	case workspaceSharedRead, workspaceSharedWrite:
-		mode = 0o750
+		mode = workspaceSharedReadMode
 		if spec.Workspace == workspaceSharedWrite {
-			mode = 0o770
+			mode = workspaceSharedWriteMode
 		}
 		if len(spec.Groups) > 0 {
 			groupID, err := host.LookupGroup(spec.Groups[0])

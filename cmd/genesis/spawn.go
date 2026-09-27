@@ -12,7 +12,14 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
+
+// agentSpawnUmask is 022 so a spawned agent creates directories as 0755 and
+// files as 0644. umask 077 would hide those file contents from other agent
+// accounts even when the workspace directory is 0755.
+const agentSpawnUmask = 0o022
 
 type spawnRequest struct {
 	Agent      string            `json:"agent"`
@@ -63,24 +70,24 @@ type privilegedState struct {
 	listenerUser string
 	dataDir      string
 
-	mu           sync.Mutex
-	users        map[string]reconciledIdentity
-	spawned      map[int]*spawnedChild
-	credentials  *credentialStore
-	secrets      *secretStore
-	agentsDir    string
-	rulesDir     string
-	reposDir     string
-	providersDir string
+	mu            sync.Mutex
+	users         map[string]reconciledIdentity
+	spawned       map[int]*spawnedChild
+	credentials   *credentialStore
+	secrets       *secretStore
+	agentsDir     string
+	rulesDir      string
+	reposDir      string
+	providersDir  string
 	registrar     grantRegistrar
 	installations map[string]string // org -> installation id; memory only, never disk or YAML
 	held          map[string]heldGrant
-	uidGrants    map[uint32]*uidGrantHold
-	tokens       runTokenMinter
-	active       map[string]grantRecord
-	gitRemote    func(org, repo string) (string, error)
-	gitBin       string
-	observeGit   func(env, args []string)
+	uidGrants     map[uint32]*uidGrantHold
+	tokens        runTokenMinter
+	active        map[string]grantRecord
+	gitRemote     func(org, repo string) (string, error)
+	gitBin        string
+	observeGit    func(env, args []string)
 }
 
 type uidGrantHold struct {
@@ -170,7 +177,7 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 	child := &spawnedChild{
 		cmd: command, done: make(chan struct{}), ssh: sshAgent, agent: req.Agent, grantID: grantID, dshHome: req.DshHome,
 	}
-	if err := command.Start(); err != nil {
+	if err := startAgentCommand(command); err != nil {
 		if sshAgent != nil {
 			sshAgent.stop()
 			child.ssh = nil
@@ -240,6 +247,16 @@ func (s *privilegedState) killAll() {
 	s.mu.Lock()
 	s.spawned = map[int]*spawnedChild{}
 	s.mu.Unlock()
+}
+
+// startAgentCommand forks the agent with umask 022. The parent umask is
+// restored after Start so credential sockets and the run journal stay private.
+func startAgentCommand(command *exec.Cmd) error {
+	umaskMu.Lock()
+	defer umaskMu.Unlock()
+	previous := unix.Umask(agentSpawnUmask)
+	defer unix.Umask(previous)
+	return command.Start()
 }
 
 func prepareSpawnDirs(host hostAPI, dataDir string, req spawnRequest, identity reconciledIdentity) error {
