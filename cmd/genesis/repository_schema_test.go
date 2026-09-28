@@ -138,9 +138,7 @@ func TestPublishedRepositorySchemaMatchesLoader(t *testing.T) {
 	designer := agents["designer"]
 	for _, phrase := range []string{
 		repositorySchemaImagePath,
-		"instead of inspecting the genesis binary",
-		"Do not run strings, grep, or readelf on the genesis binary",
-		"not the contract",
+		"loader contract",
 	} {
 		if !strings.Contains(designer.Instructions, phrase) {
 			t.Fatalf("designer instructions missing %q", phrase)

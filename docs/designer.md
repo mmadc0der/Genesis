@@ -22,17 +22,15 @@ The designer may create or update agent, rule, and repository YAML. `repos.d`
 records GitHub desired state only. The loader accepts `provider: github` and
 no local-project type. Writing the file does not create a local project, an
 organization, or call a provider. Before it writes `repos.d`, it reads
-`/usr/share/genesis/schema/repository-declaration.txt` and follows that file
-instead of inspecting the genesis binary. The schema is generated from the
-loader structs. `repos.d/example.yaml` and the lab-widget template are
-examples, not that contract. If `/etc/genesis/providers.d` has no `org`, it
-does not guess one. There is no `site.yaml`. Provider files, secret values,
-and root-only policy are not installed next to the schema. It must not add
-a `github` block to itself, and it must not create `providers.d` inside the
-config volume. Provider identities live outside that volume; see
-[providers.md](providers.md). It must not run privileged host setup,
-`useradd`, package installs, or arbitrary root actions. YAML still cannot
-name packages or commands. After it writes files, an operator must **Sync**.
+`/usr/share/genesis/schema/repository-declaration.txt` and follows that file.
+That file is the loader contract. The schema is generated from the loader
+structs. `repos.d/example.yaml` and the lab-widget template are examples.
+If `/etc/genesis/providers.d` has no `org`, it reports that and stops.
+Provider identities live in `/etc/genesis/providers.d`; see
+[providers.md](providers.md). The designer has no `github` block. A worker
+it writes may name a `repos.d` id in an optional `github` block. Secret
+values are not YAML fields. Genesis reconciles OS users from worker YAML.
+After it writes files, an operator must **Sync**.
 The panel Sync reloads agents, rules, and repos together. A rules-only sync
 can leave a new agent inactive. A sync that omits repos leaves a new
 `repos.d` file inactive. Disk edits stay inactive until then. Matching
@@ -42,13 +40,41 @@ volume.
 ## Dedicated workers it writes
 
 This designer omits `user`. Workers it creates (especially agents that wake
-on repository events or issues) must not copy that identity. They declare a
-dedicated OS user. Genesis's privileged coordinator automatically
+on repository events or issues) declare a dedicated OS user. Genesis's
+privileged coordinator automatically
 reconciles the account at root `genesis launch` and on agents `/sync`:
-`/bin/bash`, `/home/<user>` mode `0755`, and the workspace directory.
-Other agents can read that workspace and cannot write it. `shared-write`
-still lets only the declared group write; other users can read and cannot
-write. The designer does not `useradd`.
+`/bin/bash`, home and a private or shared-read workspace mode `0755`, and
+shared-write mode `0775` for the declared group. Another agent can read a
+`0755` home or workspace and cannot write it. New files are created
+world-readable (umask `022`). Python and the harness are in the image for
+every account: `/app/.venv`, `/app/.venv/bin/python3`, and
+`/app/.venv/bin/dsh`. `uv` is used only while building that venv; the
+runtime image does not install it. Code another agent should read belongs
+in the worker workspace. The run journal under `/var/lib/genesis/data/runs`
+stays private. Transcripts are the world-readable copy, and
+`dev.genesis.agent.finished` `data.transcript` is the absolute path.
+
+The worker's `instructions` include the listener curl and those sharing
+facts. From inside the container the listener is `POST`
+`http://127.0.0.1:8787/events` with `Content-Type: application/cloudevents+json`
+and no bearer. Port `8790` is the control panel, not that path. A custom
+event is that JSON. `source` is `urn:genesis:agent:<agent id>`. Session
+continuation is type `dev.genesis.session.continue`: `subject` is the
+finished `gen_` run id, `data.message` is the next turn, and `source` is
+`urn:genesis:agent:oracle` or `urn:genesis:agent:<the agent who owns that
+run>`. The cited run must already have ended. `202` contains the new run
+id. `204` means the continue was refused. The new run reuses the same DSH
+session and the same `DSH_HOME`. The agent does not pass session ids or
+paths. When any session ends, the system emits
+`dev.genesis.agent.finished` with `subject` equal to that agent id.
+
+The shipped oracle (`agents.d/oracle.yaml`, `rules.d/oracle.yaml`) is that
+worker shape: user `oracle`, home `/home/oracle`, cwd
+`/home/oracle/workspace`, `setup.workspace: private`. Its rule matches
+`dev.genesis.agent.finished` with subject `*`. It reads `data.transcript`,
+writes `reports/<runid>.md` in its workspace, and continues with the curl
+when the exit criterion is not met. Reserved OS user names include
+`genesis` and `root`.
 
 Required shape:
 
@@ -60,8 +86,8 @@ setup:
   workspace: private
 ```
 
-Do not omit `user`. Do not set `home: /home/genesis`. Do not point `cwd` at
-`/tmp` or `/var/tmp` unless the operator asked for shared or ephemeral work.
+`/tmp` and `/var/tmp` are legal dedicated cwd values when the operator asked
+for shared or ephemeral work.
 
 ## Control panel message
 
@@ -85,7 +111,7 @@ process was already up with an older cache. A container start that ran the
 entrypoint first loads whatever is on the volume, including newly copied
 defaults.
 
-Do not put `GENESIS_SYNC_TOKEN` in designer `secrets`. The control process
+`GENESIS_SYNC_TOKEN` is not in the designer environment. The control process
 holds the token.
 
 ## Named volume upgrades
