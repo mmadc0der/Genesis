@@ -139,6 +139,7 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 		Env          map[string]string `json:"env"`
 		Secrets      []string          `json:"secrets"`
 		GitHub       *digestGitHub     `json:"github,omitempty"`
+		MaxParallel  *int              `json:"max_parallel,omitempty"`
 	}
 	type ruleDigest struct {
 		Name  string            `json:"name"`
@@ -164,6 +165,7 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 			Env:          definition.Env,
 			Secrets:      definition.Secrets,
 			GitHub:       gitHubDigest(definition),
+			MaxParallel:  definition.MaxParallel,
 		})
 	}
 	ruleDigests := make([]ruleDigest, 0, len(rules))

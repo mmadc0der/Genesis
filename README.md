@@ -124,10 +124,21 @@ from `instructions` for the pinned `sdk-minimal` persona hook. Declaring
 `HOME`, `DSH_SYSTEM_PROMPT`, or any listed secret in `env` is rejected.
 Dedicated agents also reserve `USER`, `LOGNAME`, and `SHELL`. Secret values
 never appear in YAML. Duplicate IDs, duplicate secret names, duplicate OS
-users, unknown fields, and invalid filename stems are rejected.
+users, unknown fields, and invalid filename stems are rejected. `max_parallel`
+is optional and defaults to 1. When set, it must be an integer of at least 1.
 
-Several rules may point at the same agent. Concurrent matches share `cwd` and
-`home` and may race; Genesis does not queue them.
+Several rules may point at the same agent. `max_parallel` is how many runs
+of that one agent may execute at once. The default is 1: a second match for
+the same agent is still accepted (`202` and a new run id) and waits until
+one of that agent's running runs finishes. Continuations of the agent count
+toward the same cap. A different agent is not in that queue. Two agents
+start together whenever each is under its own cap, including when both are
+at the default of 1. Raising `max_parallel` allows that many runs of the
+same agent at once; they still share `cwd` and `home`. Each waiting run keeps
+`queue.json` in its run directory, without secret values. A restart loads
+those files and starts every agent that is under its own cap. A run that
+had already started and has no live process is still closed as interrupted.
+`max_parallel` is not a token budget.
 
 The committed `designer` agent omits `user` on purpose so it can keep
 `cwd: /var/lib/genesis/config` (the writable Compose config root). It runs as

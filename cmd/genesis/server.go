@@ -39,14 +39,17 @@ type cloudEvent map[string]json.RawMessage
 // user, cwd/home remain a workspace split under the listener UID and are not
 // a security sandbox.
 type agentDefinition struct {
-	Instructions   string            `yaml:"instructions"`
-	Cwd            string            `yaml:"cwd"`
-	Home           string            `yaml:"home"`
-	User           string            `yaml:"user,omitempty"`
-	Setup          *agentSetup       `yaml:"setup,omitempty"`
-	Env            map[string]string `yaml:"env,omitempty"`
-	Secrets        []string          `yaml:"secrets,omitempty"`
-	GitHub         *agentGitHub      `yaml:"github,omitempty" json:"-"`
+	Instructions string            `yaml:"instructions"`
+	Cwd          string            `yaml:"cwd"`
+	Home         string            `yaml:"home"`
+	User         string            `yaml:"user,omitempty"`
+	Setup        *agentSetup       `yaml:"setup,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
+	Secrets      []string          `yaml:"secrets,omitempty"`
+	GitHub       *agentGitHub      `yaml:"github,omitempty" json:"-"`
+	// MaxParallel is the most runs of this agent that may execute at once.
+	// Nil means 1. It never limits a different agent.
+	MaxParallel    *int `yaml:"max_parallel,omitempty" json:"max_parallel,omitempty"`
 	id             string
 	credentialMode string
 }
@@ -112,6 +115,7 @@ type eventServer struct {
 	mu         sync.RWMutex
 	syncing    bool
 	generation *generation
+	slots      parallelGate
 }
 
 func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -247,10 +251,13 @@ func (s *eventServer) dispatchCloudEvent(w http.ResponseWriter, event cloudEvent
 	}
 
 	for _, document := range invocations {
-		go func(document invocation) {
-			defer s.store.release(document.RunID)
-			s.runner.Run(document)
-		}(document)
+		limit := 1
+		var secretNames []string
+		if definition, ok := current.agents[document.Agent]; ok {
+			limit = definition.parallelLimit()
+			secretNames = definition.Secrets
+		}
+		s.startAgent(document, limit, secretNames)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -585,6 +592,9 @@ func (a agentDefinition) validate() error {
 	}
 	if err := a.validateGitHubShape(); err != nil {
 		return err
+	}
+	if a.MaxParallel != nil && *a.MaxParallel < 1 {
+		return errors.New("max_parallel must be at least 1")
 	}
 
 	seenSecrets := make(map[string]struct{}, len(a.Secrets))

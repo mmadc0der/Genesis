@@ -27,7 +27,9 @@ const (
 	stderrFileName     = "stderr.log"
 	resultFileName     = "result.json"
 	sessionFileName    = "session.json"
-	dshHomeDirName     = "dsh_home"
+	// usageFileName is the per-run token account, beside the journal.
+	usageFileName  = "usage.json"
+	dshHomeDirName = "dsh_home"
 	// dataDirMode is the private mode for runs and per-run journals.
 	// dataRootMode lets another uid traverse the data root without listing it.
 	dataDirMode        = 0o700
@@ -76,6 +78,9 @@ type runJournal struct {
 	now           func() time.Time
 	newID         func() (string, error)
 	ended         bool
+	usageLoaded   bool
+	usage         tokenAccount
+	usageSeen     map[string]struct{}
 }
 
 func prepareDataDir(path string) (string, error) {
@@ -416,7 +421,22 @@ func (s *runStore) recoverRun(runID string) error {
 	if err != nil {
 		return err
 	}
-	if len(events) == 0 || journalHasEnd(events) {
+	if len(events) == 0 {
+		return nil
+	}
+	// Keep an account that is already on disk. Rebuild from the journal only
+	// when the file is missing, and never add the file and the journal together.
+	// A finished journal is not otherwise rewritten, so recovery cannot invent usage.
+	if err := ensureUsageFile(runDir, events); err != nil {
+		s.logger.Error("write usage account", "run_id", runID, "error", err)
+	}
+	if journalHasEnd(events) {
+		_ = os.Remove(queuedRunPath(runDir))
+		return nil
+	}
+	if journalHasStart(events) {
+		_ = os.Remove(queuedRunPath(runDir))
+	} else if hasQueuedRun(runDir) {
 		return nil
 	}
 
@@ -543,6 +563,9 @@ func (j *runJournal) Publish(eventType, origin string, data any) error {
 	if err := j.file.Sync(); err != nil {
 		j.mu.Unlock()
 		return fmt.Errorf("flush lifecycle event: %w", err)
+	}
+	if eventType == lifecycleTypeChunk {
+		j.noteUsage(published.Data)
 	}
 	j.mu.Unlock()
 	j.bus.publish(published)
@@ -916,6 +939,15 @@ func lastSequence(events []lifecycleEvent) uint64 {
 func journalHasEnd(events []lifecycleEvent) bool {
 	for _, event := range events {
 		if event.Type == lifecycleTypeEnd {
+			return true
+		}
+	}
+	return false
+}
+
+func journalHasStart(events []lifecycleEvent) bool {
+	for _, event := range events {
+		if event.Type == lifecycleTypeStart {
 			return true
 		}
 	}

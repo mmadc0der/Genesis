@@ -44,6 +44,12 @@ agent copy. Repository declarations do not start runs.
 
 There is no event queue. While a sync is running, `POST /events` returns
 `503` with `Retry-After: 1`. A second `POST /sync` returns `409`.
+`max_parallel` defaults to 1 and is the most runs of that agent that
+execute at once. A further match for the same agent is accepted and waits
+in that agent's queue until one of its running runs finishes. A different
+agent has its own queue and starts immediately when it is under its own
+cap. The hold is not a sync retry and not a token budget. Waiting runs
+are recorded under the run directory and started again after a restart.
 
 ## POST /sync
 

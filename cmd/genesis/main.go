@@ -89,11 +89,11 @@ func runListen(logger *slog.Logger, args []string) {
 		reposDir:     absoluteReposDir,
 		providersDir: absoluteProvidersDir,
 		newRunID:     newGenesisRunID,
-		secrets:     inheritedEnvironment(),
-		logger:      logger,
-		syncToken:   syncToken,
-		coordinator: coordinator,
-		store:       store,
+		secrets:      inheritedEnvironment(),
+		logger:       logger,
+		syncToken:    syncToken,
+		coordinator:  coordinator,
+		store:        store,
 	}
 	handler.runner = processRunner{
 		pythonPath: pythonPath,
@@ -109,6 +109,9 @@ func runListen(logger *slog.Logger, args []string) {
 	}
 	if err := handler.loadInitialGeneration(); err != nil {
 		fail(logger, "load agents, rules, and repositories", err)
+	}
+	if err := handler.restoreQueuedRuns(); err != nil {
+		fail(logger, "restore queued runs", err)
 	}
 
 	server := &http.Server{

@@ -4,6 +4,7 @@ export interface Agent {
   cwd: string;
   home: string;
   user?: string;
+  max_parallel?: number;
   setup?: {
     groups?: string[];
     workspace?: string;

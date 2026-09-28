@@ -117,10 +117,7 @@ func (s *eventServer) dispatchSessionContinue(w http.ResponseWriter, event cloud
 		http.Error(w, "failed to create run storage", http.StatusInternalServerError)
 		return
 	}
-	go func(document invocation) {
-		defer s.store.release(document.RunID)
-		s.runner.Run(document)
-	}(document)
+	s.startAgent(document, definition.parallelLimit(), definition.Secrets)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)

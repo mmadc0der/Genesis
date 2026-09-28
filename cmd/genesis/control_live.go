@@ -302,7 +302,7 @@ func (c *controlServer) flushLive(ctx context.Context, subs *liveSubs) {
 		if err == nil {
 			nextSeen := map[string]string{}
 			for _, run := range runs {
-				stamp := run.State + ":" + run.LastSeq + ":" + run.EndedAt
+				stamp := run.State + ":" + run.LastSeq + ":" + run.EndedAt + ":" + run.Usage.stamp()
 				if seenRuns[run.RunID] == stamp {
 					nextSeen[run.RunID] = stamp
 					continue

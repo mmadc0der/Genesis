@@ -19,6 +19,7 @@ type agentView struct {
 	Env          map[string]string `json:"env"`
 	Secrets      []string          `json:"secrets"`
 	GitHub       *agentGitHubView  `json:"github,omitempty"`
+	MaxParallel  *int              `json:"max_parallel,omitempty"`
 }
 
 type ruleView struct {
@@ -116,6 +117,7 @@ func agentViewFrom(definition agentDefinition) agentView {
 		Env:          env,
 		Secrets:      append([]string(nil), secrets...),
 		GitHub:       gitHubViewFrom(definition),
+		MaxParallel:  definition.MaxParallel,
 	}
 }
 

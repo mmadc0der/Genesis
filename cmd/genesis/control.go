@@ -95,6 +95,7 @@ type journalSnap struct {
 	size    int64
 	offset  int64
 	summary runSummary
+	seen    map[string]struct{}
 }
 
 type controlState struct {
@@ -124,18 +125,19 @@ type listedRule struct {
 }
 
 type runSummary struct {
-	RunID        string `json:"run_id"`
-	Agent        string `json:"agent"`
-	Rule         string `json:"rule"`
-	State        string `json:"state"`
-	AcceptedAt   string `json:"accepted_at,omitempty"`
-	EndedAt      string `json:"ended_at,omitempty"`
-	LastSeq      string `json:"last_seq"`
-	SessionID    string `json:"session_id,omitempty"`
-	CauseID      string `json:"cause_id,omitempty"`
-	CauseType    string `json:"cause_type,omitempty"`
-	FinishReason string `json:"finish_reason,omitempty"`
-	Error        string `json:"error,omitempty"`
+	RunID        string       `json:"run_id"`
+	Agent        string       `json:"agent"`
+	Rule         string       `json:"rule"`
+	State        string       `json:"state"`
+	AcceptedAt   string       `json:"accepted_at,omitempty"`
+	EndedAt      string       `json:"ended_at,omitempty"`
+	LastSeq      string       `json:"last_seq"`
+	SessionID    string       `json:"session_id,omitempty"`
+	CauseID      string       `json:"cause_id,omitempty"`
+	CauseType    string       `json:"cause_type,omitempty"`
+	FinishReason string       `json:"finish_reason,omitempty"`
+	Error        string       `json:"error,omitempty"`
+	Usage        tokenAccount `json:"usage"`
 }
 
 type runDetail struct {
@@ -818,7 +820,15 @@ func sameAgent(left, right agentView) bool {
 		sameSetup(left.Setup, right.Setup) &&
 		maps.Equal(left.Env, right.Env) &&
 		slices.Equal(left.Secrets, right.Secrets) &&
-		sameGitHub(left.GitHub, right.GitHub)
+		sameGitHub(left.GitHub, right.GitHub) &&
+		sameOptionalInt(left.MaxParallel, right.MaxParallel)
+}
+
+func sameOptionalInt(left, right *int) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func sameSetup(left, right *agentSetup) bool {
@@ -944,6 +954,7 @@ func (c *controlServer) readRunDetail(runID string) (runDetail, error) {
 	}
 	detail := runDetail{runSummary: summarizeRun(events), EventCount: len(events)}
 	runDir := filepath.Join(c.dataDir, runsDirName, runID)
+	detail.Usage = usageFromRun(runDir, events)
 	if result, err := os.ReadFile(filepath.Join(runDir, resultFileName)); err == nil && json.Valid(result) {
 		detail.Result = json.RawMessage(redactPrivateKeys(result))
 	}
@@ -1007,11 +1018,16 @@ func (c *controlServer) summarizeCached(runID string) (runSummary, error) {
 	if err != nil {
 		return runSummary{}, err
 	}
+	usagePath := filepath.Join(c.dataDir, runsDirName, runID, usageFileName)
 	c.journalMu.Lock()
 	snap, ok := c.journals[runID]
 	c.journalMu.Unlock()
 	if ok && snap.size == info.Size() && snap.offset <= info.Size() {
-		return snap.summary, nil
+		summary := snap.summary
+		if account, _, found := readUsageAccount(usagePath); found {
+			summary.Usage = account
+		}
+		return summary, nil
 	}
 	offset := int64(0)
 	summary := runSummary{State: runStateOpen, LastSeq: "0"}
@@ -1031,11 +1047,21 @@ func (c *controlServer) summarizeCached(runID string) (runSummary, error) {
 	} else if len(events) > 0 {
 		summary = foldRunSummary(summary, events)
 	}
+	account, seen, fromFile := readUsageAccount(usagePath)
+	if fromFile {
+		summary.Usage = account
+	} else if offset == 0 {
+		summary.Usage, seen = foldUsage(tokenAccount{}, nil, events)
+	} else if len(events) > 0 {
+		summary.Usage, seen = foldUsage(summary.Usage, snap.seen, events)
+	} else {
+		seen = snap.seen
+	}
 	c.journalMu.Lock()
 	if c.journals == nil {
 		c.journals = map[string]journalSnap{}
 	}
-	c.journals[runID] = journalSnap{size: info.Size(), offset: next, summary: summary}
+	c.journals[runID] = journalSnap{size: info.Size(), offset: next, summary: summary, seen: seen}
 	c.journalMu.Unlock()
 	return summary, nil
 }
