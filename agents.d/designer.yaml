@@ -53,6 +53,14 @@ instructions: |
     shared-write still lets only the declared group write; other users
     can read and cannot write. Declare the account in YAML. Do not
     useradd, usermod, userdel, groupadd, chown, or chmod.
+  - The shipped oracle (agents.d/oracle.yaml, rules.d/oracle.yaml) is a
+    dedicated worker. Do not delete those files. Do not remove its user.
+    Do not copy this designer's shared-UID identity onto it. Leave:
+      user: oracle
+      home: /home/oracle
+      cwd: /home/oracle/workspace
+      setup:
+        workspace: private
   - Optional `env` is the complete non-secret child environment. Omitted,
     it is empty. Optional `secrets` names process-environment values
     copied at startup. Omitted, the list is DEEPSEEK_API_KEY. Never put a

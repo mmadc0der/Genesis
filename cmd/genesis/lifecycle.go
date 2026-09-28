@@ -34,6 +34,7 @@ const (
 	pythonFrameSessionCreated = "session.created"
 	pythonFrameNotification   = "notification"
 	pythonFrameResult         = "result"
+	pythonFrameEmit           = "emit"
 
 	endStateCompleted = "completed"
 	endStateFailed    = "failed"
@@ -53,6 +54,7 @@ type lifecycleEvent struct {
 	AgentID         string          `json:"agentid"`
 	Rulefile        string          `json:"rulefile"`
 	SessionID       string          `json:"sessionid,omitempty"`
+	CorrelationID   string          `json:"correlationid,omitempty"`
 	CauseID         string          `json:"causeid"`
 	CauseSource     string          `json:"causesource"`
 	CauseType       string          `json:"causetype,omitempty"`
@@ -72,6 +74,7 @@ type pythonFrame struct {
 	FinalResponse     *string         `json:"final_response"`
 	Error             *runnerFailure  `json:"error"`
 	Diagnostics       any             `json:"diagnostics"`
+	Event             json.RawMessage `json:"event,omitempty"`
 }
 
 type sdkNotificationPayload struct {
@@ -457,7 +460,7 @@ func parsePythonFrame(line []byte) (pythonFrame, error) {
 		return pythonFrame{}, fmt.Errorf("unknown frame version %s", formatFrameVersion(frame.V))
 	}
 	switch frame.Type {
-	case pythonFrameSessionCreated, pythonFrameNotification, pythonFrameResult:
+	case pythonFrameSessionCreated, pythonFrameNotification, pythonFrameResult, pythonFrameEmit:
 	default:
 		return pythonFrame{}, fmt.Errorf("unknown frame type %q", frame.Type)
 	}

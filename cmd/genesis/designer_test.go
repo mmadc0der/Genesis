@@ -654,4 +654,338 @@ func TestDockerEntrypointOwnDoesNotFollowSymlinks(t *testing.T) {
 	if dataInfo.Mode().Perm() != 0o700 {
 		t.Fatalf("data/runs mode = %o", dataInfo.Mode().Perm())
 	}
+	rootInfo, err := os.Stat(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootInfo.Mode().Perm() != 0o711 {
+		t.Fatalf("data root mode = %o", rootInfo.Mode().Perm())
+	}
+	transcriptDir := filepath.Join(data, "transcripts")
+	if info, err := os.Stat(transcriptDir); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("transcripts mode after first own-config = %v %v", info, err)
+	}
+	transcript := filepath.Join(transcriptDir, "gen_owned.jsonl")
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	again := exec.Command("sh", entrypoint, "own-config")
+	again.Env = own.Env
+	if output, err := again.CombinedOutput(); err != nil {
+		t.Fatalf("own-config transcripts: %v\n%s", err, output)
+	}
+	transcriptInfo, err := os.Stat(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transcriptInfo.Mode().Perm() != 0o644 {
+		t.Fatalf("transcript mode = %o", transcriptInfo.Mode().Perm())
+	}
+	dirInfo, err := os.Stat(transcriptDir)
+	if err != nil || dirInfo.Mode().Perm() != 0o755 {
+		t.Fatalf("transcripts mode = %v %v", dirInfo, err)
+	}
+	runsAgain, err := os.Stat(filepath.Join(data, "runs"))
+	if err != nil || runsAgain.Mode().Perm() != 0o700 {
+		t.Fatalf("runs mode after transcripts = %v %v", runsAgain, err)
+	}
+}
+
+func TestDockerEntrypointReusedVolumeOpensTranscripts(t *testing.T) {
+	root := repoRoot(t)
+	entrypoint := filepath.Join(root, "docker-entrypoint.sh")
+	config := t.TempDir()
+	data := t.TempDir()
+	defaults := t.TempDir()
+	secrets := t.TempDir()
+	for _, name := range []string{"GITHUB_APP_RECONCILER_PEM", "GITHUB_APP_ID", "GITHUB_APP_WEBHOOK_SECRET"} {
+		if err := os.WriteFile(filepath.Join(secrets, name), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs := filepath.Join(data, "runs")
+	transcripts := filepath.Join(data, "transcripts")
+	sessionHome := filepath.Join(data, "sessions", "gen_stable", "dsh_home")
+	if err := os.MkdirAll(runs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(transcripts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sessionHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(transcripts, "gen_reused.jsonl")
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessionNote := filepath.Join(sessionHome, "note")
+	if err := os.WriteFile(sessionNote, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := strippedEnv(t,
+		"GENESIS_CONFIG_DIR="+config,
+		"GENESIS_DATA_DIR="+data,
+		"GENESIS_DEFAULTS_DIR="+defaults,
+		"GENESIS_CREDENTIALS_DIR="+filepath.Join(t.TempDir(), "credentials"),
+		"GENESIS_SECRETS_DIR="+secrets,
+		"GENESIS_PROVIDERS_DIR="+filepath.Join(t.TempDir(), "no-providers"),
+	)
+	perm := func(path string) os.FileMode {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info.Mode().Perm()
+	}
+	runOwn := func() {
+		t.Helper()
+		cmd := exec.Command("sh", entrypoint, "own-config")
+		cmd.Env = env
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("own-config: %v\n%s", err, output)
+		}
+	}
+	assertModes := func() {
+		t.Helper()
+		if got := perm(data); got != 0o711 {
+			t.Fatalf("data root mode = %o", got)
+		}
+		if got := perm(runs); got != 0o700 {
+			t.Fatalf("runs mode = %o", got)
+		}
+		if got := perm(transcripts); got != 0o755 {
+			t.Fatalf("transcripts mode = %o", got)
+		}
+		if got := perm(transcript); got != 0o644 {
+			t.Fatalf("transcript mode = %o", got)
+		}
+		for _, path := range []string{filepath.Join(data, "sessions"), filepath.Dir(sessionHome), sessionHome} {
+			if got := perm(path); got != 0o700 {
+				t.Fatalf("%s mode = %o", path, got)
+			}
+		}
+		if got := perm(sessionNote); got != 0o600 {
+			t.Fatalf("session file mode = %o", got)
+		}
+	}
+	runOwn()
+	assertModes()
+	runOwn()
+	assertModes()
+}
+
+func TestDockerEntrypointChownsTranscriptsOnEveryStart(t *testing.T) {
+	root := repoRoot(t)
+	entrypoint := filepath.Join(root, "docker-entrypoint.sh")
+	bin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "chown.log")
+	writeBin := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeBin("id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then\n\techo 0\n\texit 0\nfi\nexec /usr/bin/id \"$@\"\n")
+	writeBin("chown", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CHOWN_LOG\"\nexit 0\n")
+
+	config := t.TempDir()
+	data := t.TempDir()
+	defaults := t.TempDir()
+	secrets := t.TempDir()
+	for _, name := range []string{"GITHUB_APP_RECONCILER_PEM", "GITHUB_APP_ID", "GITHUB_APP_WEBHOOK_SECRET"} {
+		if err := os.WriteFile(filepath.Join(secrets, name), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transcripts := filepath.Join(data, "transcripts")
+	env := strippedEnv(t,
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"CHOWN_LOG="+logPath,
+		"GENESIS_CONFIG_DIR="+config,
+		"GENESIS_DATA_DIR="+data,
+		"GENESIS_DEFAULTS_DIR="+defaults,
+		"GENESIS_CREDENTIALS_DIR="+filepath.Join(t.TempDir(), "credentials"),
+		"GENESIS_SECRETS_DIR="+secrets,
+		"GENESIS_PROVIDERS_DIR="+filepath.Join(t.TempDir(), "no-providers"),
+	)
+	runOwn := func() {
+		t.Helper()
+		if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", entrypoint, "own-config")
+		cmd.Env = env
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("own-config: %v\n%s", err, output)
+		}
+		payload, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(payload, []byte(transcripts)) {
+			t.Fatalf("chown log missing transcripts:\n%s", payload)
+		}
+	}
+	runOwn()
+	info, err := os.Stat(transcripts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("created transcripts mode = %o", info.Mode().Perm())
+	}
+	runsInfo, err := os.Stat(filepath.Join(data, "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runsInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("runs mode = %o", runsInfo.Mode().Perm())
+	}
+	rootInfo, err := os.Stat(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootInfo.Mode().Perm() != 0o711 {
+		t.Fatalf("data root mode = %o", rootInfo.Mode().Perm())
+	}
+	// A second start against the directory created above must chown it again
+	// and leave runs private.
+	runOwn()
+	info, err = os.Stat(transcripts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("reused transcripts mode = %o", info.Mode().Perm())
+	}
+	runsInfo, err = os.Stat(filepath.Join(data, "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runsInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("reused runs mode = %o", runsInfo.Mode().Perm())
+	}
+}
+
+func strippedEnv(t *testing.T, extra ...string) []string {
+	t.Helper()
+	env := make([]string, 0, len(os.Environ())+len(extra))
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "PATH=") || strings.HasPrefix(entry, "CHOWN_LOG=") || strings.HasPrefix(entry, "GENESIS_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, extra...)
+}
+
+func TestCommittedOracleIsDedicatedReviewer(t *testing.T) {
+	root := repoRoot(t)
+	agents, err := loadAgents(filepath.Join(root, "agents.d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle, ok := agents["oracle"]
+	if !ok {
+		t.Fatal("committed agents.d is missing oracle")
+	}
+	if oracle.User != "oracle" {
+		t.Fatalf("oracle user = %q", oracle.User)
+	}
+	if oracle.Home != "/home/oracle" || oracle.Cwd != "/home/oracle/workspace" {
+		t.Fatalf("oracle home/cwd = %s %s", oracle.Home, oracle.Cwd)
+	}
+	if oracle.Setup == nil || oracle.Setup.Workspace != workspacePrivate {
+		t.Fatalf("oracle setup = %#v", oracle.Setup)
+	}
+	if oracle.GitHub != nil {
+		t.Fatalf("oracle github = %#v", oracle.GitHub)
+	}
+	for _, phrase := range []string{
+		"data.transcript",
+		"data.runid",
+		"data.agent",
+		"data.outcome",
+		"reports/",
+		"mode 0755",
+		"Do not edit",
+		"agents.d",
+		"rules.d",
+		"repos.d",
+		"own finish",
+	} {
+		if !strings.Contains(oracle.Instructions, phrase) {
+			t.Fatalf("oracle instructions missing %q", phrase)
+		}
+	}
+	for _, phrase := range []string{"useradd", "GENESIS_SYNC_TOKEN", "POST /sync", "POST /events"} {
+		if strings.Contains(oracle.Instructions, phrase) {
+			t.Fatalf("oracle instructions contain %q", phrase)
+		}
+	}
+
+	designer := agents["designer"]
+	for _, phrase := range []string{
+		"agents.d/oracle.yaml",
+		"rules.d/oracle.yaml",
+		"Do not delete those files",
+		"Do not remove its user",
+		"Do not copy this designer's shared-UID identity onto it",
+		"user: oracle",
+		"home: /home/oracle",
+		"cwd: /home/oracle/workspace",
+		"workspace: private",
+	} {
+		if !strings.Contains(designer.Instructions, phrase) {
+			t.Fatalf("designer instructions missing %q", phrase)
+		}
+	}
+
+	rules, err := loadRules(filepath.Join(root, "rules.d"), agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oracleRule rule
+	for _, candidate := range rules {
+		if candidate.name == "oracle.yaml" {
+			oracleRule = candidate
+		}
+	}
+	if oracleRule.Agent != "oracle" {
+		t.Fatalf("oracle rule = %#v", oracleRule)
+	}
+	if oracleRule.Match["type"] != agentFinishedType || oracleRule.Match["subject"] != "*" {
+		t.Fatalf("oracle match = %#v", oracleRule.Match)
+	}
+	finished := cloudEvent{
+		"specversion": json.RawMessage(`"1.0"`),
+		"id":          json.RawMessage(`"evt-oracle"`),
+		"source":      json.RawMessage(`"urn:genesis:agent:designer"`),
+		"type":        json.RawMessage(`"dev.genesis.agent.finished"`),
+		"subject":     json.RawMessage(`"designer"`),
+	}
+	if !oracleRule.matches(finished) {
+		t.Fatal("oracle rule did not match a one-segment finish subject")
+	}
+	if skipFinishedSelf(oracleRule, finished) {
+		t.Fatal("oracle rule skipped a different agent")
+	}
+	finished["subject"] = json.RawMessage(`"oracle"`)
+	if !oracleRule.matches(finished) || !skipFinishedSelf(oracleRule, finished) {
+		t.Fatal("oracle rule should match and skip its own finish")
+	}
+	twoSegment := cloudEvent{
+		"specversion": json.RawMessage(`"1.0"`),
+		"type":        json.RawMessage(`"dev.genesis.agent.finished"`),
+		"subject":     json.RawMessage(`"designer/extra"`),
+	}
+	if oracleRule.matches(twoSegment) {
+		t.Fatal("subject * matched more than one path segment")
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,8 @@ type processRunner struct {
 	logger     *slog.Logger
 	store      *runStore
 	spawner    privilegedSpawner
+	// dispatch is POST /events. Nil in runner unit tests that only journal.
+	dispatch func(cloudEvent) int
 }
 
 type runnerResult struct {
@@ -213,6 +216,8 @@ func (r processRunner) handleFrame(journal *runJournal, document invocation, lin
 	}
 
 	switch frame.Type {
+	case pythonFrameEmit:
+		r.handleAgentEmit(journal, document, frame.Event)
 	case pythonFrameSessionCreated:
 		if state.gotSession {
 			state.failed = true
@@ -223,6 +228,11 @@ func (r processRunner) handleFrame(journal *runJournal, document invocation, lin
 		}
 		state.gotSession = true
 		journal.rememberSession(frame.SessionID)
+		if r.store != nil {
+			if err := r.store.noteSessionID(document.RunID, frame.SessionID); err != nil && r.logger != nil {
+				r.logger.Error("record session id", "genesis_run_id", document.RunID, "error", err)
+			}
+		}
 		if err := journal.Publish(lifecycleTypeSessionCreated, originPython, map[string]any{
 			"session_id": frame.SessionID,
 		}); err != nil {
@@ -264,6 +274,12 @@ func (r processRunner) handleFrame(journal *runJournal, document invocation, lin
 }
 
 func (r processRunner) handleNotification(journal *runJournal, document invocation, frame pythonFrame, state *streamState) {
+	// genesis.emit is ingress. It is not a lifecycle observation and is not
+	// published on the journal bus.
+	if frame.Method == genesisEmitMethod {
+		r.handleAgentEmit(journal, document, frame.Payload)
+		return
+	}
 	eventType, origin, data, ok := mapSDKNotification(journal.session(), frame.Method, frame.Payload)
 	if !ok {
 		return
@@ -371,6 +387,7 @@ func (r processRunner) finish(
 	if err := journal.Publish(lifecycleTypeEnd, originGenesis, endPayload(exitCode, stateName)); err != nil {
 		logger.Error("persist end event", "genesis_run_id", document.RunID, "error", err)
 	}
+	r.publishAgentFinished(journal, document, stateName)
 
 	logErr := internalErr
 	if logErr == nil && !state.gotResult && processErr != nil && !state.turnEndFailure {
@@ -392,6 +409,65 @@ func (r processRunner) finish(
 		logged.Diagnostics = journal.redactor.value(logged.Diagnostics)
 	}
 	r.logResult(logger, document, logged, logErr, stderr)
+}
+
+func (r processRunner) publishAgentFinished(journal *runJournal, document invocation, stateName string) {
+	if r.dispatch == nil || journal == nil || r.store == nil {
+		return
+	}
+	transcript, err := r.store.writeTranscript(document.RunID)
+	if err != nil {
+		_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(diskErrorType, err.Error()))
+		return
+	}
+	outcome := outcomeOK
+	if stateName != endStateCompleted {
+		outcome = outcomeError
+	}
+	event, err := newAgentFinishedEvent(document.Agent, document.RunID, outcome, transcript)
+	if err != nil {
+		_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(runnerErrorType, err.Error()))
+		return
+	}
+	// One shot. 503 means sync holds the generation. Retrying would busy-loop
+	// or start a session against a stale or half-applied generation.
+	r.noteDispatch(journal, r.dispatch(event))
+}
+
+func (r processRunner) handleAgentEmit(journal *runJournal, document invocation, raw json.RawMessage) {
+	event, err := agentEmitEvent(document.Agent, raw)
+	if err != nil {
+		if journal != nil {
+			_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(protocolError, err.Error()))
+		}
+		return
+	}
+	if eventType, _ := event.stringAttribute("type"); eventType == sessionContinueType {
+		stampCause(event, document.Event)
+	}
+	if r.dispatch == nil {
+		if journal != nil {
+			_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(runnerErrorType, "event dispatch is not configured"))
+		}
+		return
+	}
+	r.noteDispatch(journal, r.dispatch(event))
+}
+
+func (r processRunner) noteDispatch(journal *runJournal, code int) {
+	if journal == nil {
+		return
+	}
+	switch code {
+	case http.StatusAccepted, http.StatusNoContent:
+		return
+	case http.StatusServiceUnavailable:
+		_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(syncInProgressType, "sync in progress"))
+	default:
+		if code >= 400 {
+			_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(runnerErrorType, fmt.Sprintf("event dispatch returned %d", code)))
+		}
+	}
 }
 
 func (r processRunner) publishError(journal *runJournal, state *streamState, errorType, message string) error {

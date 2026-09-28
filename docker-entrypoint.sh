@@ -119,6 +119,37 @@ own_tree() {
 	find "$root" -xdev -type f -exec chmod "$file_mode" {} +
 }
 
+# Transcripts sit beside runs. Another uid must traverse the data root and
+# read the transcript file, and must not read runs. The listener must own
+# transcripts: this mkdir runs after own_tree, so a new directory would
+# otherwise stay root-owned and the listener chmod fails with EPERM. Chown
+# on every start, including a root-owned directory reused from the volume.
+# runs stays 0700.
+open_transcripts() {
+	root=$1
+	if [ -L "$root" ] || [ ! -d "$root" ]; then
+		echo "genesis: data root is not a directory: $root" >&2
+		exit 1
+	fi
+	if [ -L "$root/runs" ] || [ -L "$root/transcripts" ]; then
+		echo "genesis: refusing to chmod a symlink under $root" >&2
+		exit 1
+	fi
+	mkdir -p "$root/runs" "$root/transcripts"
+	if [ -L "$root/runs" ] || [ -L "$root/transcripts" ] || [ ! -d "$root/transcripts" ]; then
+		echo "genesis: refusing to chmod a symlink under $root" >&2
+		exit 1
+	fi
+	if [ "$(id -u)" = 0 ]; then
+		chown genesis:genesis "$root" "$root/runs"
+		find "$root/transcripts" -xdev \( -type d -o -type f \) -exec chown genesis:genesis {} +
+	fi
+	chmod 0711 "$root"
+	chmod 0700 "$root/runs"
+	chmod 0755 "$root/transcripts"
+	find "$root/transcripts" -xdev -type f -exec chmod 0644 {} +
+}
+
 if [ -e "$config" ] || [ -L "$config" ]; then
 	require_real_dir "$config" "config root"
 fi
@@ -244,6 +275,12 @@ fi
 
 own_tree "$config" 0755 0644
 own_tree "$data" 0700 0600
+# own_tree locks the whole data tree. Re-open traversal for transcripts only:
+# the data root is execute-only (0711), runs stays 0700, transcript files are
+# 0644. open_transcripts chowns transcripts to the listener on every start,
+# including a directory this mkdir just created and a root-owned one reused
+# from the volume.
+open_transcripts "$data"
 lock_providers
 lock_credentials
 lock_secrets

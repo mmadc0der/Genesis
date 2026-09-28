@@ -269,7 +269,10 @@ func TestChangedOrRefusedGrantDropsTheLiveSocket(t *testing.T) {
 	}
 	again := filepath.Join(t.TempDir(), "again")
 	otherRun := filepath.Join(dataDir, runsDirName, "gen_after")
-	otherDsh := filepath.Join(otherRun, dshHomeDirName)
+	otherDsh := stableDshHome(dataDir, "gen_after")
+	if err := os.MkdirAll(otherRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(otherDsh, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +318,10 @@ func TestSharedUIDDoesNotReceiveASecondGrantSocket(t *testing.T) {
 	}
 	t.Cleanup(func() { state.killAll() })
 	otherRun := filepath.Join(dataDir, runsDirName, "gen_other")
-	otherDsh := filepath.Join(otherRun, dshHomeDirName)
+	otherDsh := stableDshHome(dataDir, "gen_other")
+	if err := os.MkdirAll(otherRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(otherDsh, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +374,10 @@ func TestConcurrentRunsOfOneGrantGetDistinctSockets(t *testing.T) {
 		return pid
 	}
 	otherRun := filepath.Join(dataDir, runsDirName, "gen_spawn_b")
-	otherDsh := filepath.Join(otherRun, dshHomeDirName)
+	otherDsh := stableDshHome(dataDir, "gen_spawn_b")
+	if err := os.MkdirAll(otherRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	spawn(runDir, dshHome, reportA)
 	spawn(otherRun, otherDsh, reportB)
 	sockA := strings.TrimSpace(waitFile(t, reportA))

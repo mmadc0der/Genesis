@@ -47,6 +47,126 @@ SESSION_LOG_OFF_PATCH = f"""\
 """
 
 ASSISTANT_STREAM_PLUGIN_NAME = "genesis-assistant-stream.mjs"
+EMIT_PLUGIN_NAME = "genesis-emit.mjs"
+RESUME_PLUGIN_NAME = "genesis-session-resume.mjs"
+RESUME_PLUGIN = r"""/**
+ * Resume an existing sdk-minimal session instead of creating a second one.
+ *
+ * The pinned JSON-RPC server handles session/prompt by calling
+ * ctx.agents.create({ sessionId }). That create path calls
+ * persistence.create and raises once session.v3.jsonl is already on disk.
+ * Resume is ctx.agents.resume({ resumeSessionId }) / persistence.open.
+ * Cordis patch rows cannot wrap that server method, so this plugin replaces
+ * agents.create before the first prompt. If create or resume is missing, apply
+ * throws and the process does not pretend the session was resumed.
+ *
+ * A log is session.jsonl or session.vN.jsonl under
+ * $DSH_HOME/sessions/<project>/<encoded session id>/. The current pin writes
+ * session.v3.jsonl. Encoding matches dsh-session-persistence-jsonl encodeSegment.
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+
+export const name = 'genesis-session-resume'
+
+export const inject = ['agents']
+
+const SESSION_LOG_NAME = /^session(?:\.v[1-9][0-9]*)?\.jsonl$/
+
+export function encodeSegment(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) {
+    throw new Error('cannot encode an empty path segment')
+  }
+  if (raw === '.') return '~002E'
+  if (raw === '..') return '~002E~002E'
+  let out = ''
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i)
+    const ch = String.fromCharCode(code)
+    if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) out += ch
+    else out += `~${code.toString(16).toUpperCase().padStart(4, '0')}`
+  }
+  return out
+}
+
+export function isSessionLogName(filename) {
+  return SESSION_LOG_NAME.test(filename)
+}
+
+function directoryEntries(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return null
+  }
+}
+
+export function hasSessionLog(dshHome, sessionId) {
+  if (typeof dshHome !== 'string' || dshHome.length === 0) return false
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return false
+  let segment
+  try {
+    segment = encodeSegment(sessionId)
+  } catch {
+    return false
+  }
+  const projects = directoryEntries(path.join(dshHome, 'sessions'))
+  if (projects === null) return false
+  for (const project of projects) {
+    if (!project.isDirectory()) continue
+    const entries = directoryEntries(path.join(dshHome, 'sessions', project.name, segment))
+    if (entries === null) continue
+    for (const entry of entries) {
+      if (entry.isFile() && isSessionLogName(entry.name)) return true
+    }
+  }
+  return false
+}
+
+export function resumeOptions(options) {
+  const source = options && typeof options === 'object' ? options : {}
+  return {
+    resumeSessionId: source.sessionId,
+    agentOptions: source.agentOptions,
+    signal: source.signal,
+    setup: source.setup,
+    parentAgent: source.parentAgent,
+  }
+}
+
+function install(agents) {
+  if (!agents || typeof agents.create !== 'function' || typeof agents.resume !== 'function') {
+    throw new Error('genesis-session-resume: agents.create and agents.resume are required')
+  }
+  if (agents.create.genesisSessionResume) return
+  const original = agents.create
+  const wrapped = async function genesisSessionResumeCreate(options) {
+    const sessionId = options && typeof options.sessionId === 'string' ? options.sessionId : ''
+    const home = typeof process.env.DSH_HOME === 'string' ? process.env.DSH_HOME : ''
+    if (sessionId && hasSessionLog(home, sessionId)) {
+      return agents.resume.call(this, resumeOptions(options))
+    }
+    return original.call(this, options)
+  }
+  wrapped.genesisSessionResume = true
+  agents.create = wrapped
+}
+
+export function apply(ctx) {
+  if (ctx && ctx.agents && typeof ctx.agents.create === 'function' && typeof ctx.agents.resume === 'function') {
+    install(ctx.agents)
+    return
+  }
+  if (ctx && typeof ctx.inject === 'function') {
+    ctx.inject(['agents'], (agentCtx) => {
+      install(agentCtx && agentCtx.agents)
+    })
+    return
+  }
+  throw new Error('genesis-session-resume: cannot reach agents.create or agents.resume')
+}
+"""
+GENESIS_EMIT_METHOD = "genesis.emit"
 
 # Kept in lockstep with assistant_stream_plugin.mjs. The runner is executed
 # as `python -c`, so the child cannot read that file from the source tree.
@@ -97,18 +217,109 @@ MAX_STDOUT_FRAME_BYTES = 16 * 1024 * 1024
 SESSION_CREATED = "session.created"
 NOTIFICATION = "notification"
 RESULT = "result"
+EMIT = "emit"
+
+# Kept in lockstep with genesis_emit_plugin.mjs. The runner is executed
+# as `python -c`, so the child cannot read that file from the source tree.
+EMIT_PLUGIN = r"""/**
+ * Ask the SDK to deliver one genesis.emit notification on the stdout it
+ * already uses for session.event. The Python runner turns that into an
+ * emit frame. Genesis stamps source and id. This file does not read a
+ * listener address or GENESIS_SYNC_TOKEN.
+ */
+export const name = 'genesis-emit'
+
+const TOOL_NAME = 'genesis_emit'
+
+function writeEmit(input, sessionId) {
+  const body = input && typeof input === 'object' ? input : {}
+  const params = {
+    sessionId: typeof sessionId === 'string' ? sessionId : '',
+    type: body.type,
+    subject: body.subject,
+    data: body.data,
+    source: body.source,
+    id: body.id,
+  }
+  process.stdout.write(
+    `${JSON.stringify({ jsonrpc: '2.0', method: 'genesis.emit', params })}\n`,
+  )
+}
+
+function toolDefinition() {
+  return {
+    name: TOOL_NAME,
+    description:
+      'Emit one CloudEvent. Set type and subject. data is an optional JSON object.',
+    parameters: {
+      type: 'object',
+      properties: {
+        type: { type: 'string' },
+        subject: { type: 'string' },
+        data: { type: 'object' },
+      },
+      required: ['type', 'subject'],
+    },
+    execute(args, toolCtx) {
+      const session = toolCtx && toolCtx.session
+      const sessionId = session && (session.id || session.sessionId)
+      writeEmit(args, typeof sessionId === 'string' ? sessionId : '')
+      return { emitted: true }
+    },
+  }
+}
+
+function tryRegister(register, tool) {
+  if (typeof register !== 'function') return false
+  try {
+    register(tool)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function apply(ctx) {
+  try {
+    if (!ctx || typeof ctx.on !== 'function') return
+    const tool = toolDefinition()
+    if (
+      tryRegister(ctx.tool, tool) ||
+      tryRegister(ctx.registerTool, tool) ||
+      tryRegister(ctx.addTool, tool)
+    ) {
+      return
+    }
+    ctx.on('dsh/register-tools', (register) => {
+      tryRegister(register, tool)
+    })
+  } catch {
+    // A missing tool API must not fail the session.
+  }
+}
+"""
 
 
 def write_runtime_patch(home: Path) -> Path:
     plugin_path = home / ASSISTANT_STREAM_PLUGIN_NAME
     plugin_path.write_text(ASSISTANT_STREAM_PLUGIN, encoding="utf-8")
+    emit_path = home / EMIT_PLUGIN_NAME
+    emit_path.write_text(EMIT_PLUGIN, encoding="utf-8")
+    resume_path = home / RESUME_PLUGIN_NAME
+    resume_path.write_text(RESUME_PLUGIN, encoding="utf-8")
     patch_path = home / "session-log-off.patch.yml"
     plugin_name = json.dumps(str(plugin_path))
+    emit_name = json.dumps(str(emit_path))
+    resume_name = json.dumps(str(resume_path))
     patch_path.write_text(
         SESSION_LOG_OFF_PATCH
         + "- insert:\n"
         + "    - id: genesis-assistant-stream\n"
-        + f"      name: {plugin_name}\n",
+        + f"      name: {plugin_name}\n"
+        + "    - id: genesis-emit\n"
+        + f"      name: {emit_name}\n"
+        + "    - id: genesis-session-resume\n"
+        + f"      name: {resume_name}\n",
         encoding="utf-8",
     )
     return patch_path
@@ -195,7 +406,9 @@ def execute(
         harness_factory = DeepSeekHarness
 
     # Standing identity is DSH_SYSTEM_PROMPT (sdk-minimal personaPrefix hook).
-    # The user message stays the compact CloudEvent JSON and is not prepended.
+    # A continuation passes user_message as the follow-up text. Every other
+    # run keeps the compact CloudEvent JSON as the sole user message. It is
+    # not prepended onto the standing identity.
     # GITHUB_TOKEN and SSH_AUTH_SOCK come only from the process environment
     # that root set for this run. Invocation JSON cannot supply them.
     delivered: dict[str, str] = {}
@@ -217,12 +430,6 @@ def execute(
     environment["DSH_SYSTEM_PROMPT"] = invocation["instructions"]
     environment.update(delivered)
 
-    message = json.dumps(
-        invocation["event"],
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
     dsh_home = invocation["dsh_home"]
     home_path = Path(dsh_home)
     if not home_path.is_dir():
@@ -231,6 +438,22 @@ def execute(
         raise ValueError("dsh_home must be distinct from agent home")
     if home_path.resolve() == Path(invocation["cwd"]).resolve():
         raise ValueError("dsh_home must be distinct from cwd")
+
+    user_message = invocation.get("user_message")
+    if user_message is None:
+        message = json.dumps(
+            invocation["event"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    elif not isinstance(user_message, str) or not user_message.strip():
+        raise ValueError("user_message must be a non-empty string")
+    else:
+        message = user_message
+    session_id = invocation.get("session_id")
+    if session_id is not None and (not isinstance(session_id, str) or not session_id):
+        raise ValueError("session_id must be a non-empty string when set")
 
     patch_path = write_runtime_patch(home_path)
     with (
@@ -245,7 +468,7 @@ def execute(
             patches=(str(patch_path),),
         ) as harness,
     ):
-        session = harness.start_session()
+        session = harness.start_session(session_id)
         if on_session_created is not None:
             on_session_created(session.id)
         result = session.run(message, on_notification=on_notification)
@@ -310,7 +533,7 @@ def extract_diagnostics(result: Any) -> dict[str, Any]:
         method = getattr(notification, "method", None)
         # on_chunk is one line per token. The journal already stores those
         # frames; copying them into the terminal result would blow the frame cap.
-        if method not in {"session.event", "on_chunk"}:
+        if method not in {"session.event", "on_chunk", GENESIS_EMIT_METHOD}:
             notifications.append(
                 {
                     "method": method,
@@ -340,14 +563,35 @@ def emit_frame(obj: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+def emit_body(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+    body: dict[str, Any] = {
+        "type": payload.get("type"),
+        "subject": payload.get("subject"),
+    }
+    if "source" in payload:
+        body["source"] = payload.get("source")
+    if "id" in payload:
+        body["id"] = payload.get("id")
+    if payload.get("data") is not None:
+        body["data"] = payload.get("data")
+    return body
+
+
 def emit_notification(notification: Any) -> None:
     try:
+        method = getattr(notification, "method", None)
+        payload = getattr(notification, "payload", None)
+        if method == GENESIS_EMIT_METHOD:
+            emit_frame({"v": 1, "type": EMIT, "event": emit_body(payload)})
+            return
         emit_frame(
             {
                 "v": 1,
                 "type": NOTIFICATION,
-                "method": getattr(notification, "method", None),
-                "payload": getattr(notification, "payload", None),
+                "method": method,
+                "payload": payload,
             }
         )
     except Exception as error:  # noqa: BLE001 - tee must not fail the run.

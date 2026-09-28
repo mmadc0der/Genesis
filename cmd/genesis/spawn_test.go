@@ -376,7 +376,10 @@ func testSpawnIdentity(t *testing.T) (*user.User, reconciledIdentity, string, st
 	}
 	dataDir := t.TempDir()
 	runDir := filepath.Join(dataDir, runsDirName, "gen_spawn")
-	dshHome := filepath.Join(runDir, dshHomeDirName)
+	dshHome := stableDshHome(dataDir, "gen_spawn")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(dshHome, 0o700); err != nil {
 		t.Fatal(err)
 	}

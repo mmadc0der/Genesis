@@ -286,13 +286,14 @@ func prepareSpawnDirs(host hostAPI, dataDir string, req spawnRequest, identity r
 	if runDir != wantRunDir {
 		return errors.New("run_dir must be a run directory under the configured data directory")
 	}
-	if dshHome != filepath.Join(runDir, dshHomeDirName) {
-		return errors.New("dsh_home must be the dsh_home directory inside run_dir")
+	if err := validateStableDshHome(dataDir, dshHome); err != nil {
+		return err
 	}
 	uid := int(identity.UID)
 	gid := int(identity.GID)
-	for _, path := range []string{dataDir, filepath.Join(dataDir, runsDirName), runDir} {
-		if err := chmodExistingDir(host, path, 0o711); err != nil {
+	sessionDir := filepath.Dir(dshHome)
+	for _, path := range []string{dataDir, filepath.Join(dataDir, runsDirName), runDir, filepath.Dir(sessionDir), sessionDir} {
+		if err := chmodExistingDir(host, path, dataRootMode); err != nil {
 			return fmt.Errorf("chmod %s: %w", path, err)
 		}
 	}

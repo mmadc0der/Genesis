@@ -290,12 +290,15 @@ described in [docs/webhooks.md](docs/webhooks.md). A verified delivery for a
 persisted repository becomes one CloudEvent on this same matcher.
 
 Each accepted match snapshots the resolved agent into
-its invocation. Each one-shot runner uses a Genesis-owned `dsh_home` under
-`-data/runs/<run_id>/`, invokes `provider="deepseek-official"`, model
-`deepseek-flash`, and profile `sdk-minimal`, and **retains** that home
-(including DeepSeek session JSONL) after the child exits. `dsh_home` is not
-the agent `home`. The compact JSON serialization of the complete CloudEvent is
-the sole session user message. Instructions are standing identity, not
+its invocation. Each one-shot runner uses a Genesis-owned `dsh_home` at
+`-data/sessions/<root run id>/dsh_home`. The first run of a chain mints that
+home. A continuation copies the same path and DeepSeek session id onto a new
+`gen_` run and does not create a second home. The runner invokes
+`provider="deepseek-official"`, model `deepseek-flash`, and profile
+`sdk-minimal`, and **retains** that home (including DeepSeek session JSONL)
+after the child exits. `dsh_home` is not the agent `home`. The compact JSON
+serialization of the complete CloudEvent is the sole session user message,
+except a continuation, which passes `data.message` as the follow-up text. Instructions are standing identity, not
 prepended onto that payload. For the pinned `0.1.5rc1` profile, the runner also
 supplies a per-run Cordis patch setting `session-log-deepseek.enabled: false`;
 canonical DeepSeek API requests therefore do not upload or append session-trace
@@ -319,11 +322,12 @@ and appends them to `events.jsonl` before in-process fan-out. Those records
 are observations, not ingress: do not POST them back to `/events`.
 
 ```
+<data>/sessions/<root gen_>/dsh_home/   # retained SDK home / session JSONL
 <data>/runs/gen_<hex>/
   events.jsonl    # CloudEvents 1.0 lifecycle records
   stderr.log
   result.json     # terminal runner object, redacted
-  dsh_home/       # retained SDK home / session JSONL
+  session.json    # session id, dsh_home, correlation id, continued_from
 ```
 
 Lifecycle types are `dev.genesis.run.accepted`, `start`, `session.created`,

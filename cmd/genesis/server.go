@@ -65,19 +65,23 @@ type rule struct {
 }
 
 type invocation struct {
-	Event        cloudEvent        `json:"event"`
-	Rule         string            `json:"rule"`
-	Agent        string            `json:"agent"`
-	RunID        string            `json:"run_id"`
-	User         string            `json:"user,omitempty"`
-	Cwd          string            `json:"cwd"`
-	Home         string            `json:"home"`
-	Instructions string            `json:"instructions"`
-	Env          map[string]string `json:"env"`
-	RunDir       string            `json:"run_dir"`
-	DshHome      string            `json:"dsh_home"`
-	Git          string            `json:"-"`
-	Credential   string            `json:"-"`
+	Event         cloudEvent        `json:"event"`
+	Rule          string            `json:"rule"`
+	Agent         string            `json:"agent"`
+	RunID         string            `json:"run_id"`
+	User          string            `json:"user,omitempty"`
+	Cwd           string            `json:"cwd"`
+	Home          string            `json:"home"`
+	Instructions  string            `json:"instructions"`
+	Env           map[string]string `json:"env"`
+	RunDir        string            `json:"run_dir"`
+	DshHome       string            `json:"dsh_home"`
+	SessionID     string            `json:"session_id,omitempty"`
+	CorrelationID string            `json:"correlation_id,omitempty"`
+	ContinuedFrom string            `json:"continued_from,omitempty"`
+	UserMessage   string            `json:"user_message,omitempty"`
+	Git           string            `json:"-"`
+	Credential    string            `json:"-"`
 }
 
 type acceptedRun struct {
@@ -176,12 +180,22 @@ func (s *eventServer) dispatchCloudEvent(w http.ResponseWriter, event cloudEvent
 		http.Error(w, "generation is not loaded", http.StatusInternalServerError)
 		return
 	}
+	if eventType, ok := event.stringAttribute("type"); ok && eventType == sessionContinueType {
+		s.dispatchSessionContinue(w, event, current)
+		return
+	}
 
 	matches := make([]rule, 0, len(current.rules))
 	for _, candidate := range current.rules {
-		if candidate.matches(event) {
-			matches = append(matches, candidate)
+		if !candidate.matches(event) {
+			continue
 		}
+		// Only dev.genesis.agent.finished skips a rule whose agent is the
+		// subject. That is the agent that just finished. Other rules still run.
+		if skipFinishedSelf(candidate, event) {
+			continue
+		}
+		matches = append(matches, candidate)
 	}
 	if len(matches) == 0 {
 		w.WriteHeader(http.StatusNoContent)

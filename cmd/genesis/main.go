@@ -88,19 +88,20 @@ func runListen(logger *slog.Logger, args []string) {
 		rulesDir:     absoluteRulesDir,
 		reposDir:     absoluteReposDir,
 		providersDir: absoluteProvidersDir,
-		runner: processRunner{
-			pythonPath: pythonPath,
-			source:     embeddedPythonRunner,
-			logger:     logger,
-			store:      store,
-			spawner:    asSpawner(coordinator),
-		},
-		newRunID:    newGenesisRunID,
+		newRunID:     newGenesisRunID,
 		secrets:     inheritedEnvironment(),
 		logger:      logger,
 		syncToken:   syncToken,
 		coordinator: coordinator,
 		store:       store,
+	}
+	handler.runner = processRunner{
+		pythonPath: pythonPath,
+		source:     embeddedPythonRunner,
+		logger:     logger,
+		store:      store,
+		spawner:    asSpawner(coordinator),
+		dispatch:   handler.dispatchIngress,
 	}
 	if ipcClient, ok := coordinator.(*ipcCoordinator); ok {
 		handler.verifyWebhook = ipcClient.VerifyWebhook

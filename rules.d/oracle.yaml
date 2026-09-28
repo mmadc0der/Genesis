@@ -1,0 +1,4 @@
+match:
+  type: dev.genesis.agent.finished
+  subject: "*"
+agent: oracle

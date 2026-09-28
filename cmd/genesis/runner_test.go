@@ -376,11 +376,11 @@ printf '%s\n' "{\"v\":1,\"type\":\"result\",\"deepseek_session_id\":\"session-$r
 	if crossed(first, "gen_two") || crossed(second, "gen_one") {
 		t.Fatalf("crossed run identity first=%v second=%v", first, second)
 	}
-	oneSession, err := os.ReadFile(filepath.Join(store.dataDir, runsDirName, "gen_one", dshHomeDirName, "sessions", "dummy", "session.jsonl"))
+	oneSession, err := os.ReadFile(filepath.Join(stableDshHome(store.dataDir, "gen_one"), "sessions", "dummy", "session.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	twoSession, err := os.ReadFile(filepath.Join(store.dataDir, runsDirName, "gen_two", dshHomeDirName, "sessions", "dummy", "session.jsonl"))
+	twoSession, err := os.ReadFile(filepath.Join(stableDshHome(store.dataDir, "gen_two"), "sessions", "dummy", "session.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,6 +648,93 @@ func TestPrepareDataDirRejectsFile(t *testing.T) {
 	}
 	if _, err := prepareDataDir(""); err == nil {
 		t.Fatal("expected empty path error")
+	}
+}
+
+func TestPrepareDataDirTranscriptModes(t *testing.T) {
+	data := t.TempDir()
+	runs := filepath.Join(data, runsDirName)
+	transcripts := filepath.Join(data, transcriptsDirName)
+	if err := os.MkdirAll(runs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(transcripts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(transcripts, "gen_boot.jsonl")
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	perm := func(path string) os.FileMode {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info.Mode().Perm()
+	}
+	prepare := func() {
+		t.Helper()
+		if _, err := prepareDataDir(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prepare()
+	prepare()
+	if got := perm(data); got != dataRootMode {
+		t.Fatalf("data root mode = %o", got)
+	}
+	if got := perm(runs); got != dataDirMode {
+		t.Fatalf("runs mode = %o", got)
+	}
+	if got := perm(transcripts); got != transcriptsDirMode {
+		t.Fatalf("transcripts mode = %o", got)
+	}
+	if got := perm(transcript); got != transcriptFileMode {
+		t.Fatalf("transcript mode = %o", got)
+	}
+	if got := perm(filepath.Join(data, sessionsDirName)); got != dataRootMode {
+		t.Fatalf("sessions mode = %o", got)
+	}
+}
+
+func TestChmodOwnedSkipsUnownedPath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can chmod paths it does not own")
+	}
+	foreign := "/etc/passwd"
+	info, err := os.Lstat(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownsFileInfo(info) {
+		t.Skip("test user owns /etc/passwd")
+	}
+	before := info.Mode().Perm()
+	if err := chmodOwned(foreign, before^0o007); err != nil {
+		t.Fatalf("unowned chmod: %v", err)
+	}
+	after, err := os.Lstat(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != before {
+		t.Fatalf("unowned mode changed from %o to %o", before, after.Mode().Perm())
+	}
+
+	owned := filepath.Join(t.TempDir(), "note")
+	if err := os.WriteFile(owned, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := chmodOwned(owned, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Stat(owned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode().Perm() != 0o644 {
+		t.Fatalf("owned mode = %o", got.Mode().Perm())
 	}
 }
 
