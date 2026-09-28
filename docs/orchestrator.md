@@ -190,7 +190,8 @@ secret and dispatches one CloudEvent through that same matcher. See
 
 `genesis control` is a second process. It reads the config directories and
 the run journals, proxies CloudEvents and authorized sync to the listener,
-and serves the panel. The journal file remains the replay source. See
+and serves the panel. It also subscribes to the listener's `GET /live`
+event stream. The journal file remains the replay source. See
 [control.md](control.md).
 
 ## Docker Desktop on Windows / WSL

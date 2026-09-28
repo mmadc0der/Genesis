@@ -812,30 +812,87 @@ func dropTornTail(path string) error {
 }
 
 func readJournalPrefix(path string) ([]lifecycleEvent, error) {
+	events, _, err := readJournalFrom(path, 0)
+	return events, err
+}
+
+// readJournalFrom parses complete JSONL records at and after offset.
+// A torn or invalid trailing line is left unconsumed so the next read can
+// pick it up after the writer finishes it. offset is reset when it falls
+// outside the file.
+func readJournalFrom(path string, offset int64) ([]lifecycleEvent, int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+		if os.IsNotExist(err) && offset <= 0 {
+			return nil, 0, nil
 		}
-		return nil, err
+		return nil, offset, err
 	}
 	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), maxFrameBytes)
+	info, err := file.Stat()
+	if err != nil {
+		return nil, offset, err
+	}
+	if offset < 0 || offset > info.Size() {
+		offset = 0
+	}
+	if offset == info.Size() {
+		return nil, offset, nil
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset, err
+	}
+	reader := bufio.NewReaderSize(file, 64*1024)
 	var events []lifecycleEvent
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
+	consumed := offset
+	for {
+		line, newline, tooLong, err := readJournalLine(reader)
+		if tooLong || err != nil {
+			break
+		}
+		if len(line) == 0 && !newline {
+			break
+		}
+		width := int64(len(line))
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			consumed += width
+			if !newline {
+				break
+			}
 			continue
 		}
 		var event lifecycleEvent
-		if err := json.Unmarshal(line, &event); err != nil {
+		if err := json.Unmarshal(trimmed, &event); err != nil {
 			break
 		}
 		events = append(events, event)
+		consumed += width
+		if !newline {
+			break
+		}
 	}
-	return events, nil
+	return events, consumed, nil
+}
+
+func readJournalLine(reader *bufio.Reader) (line []byte, newline bool, tooLong bool, err error) {
+	for {
+		frag, readErr := reader.ReadSlice('\n')
+		if len(line)+len(frag) > maxFrameBytes {
+			return nil, false, true, nil
+		}
+		line = append(line, frag...)
+		if readErr == nil {
+			return line, true, false, nil
+		}
+		if errors.Is(readErr, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(readErr, io.EOF) {
+			return line, false, false, nil
+		}
+		return line, false, false, readErr
+	}
 }
 
 func lastSequence(events []lifecycleEvent) uint64 {

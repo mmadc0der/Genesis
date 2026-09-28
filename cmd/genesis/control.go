@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -79,6 +80,19 @@ type controlServer struct {
 	pollEvery       time.Duration
 	generationLimit int
 	newEventID      func() (string, error)
+	journalMu       sync.Mutex
+	journals        map[string]journalSnap
+	liveMu          sync.Mutex
+	liveSet         map[*liveSubs]struct{}
+	feedOnce        sync.Once
+	feedReadyOnce   sync.Once
+	feedReady       chan struct{}
+}
+
+type journalSnap struct {
+	size    int64
+	offset  int64
+	summary runSummary
 }
 
 type controlState struct {
@@ -302,6 +316,7 @@ func newControlServer(cfg controlConfig, logger *slog.Logger) *controlServer {
 		pollEvery:       250 * time.Millisecond,
 		generationLimit: maxGenerationBytes,
 		newEventID:      newControlEventID,
+		feedReady:       make(chan struct{}),
 	}
 }
 
@@ -896,11 +911,11 @@ func (c *controlServer) listRuns(limit int) ([]runSummary, error) {
 		if err := validateRunID(entry.Name()); err != nil {
 			continue
 		}
-		events, err := c.readRunEvents(entry.Name())
-		if err != nil || len(events) == 0 {
+		summary, err := c.summarizeCached(entry.Name())
+		if err != nil || summary.RunID == "" {
 			continue
 		}
-		runs = append(runs, summarizeRun(events))
+		runs = append(runs, summary)
 	}
 	slices.SortFunc(runs, func(left, right runSummary) int {
 		if left.AcceptedAt != right.AcceptedAt {
@@ -984,18 +999,62 @@ func (c *controlServer) readRunEvents(runID string) ([]lifecycleEvent, error) {
 	return events, nil
 }
 
-func summarizeRun(events []lifecycleEvent) runSummary {
+func (c *controlServer) summarizeCached(runID string) (runSummary, error) {
+	path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
+	info, err := os.Stat(path)
+	if err != nil {
+		return runSummary{}, err
+	}
+	c.journalMu.Lock()
+	snap, ok := c.journals[runID]
+	c.journalMu.Unlock()
+	if ok && snap.size == info.Size() && snap.offset <= info.Size() {
+		return snap.summary, nil
+	}
+	offset := int64(0)
 	summary := runSummary{State: runStateOpen, LastSeq: "0"}
+	if ok && info.Size() >= snap.offset {
+		offset = snap.offset
+		summary = snap.summary
+	}
+	events, next, err := readJournalFrom(path, offset)
+	if err != nil {
+		return runSummary{}, err
+	}
+	for index := range events {
+		events[index].Data = redactPrivateKeys(events[index].Data)
+	}
+	if offset == 0 {
+		summary = summarizeRun(events)
+	} else if len(events) > 0 {
+		summary = foldRunSummary(summary, events)
+	}
+	c.journalMu.Lock()
+	if c.journals == nil {
+		c.journals = map[string]journalSnap{}
+	}
+	c.journals[runID] = journalSnap{size: info.Size(), offset: next, summary: summary}
+	c.journalMu.Unlock()
+	return summary, nil
+}
+
+func summarizeRun(events []lifecycleEvent) runSummary {
+	return foldRunSummary(runSummary{State: runStateOpen, LastSeq: "0"}, events)
+}
+
+func foldRunSummary(summary runSummary, events []lifecycleEvent) runSummary {
 	if len(events) == 0 {
 		return summary
 	}
-	first := events[0]
-	summary.RunID = first.RunID
-	summary.Agent = first.AgentID
-	summary.Rule = first.Rulefile
-	summary.AcceptedAt = first.Time
-	summary.CauseID = first.CauseID
-	summary.CauseType = first.CauseType
+	if summary.RunID == "" {
+		first := events[0]
+		summary.RunID = first.RunID
+		summary.Agent = first.AgentID
+		summary.Rule = first.Rulefile
+		summary.AcceptedAt = first.Time
+		summary.CauseID = first.CauseID
+		summary.CauseType = first.CauseType
+	}
 	for _, event := range events {
 		if seq, ok := eventSequence(event); ok {
 			summary.LastSeq = strconv.FormatUint(seq, 10)

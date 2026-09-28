@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_PREVIEW_LIMIT, activityLines, activityPreview, applyPanelLoad, buildMessage, driftLabel, driftLine, eventLine, githubGrantSummary, maxCursor, mergeEvents, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
+import { ACTIVITY_PREVIEW_LIMIT, activityLines, activityPreview, activityView, applyPanelLoad, buildMessage, continueActivity, driftLabel, driftLine, eventLine, githubGrantSummary, maxCursor, mergeEvents, readJournal, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
 import type { Agent, ControlState, LifecycleEvent, Repository, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
@@ -24,6 +24,25 @@ describe("control panel model", () => {
     ]);
     expect(merged.map((item) => item.sequence)).toEqual(["1", "2", "3"]);
     expect(maxCursor(merged)).toBe("3");
+    const appended = mergeEvents(merged, [event("4", "dev.genesis.run.end")]);
+    expect(appended.slice(0, 3)).toEqual(merged);
+    expect(appended.map((item) => item.sequence)).toEqual(["1", "2", "3", "4"]);
+  });
+
+  it("loads the finished journal before the caller follows new tokens", async () => {
+    const journal = readJournal(async (after) => {
+      if (after === "0") {
+        return { events: [event("1", "dev.genesis.run.accepted"), event("2", "dev.genesis.run.chunk")], cursor: "2", has_more: true };
+      }
+      if (after === "2") {
+        return { events: [event("3", "dev.genesis.run.assistant")], cursor: "3", has_more: false };
+      }
+      throw new Error(`unexpected after ${after}`);
+    });
+    await expect(journal).resolves.toEqual({
+      events: [event("1", "dev.genesis.run.accepted"), event("2", "dev.genesis.run.chunk"), event("3", "dev.genesis.run.assistant")],
+      cursor: "3",
+    });
   });
 
   it("renders settled results and does not invent token text from raw notifications", () => {
@@ -245,6 +264,26 @@ describe("control panel model", () => {
     expect(lines.some((line) => line.text === "Tool call")).toBe(false);
     expect(lines.some((line) => line.text.includes("inputTokens"))).toBe(false);
     expect(lines.some((line) => line.text.includes("tool-calls"))).toBe(false);
+
+    const chunk = (sequence: string, text: string) =>
+      event(sequence, "dev.genesis.run.chunk", {
+        raw: {
+          method: "on_chunk",
+          payload: { type: "chunk", attemptId: "a1", chunk: { type: "text-delta", text } },
+        },
+      });
+    const opened = [chunk("1", "one"), chunk("2", " two")];
+    const cursor = continueActivity(null, opened);
+    const extended = continueActivity(cursor, [...opened, chunk("3", " three")]);
+    expect(extended).toBe(cursor);
+    expect(activityView(extended).map((line) => line.text)).toEqual(["one two three"]);
+    expect(activityLines([...opened, chunk("3", " three")]).map((line) => line.text)).toEqual(["one two three"]);
+    const capped = activityLines(
+      Array.from({ length: 200 }, (_, index) => chunk(String(index + 1), "y".repeat(100))),
+    );
+    expect(capped).toHaveLength(1);
+    expect(capped[0].text.endsWith("\n… truncated")).toBe(true);
+    expect(new TextEncoder().encode(capped[0].text.split("\n… truncated")[0]).length).toBeLessThanOrEqual(16 * 1024);
 
     const huge = eventLine(
       event("11", "dev.genesis.run.assistant", {

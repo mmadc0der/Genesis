@@ -126,6 +126,8 @@ func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleHealth(w, r)
 	case "/generation":
 		s.handleGeneration(w, r)
+	case "/live":
+		s.handleLiveEvents(w, r)
 	default:
 		http.NotFound(w, r)
 	}

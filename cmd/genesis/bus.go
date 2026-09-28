@@ -4,7 +4,7 @@ import (
 	"sync"
 )
 
-const subscriberQueueSize = 64
+const subscriberQueueSize = 1024
 
 type eventBus struct {
 	mu   sync.Mutex
@@ -48,12 +48,14 @@ func (b *eventBus) publish(event lifecycleEvent) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, sub := range b.subs {
+	for id, sub := range b.subs {
 		select {
 		case sub.ch <- event:
 		default:
-			// Drop newest so a slow subscriber cannot stall Publish or
-			// overwrite the durable lifecycle prefix.
+			// The journal already has the event. Close this subscriber so it
+			// reconnects and catches up from the file instead of observing a gap.
+			delete(b.subs, id)
+			close(sub.ch)
 		}
 	}
 }

@@ -6,15 +6,20 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 )
 
-// /api/live is ephemeral fan-out. Event frames are read from events.jsonl.
-// A dropped socket does not lose history: reconnect with after=<sequence>
-// and the file, not the socket, is authoritative.
+// /api/live is ephemeral fan-out of listener lifecycle events. Control keeps
+// one subscription to the listener's /live socket, which publishes every
+// journaled event after it is durable. Generation chunks are those events.
+// A dropped socket does not lose history: reconnect with after=<sequence>.
+// The journal remains the catch-up source and is tailed from the last byte
+// offset, not reread from the start.
 
 type liveClientOp struct {
 	Op    string `json:"op"`
@@ -45,8 +50,9 @@ type liveStateNotice struct {
 }
 
 type runWatch struct {
-	after uint64
-	gen   uint64
+	after  uint64
+	gen    uint64
+	offset int64
 }
 
 type liveNote struct {
@@ -64,6 +70,7 @@ type liveSubs struct {
 	stateStamp string
 	notes      []liveNote
 	wake       chan struct{}
+	out        chan liveFrame
 }
 
 func newLiveSubs() *liveSubs {
@@ -105,11 +112,30 @@ func (c *controlServer) handleLive(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(maxSyncBytes)
 
 	subs := newLiveSubs()
+	subs.out = make(chan liveFrame, 256)
+	c.addLive(subs)
+	c.ensureListenerFeed()
 	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	defer func() {
+		c.removeLive(subs)
+		cancel()
+	}()
 	go func() {
 		defer cancel()
 		c.readLive(ctx, conn, subs)
+	}()
+	go func() {
+		defer cancel()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-subs.out:
+				if err := writeLive(ctx, conn, frame); err != nil {
+					return
+				}
+			}
+		}
 	}()
 
 	interval := c.pollEvery
@@ -123,13 +149,9 @@ func (c *controlServer) handleLive(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-subs.wake:
-			if err := c.flushLive(ctx, conn, subs); err != nil {
-				return
-			}
+			c.flushLive(ctx, subs)
 		case <-ticker.C:
-			if err := c.flushLive(ctx, conn, subs); err != nil {
-				return
-			}
+			c.flushLive(ctx, subs)
 		}
 	}
 }
@@ -202,7 +224,7 @@ func (c *controlServer) applyUnsubscribe(subs *liveSubs, op liveClientOp) {
 	subs.kick()
 }
 
-func (c *controlServer) flushLive(ctx context.Context, conn *websocket.Conn, subs *liveSubs) error {
+func (c *controlServer) flushLive(ctx context.Context, subs *liveSubs) {
 	subs.mu.Lock()
 	notes := append([]liveNote(nil), subs.notes...)
 	subs.notes = nil
@@ -214,19 +236,14 @@ func (c *controlServer) flushLive(ctx context.Context, conn *websocket.Conn, sub
 	subs.mu.Unlock()
 
 	for _, note := range notes {
-		frame := liveFrame{Op: note.op, Error: note.message}
-		if err := writeLive(ctx, conn, frame); err != nil {
-			return err
-		}
+		subs.emit(liveFrame{Op: note.op, Error: note.message})
 	}
 
 	for runID, watch := range watches {
-		events, err := c.readRunEvents(runID)
-		if err != nil {
+		path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
+		if _, err := os.Stat(path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				if err := writeLive(ctx, conn, liveFrame{Op: "error", RunID: runID, Error: "run not found"}); err != nil {
-					return err
-				}
+				subs.emit(liveFrame{Op: "error", RunID: runID, Error: "run not found"})
 				subs.mu.Lock()
 				if current, ok := subs.runs[runID]; ok && current.gen == watch.gen {
 					delete(subs.runs, runID)
@@ -235,32 +252,46 @@ func (c *controlServer) flushLive(ctx context.Context, conn *websocket.Conn, sub
 			}
 			continue
 		}
-		var last uint64
-		delivered := false
+		events, next, err := readJournalFrom(path, watch.offset)
+		if err != nil {
+			continue
+		}
+		advanced := watch.after
+		emittedAll := true
 		for _, event := range events {
 			seq, ok := eventSequence(event)
-			if !ok || seq <= watch.after {
+			if !ok || seq <= advanced {
 				continue
 			}
+			subs.mu.Lock()
+			current, watching := subs.runs[runID]
+			already := watching && current.gen == watch.gen && seq <= current.after
+			subs.mu.Unlock()
+			if already {
+				continue
+			}
+			event.Data = redactPrivateKeys(event.Data)
 			copied := event
-			if err := writeLive(ctx, conn, liveFrame{
+			if !subs.emit(liveFrame{
 				Op:     "event",
 				Topic:  "run",
 				RunID:  runID,
 				Cursor: event.Sequence,
 				Event:  &copied,
-			}); err != nil {
-				return err
+			}) {
+				emittedAll = false
+				break
 			}
-			last = seq
-			delivered = true
-		}
-		if !delivered {
-			continue
+			advanced = seq
 		}
 		subs.mu.Lock()
-		if current, ok := subs.runs[runID]; ok && current.gen == watch.gen && current.after == watch.after {
-			current.after = last
+		if current, ok := subs.runs[runID]; ok && current.gen == watch.gen && current.offset == watch.offset {
+			if current.after == watch.after {
+				current.after = advanced
+			}
+			if emittedAll {
+				current.offset = next
+			}
 			subs.runs[runID] = current
 		}
 		subs.mu.Unlock()
@@ -272,14 +303,15 @@ func (c *controlServer) flushLive(ctx context.Context, conn *websocket.Conn, sub
 			nextSeen := map[string]string{}
 			for _, run := range runs {
 				stamp := run.State + ":" + run.LastSeq + ":" + run.EndedAt
-				nextSeen[run.RunID] = stamp
 				if seenRuns[run.RunID] == stamp {
+					nextSeen[run.RunID] = stamp
 					continue
 				}
 				copied := run
-				if err := writeLive(ctx, conn, liveFrame{Op: "run", Topic: "runs", Run: &copied}); err != nil {
-					return err
+				if !subs.emit(liveFrame{Op: "run", Topic: "runs", Run: &copied}) {
+					continue
 				}
+				nextSeen[run.RunID] = stamp
 			}
 			subs.mu.Lock()
 			if subs.wantRuns {
@@ -301,10 +333,7 @@ func (c *controlServer) flushLive(ctx context.Context, conn *websocket.Conn, sub
 		if notice.SyncConfigured {
 			stamp += "|configured"
 		}
-		if stamp != stateStamp {
-			if err := writeLive(ctx, conn, liveFrame{Op: "state", Topic: "state", State: &notice}); err != nil {
-				return err
-			}
+		if stamp != stateStamp && subs.emit(liveFrame{Op: "state", Topic: "state", State: &notice}) {
 			subs.mu.Lock()
 			if subs.wantState && subs.stateStamp == stateStamp {
 				subs.stateStamp = stamp
@@ -312,7 +341,6 @@ func (c *controlServer) flushLive(ctx context.Context, conn *websocket.Conn, sub
 			subs.mu.Unlock()
 		}
 	}
-	return nil
 }
 
 func (c *controlServer) liveNotice(ctx context.Context) liveStateNotice {
@@ -367,4 +395,128 @@ func cloneStrings(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func (s *liveSubs) emit(frame liveFrame) bool {
+	if s == nil || s.out == nil {
+		return false
+	}
+	select {
+	case s.out <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *liveSubs) offer(event lifecycleEvent) {
+	seq, ok := eventSequence(event)
+	if !ok || event.RunID == "" {
+		return
+	}
+	s.mu.Lock()
+	watch, watching := s.runs[event.RunID]
+	if !watching || seq <= watch.after {
+		s.mu.Unlock()
+		return
+	}
+	copied := event
+	frame := liveFrame{
+		Op:     "event",
+		Topic:  "run",
+		RunID:  event.RunID,
+		Cursor: event.Sequence,
+		Event:  &copied,
+	}
+	if !s.emit(frame) {
+		s.mu.Unlock()
+		return
+	}
+	watch.after = seq
+	s.runs[event.RunID] = watch
+	s.mu.Unlock()
+}
+
+func (c *controlServer) addLive(subs *liveSubs) {
+	c.liveMu.Lock()
+	defer c.liveMu.Unlock()
+	if c.liveSet == nil {
+		c.liveSet = map[*liveSubs]struct{}{}
+	}
+	c.liveSet[subs] = struct{}{}
+}
+
+func (c *controlServer) removeLive(subs *liveSubs) {
+	c.liveMu.Lock()
+	defer c.liveMu.Unlock()
+	delete(c.liveSet, subs)
+}
+
+func (c *controlServer) deliverListenerEvent(event lifecycleEvent) {
+	c.liveMu.Lock()
+	defer c.liveMu.Unlock()
+	for subs := range c.liveSet {
+		subs.offer(event)
+	}
+}
+
+func (c *controlServer) ensureListenerFeed() {
+	c.feedOnce.Do(func() {
+		go c.loopListenerFeed()
+	})
+}
+
+func (c *controlServer) loopListenerFeed() {
+	backoff := 200 * time.Millisecond
+	for {
+		err := c.readListenerFeed()
+		if err != nil {
+			c.logger.Info("listener event subscription dropped", "error", err)
+		}
+		time.Sleep(backoff)
+		if backoff < 5*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+func (c *controlServer) readListenerFeed() error {
+	header := http.Header{}
+	if c.syncToken != "" {
+		header.Set("Authorization", "Bearer "+c.syncToken)
+	}
+	ctx := context.Background()
+	conn, _, err := websocket.Dial(ctx, listenerLiveURL(c.listenerURL), &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		return err
+	}
+	c.feedReadyOnce.Do(func() {
+		if c.feedReady != nil {
+			close(c.feedReady)
+		}
+	})
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	conn.SetReadLimit(maxFrameBytes)
+	for {
+		_, payload, err := conn.Read(ctx)
+		if err != nil {
+			return err
+		}
+		var event lifecycleEvent
+		if err := json.Unmarshal(payload, &event); err != nil {
+			continue
+		}
+		c.deliverListenerEvent(event)
+	}
+}
+
+func listenerLiveURL(raw string) string {
+	switch {
+	case strings.HasPrefix(raw, "https://"):
+		return "wss://" + strings.TrimPrefix(raw, "https://") + "/live"
+	case strings.HasPrefix(raw, "http://"):
+		return "ws://" + strings.TrimPrefix(raw, "http://") + "/live"
+	default:
+		return strings.TrimRight(raw, "/") + "/live"
+	}
 }

@@ -188,12 +188,54 @@ export function presenceLabel(presence: string): string {
 }
 
 export function mergeEvents(current: LifecycleEvent[], incoming: LifecycleEvent[]): LifecycleEvent[] {
+  if (incoming.length === 0) return current;
+  const tail = current.length === 0 ? 0 : Number(current[current.length - 1]?.sequence);
+  let append = current.length > 0 && Number.isFinite(tail);
+  if (append) {
+    for (const event of incoming) {
+      const seq = Number(event.sequence);
+      if (!event.sequence || !Number.isFinite(seq) || seq <= tail) {
+        append = false;
+        break;
+      }
+    }
+  }
+  if (append) {
+    if (incoming.length === 1) return current.concat(incoming);
+    return current.concat([...incoming].sort((left, right) => Number(left.sequence) - Number(right.sequence)));
+  }
   const bySeq = new Map<string, LifecycleEvent>();
   for (const event of current) bySeq.set(event.sequence, event);
   for (const event of incoming) {
     if (event.sequence) bySeq.set(event.sequence, event);
   }
   return [...bySeq.values()].sort((left, right) => Number(left.sequence) - Number(right.sequence));
+}
+
+export interface JournalPage {
+  events: LifecycleEvent[];
+  cursor: string;
+  has_more: boolean;
+}
+
+/** Page the journal until it is caught up, so a replay is history rather than a fresh generation. */
+export async function readJournal(
+  fetchPage: (after: string) => Promise<JournalPage>,
+  start = "0",
+): Promise<{ events: LifecycleEvent[]; cursor: string }> {
+  let events: LifecycleEvent[] = [];
+  let after = start || "0";
+  let cursor = after;
+  for (let page = 0; page < 1000; page++) {
+    const next = await fetchPage(after);
+    if (next.events.length > 0) events = mergeEvents(events, next.events);
+    if (next.cursor) cursor = next.cursor;
+    if (!next.has_more || next.events.length === 0 || !next.cursor || next.cursor === after) {
+      return { events, cursor };
+    }
+    after = next.cursor;
+  }
+  return { events, cursor };
 }
 
 export function mergeRuns(current: RunSummary[], incoming: RunSummary): RunSummary[] {
@@ -303,6 +345,8 @@ interface OpenAssistant {
   line: ChatLine;
   reasoning: string;
   body: string;
+  reasoningBytes: number;
+  bodyBytes: number;
   settled: boolean;
   frozen: boolean;
 }
@@ -311,54 +355,93 @@ interface OpenTool {
   line: ChatLine;
   name: string;
   args: string;
+  argsBytes: number;
   settled: boolean;
   frozen: boolean;
 }
 
-export function activityLines(events: LifecycleEvent[]): ChatLine[] {
-  const lines: ChatLine[] = [];
-  const assistants = new Map<string, OpenAssistant>();
-  const tools = new Map<string, OpenTool>();
-  let latestAttempt = "";
+export interface ActivityCursor {
+  lines: ChatLine[];
+  assistants: Map<string, OpenAssistant>;
+  tools: Map<string, OpenTool>;
+  latestAttempt: string;
+  source: LifecycleEvent[];
+}
 
-  for (const event of events) {
-    const data = event.data ?? {};
-    if (event.type === "dev.genesis.run.chunk") {
-      applyChunk(event, data, lines, assistants, tools, (attemptId) => {
-        latestAttempt = attemptId;
-      });
-      continue;
-    }
-    if (event.type === "dev.genesis.run.assistant") {
-      const text = assistantText(data);
-      const open = latestAttempt ? assistants.get(latestAttempt) : undefined;
-      if (open && !open.settled && text) {
-        open.line.text = text;
-        open.line.time = event.time || open.line.time;
-        open.settled = true;
-        continue;
-      }
-      if (text) lines.push({ ...eventLine(event), key: event.sequence, time: event.time, text });
-      continue;
-    }
-    if (event.type === "dev.genesis.run.tool" && stringField(data, "phase") === "call") {
-      const name = toolName(data);
-      const args = toolArguments(data);
-      const open = findOpenTool(tools, name, args);
-      if (open) {
-        open.name = name || open.name;
-        open.args = args || open.args;
-        open.line.text = capPanelText([open.name, open.args].filter(Boolean).join("\n"));
-        open.line.time = event.time || open.line.time;
-        open.settled = true;
-        continue;
-      }
-    }
-    const line = eventLine(event);
-    if (!line.text) continue;
-    lines.push({ ...line, key: event.sequence, time: event.time });
+export function activityLines(events: LifecycleEvent[]): ChatLine[] {
+  return activityView(continueActivity(null, events));
+}
+
+export function activityView(cursor: ActivityCursor): ChatLine[] {
+  return cursor.lines.filter((line) => line.text.trim() !== "");
+}
+
+export function continueActivity(previous: ActivityCursor | null, events: LifecycleEvent[]): ActivityCursor {
+  if (previous && isEventPrefix(previous.source, events)) {
+    if (previous.source.length === events.length) return previous;
+    for (let index = previous.source.length; index < events.length; index++) absorbActivity(previous, events[index]);
+    previous.source = events;
+    return previous;
   }
-  return lines.filter((line) => line.text.trim() !== "");
+  const cursor = emptyActivity();
+  for (const event of events) absorbActivity(cursor, event);
+  cursor.source = events;
+  return cursor;
+}
+
+function emptyActivity(): ActivityCursor {
+  return { lines: [], assistants: new Map(), tools: new Map(), latestAttempt: "", source: [] };
+}
+
+function isEventPrefix(previous: LifecycleEvent[], next: LifecycleEvent[]): boolean {
+  if (previous.length > next.length) return false;
+  for (let index = 0; index < previous.length; index++) {
+    const prior = previous[index];
+    const incoming = next[index];
+    if (prior === incoming) continue;
+    if (prior.sequence && prior.sequence === incoming.sequence) continue;
+    return false;
+  }
+  return true;
+}
+
+function absorbActivity(cursor: ActivityCursor, event: LifecycleEvent): void {
+  const data = event.data ?? {};
+  if (event.type === "dev.genesis.run.chunk") {
+    applyChunk(event, data, cursor.lines, cursor.assistants, cursor.tools, (attemptId) => {
+      cursor.latestAttempt = attemptId;
+    });
+    return;
+  }
+  if (event.type === "dev.genesis.run.assistant") {
+    const text = assistantText(data);
+    const open = cursor.latestAttempt ? cursor.assistants.get(cursor.latestAttempt) : undefined;
+    if (open && !open.settled && text) {
+      open.line.text = text;
+      open.line.time = event.time || open.line.time;
+      open.settled = true;
+      return;
+    }
+    if (text) cursor.lines.push({ ...eventLine(event), key: event.sequence, time: event.time, text });
+    return;
+  }
+  if (event.type === "dev.genesis.run.tool" && stringField(data, "phase") === "call") {
+    const name = toolName(data);
+    const args = toolArguments(data);
+    const open = findOpenTool(cursor.tools, name, args);
+    if (open) {
+      open.name = name || open.name;
+      open.args = args || open.args;
+      open.argsBytes = utf8ByteLength(open.args);
+      open.line.text = capPanelText([open.name, open.args].filter(Boolean).join("\n"));
+      open.line.time = event.time || open.line.time;
+      open.settled = true;
+      return;
+    }
+  }
+  const line = eventLine(event);
+  if (!line.text) return;
+  cursor.lines.push({ ...line, key: event.sequence, time: event.time });
 }
 
 function applyChunk(
@@ -385,6 +468,8 @@ function applyChunk(
         line: { key: `live-${attemptId || event.sequence}`, kind: "assistant", text: "", time: event.time },
         reasoning: "",
         body: "",
+        reasoningBytes: 0,
+        bodyBytes: 0,
         settled: false,
         frozen: false,
       };
@@ -392,11 +477,17 @@ function applyChunk(
       lines.push(open.line);
     }
     if (open.frozen) return;
-    const appended = appendCapped(chunk.type === "reasoning-delta" ? open.reasoning : open.body, extra);
-    if (chunk.type === "reasoning-delta") open.reasoning = appended.text;
-    else open.body = appended.text;
+    const reasoning = chunk.type === "reasoning-delta";
+    const appended = appendCapped(reasoning ? open.reasoning : open.body, reasoning ? open.reasoningBytes : open.bodyBytes, extra);
+    if (reasoning) {
+      open.reasoning = appended.text;
+      open.reasoningBytes = appended.bytes;
+    } else {
+      open.body = appended.text;
+      open.bodyBytes = appended.bytes;
+    }
     open.frozen = appended.frozen;
-    open.line.text = capPanelText([open.reasoning, open.body].filter(Boolean).join("\n\n"));
+    paintCapped(open.line, open.reasoning, open.reasoningBytes, open.body, open.bodyBytes, "\n\n");
     return;
   }
   if (chunk.type === "tool-call-delta") {
@@ -409,6 +500,7 @@ function applyChunk(
         line: { key: `tool-${key}`, kind: "tool", text: "", time: event.time, toolCall: true },
         name: "",
         args: "",
+        argsBytes: 0,
         settled: false,
         frozen: false,
       };
@@ -417,14 +509,15 @@ function applyChunk(
     }
     if (typeof chunk.name === "string" && chunk.name) open.name = chunk.name;
     if (open.frozen) {
-      open.line.text = capPanelText([open.name, open.args].filter(Boolean).join("\n"));
+      paintCapped(open.line, open.name, utf8ByteLength(open.name), open.args, open.argsBytes, "\n");
       return;
     }
     const delta = typeof chunk.argumentsDelta === "string" ? chunk.argumentsDelta : "";
-    const appended = appendCapped(open.args, delta);
+    const appended = appendCapped(open.args, open.argsBytes, delta);
     open.args = appended.text;
+    open.argsBytes = appended.bytes;
     open.frozen = appended.frozen;
-    open.line.text = capPanelText([open.name, open.args].filter(Boolean).join("\n"));
+    paintCapped(open.line, open.name, utf8ByteLength(open.name), open.args, open.argsBytes, "\n");
   }
 }
 
@@ -594,14 +687,31 @@ export function capPanelText(text: string): string {
   return `${decoded}\n… truncated`;
 }
 
-function appendCapped(current: string, extra: string): { text: string; frozen: boolean } {
-  if (!extra) return { text: current, frozen: false };
-  if (current.endsWith("\n… truncated") || textEncoder.encode(current).length >= PANEL_TEXT_CAP_BYTES) {
-    return { text: current, frozen: true };
+function utf8ByteLength(text: string): number {
+  return text ? textEncoder.encode(text).length : 0;
+}
+
+function paintCapped(line: ChatLine, left: string, leftBytes: number, right: string, rightBytes: number, separator: string): void {
+  const parts = [left, right].filter(Boolean);
+  let bytes = 0;
+  if (left && right) bytes = leftBytes + rightBytes + utf8ByteLength(separator);
+  else if (left) bytes = leftBytes;
+  else bytes = rightBytes;
+  const text = parts.join(separator);
+  line.text = bytes <= PANEL_TEXT_CAP_BYTES ? text : capPanelText(text);
+}
+
+function appendCapped(current: string, currentBytes: number, extra: string): { text: string; bytes: number; frozen: boolean } {
+  if (!extra) return { text: current, bytes: currentBytes, frozen: false };
+  if (current.endsWith("\n… truncated") || currentBytes >= PANEL_TEXT_CAP_BYTES) {
+    return { text: current, bytes: currentBytes, frozen: true };
   }
-  const next = current + extra;
-  if (textEncoder.encode(next).length <= PANEL_TEXT_CAP_BYTES) return { text: next, frozen: false };
-  return { text: capPanelText(next), frozen: true };
+  const extraBytes = utf8ByteLength(extra);
+  if (currentBytes + extraBytes <= PANEL_TEXT_CAP_BYTES) {
+    return { text: current + extra, bytes: currentBytes + extraBytes, frozen: false };
+  }
+  const text = capPanelText(current + extra);
+  return { text, bytes: utf8ByteLength(text), frozen: true };
 }
 
 export function buildMessage(input: {

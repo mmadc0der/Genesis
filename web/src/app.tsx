@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { getJSON, postText } from "./api";
 import { ActivityLine } from "./activity-line";
+import { useTranscriptFollow } from "./transcript-scroll";
 import {
   applyPanelLoad,
   buildMessage,
   driftLabel,
-  activityLines,
+  activityView,
+  continueActivity,
   maxCursor,
   mergeEvents,
   mergeRuns,
+  readJournal,
   presenceLabel,
   githubGrantSummary,
   driftLine,
@@ -18,6 +21,7 @@ import {
   repositorySyncNotice,
   secretNames,
   shortDigest,
+  type ActivityCursor,
   type PanelSnapshot,
   type Settled,
 } from "./model";
@@ -44,6 +48,7 @@ export function App() {
   const [selectedRule, setSelectedRule] = useState("");
   const [selectedRepository, setSelectedRepository] = useState("");
   const [events, setEvents] = useState<LifecycleEvent[]>([]);
+  const [journalLoading, setJournalLoading] = useState(false);
   const [cursor, setCursor] = useState("0");
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [message, setMessage] = useState("");
@@ -57,10 +62,13 @@ export function App() {
   const [problems, setProblems] = useState<string[]>([]);
   const snapshotRef = useRef<PanelSnapshot>({ state: null, agents: [], rules: [], repositories: [], runs: [], problems: [] });
   const selectedRunRef = useRef("");
+  const historyRunRef = useRef("");
   const cursorRef = useRef("0");
   const subsRef = useRef<LiveOp[]>([]);
   const socketRef = useRef<WebSocket | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const activityRunRef = useRef(selectedRun);
+  const activityRef = useRef<ActivityCursor | null>(null);
 
   selectedRunRef.current = selectedRun;
   cursorRef.current = cursor;
@@ -119,7 +127,7 @@ export function App() {
         } catch {
           return;
         }
-        if (frame.op === "event" && frame.event && frame.run_id === selectedRunRef.current) {
+        if (frame.op === "event" && frame.event && frame.run_id === selectedRunRef.current && historyRunRef.current === frame.run_id) {
           setEvents((current) => mergeEvents(current, [frame.event!]));
           if (frame.cursor) {
             cursorRef.current = frame.cursor;
@@ -129,11 +137,14 @@ export function App() {
           }
         } else if (frame.op === "run" && frame.run) {
           setRuns((current) => mergeRuns(current, frame.run!));
-          if (frame.run.run_id === selectedRunRef.current && Number(frame.run.last_seq) > Number(cursorRef.current)) {
-            void getJSON<EventsPage>(`/api/runs/${frame.run.run_id}/events?after=${cursorRef.current}`).then((page) => {
-              setEvents((current) => mergeEvents(current, page.events));
-              setCursor(page.cursor);
-              cursorRef.current = page.cursor;
+          const run = frame.run;
+          if (run.run_id === selectedRunRef.current && historyRunRef.current === run.run_id && Number(run.last_seq) > Number(cursorRef.current)) {
+            const after = cursorRef.current;
+            void readJournal((pageAfter) => getJSON<EventsPage>(`/api/runs/${run.run_id}/events?after=${pageAfter}&limit=1000`), after).then((journal) => {
+              if (historyRunRef.current !== run.run_id) return;
+              setEvents((current) => mergeEvents(current, journal.events));
+              setCursor(journal.cursor);
+              cursorRef.current = journal.cursor;
             }).catch(() => undefined);
           }
         } else if (frame.op === "state") {
@@ -163,37 +174,55 @@ export function App() {
 
   useEffect(() => {
     if (!selectedRun) {
+      historyRunRef.current = "";
+      setJournalLoading(false);
       setEvents([]);
       setDetail(null);
       setCursor("0");
+      cursorRef.current = "0";
       return;
     }
+    const runID = selectedRun;
     let cancelled = false;
-    Promise.all([
-      getJSON<EventsPage>(`/api/runs/${selectedRun}/events?limit=500`),
-      getJSON<RunDetail>(`/api/runs/${selectedRun}`),
-    ])
-      .then(([page, nextDetail]) => {
+    historyRunRef.current = "";
+    setJournalLoading(true);
+    setEvents([]);
+    setCursor("0");
+    cursorRef.current = "0";
+    readJournal((after) => getJSON<EventsPage>(`/api/runs/${runID}/events?after=${after}&limit=1000`))
+      .then(async (journal) => {
         if (cancelled) return;
-        setEvents(page.events);
-        setCursor(page.cursor);
-        cursorRef.current = page.cursor;
+        const nextDetail = await getJSON<RunDetail>(`/api/runs/${runID}`);
+        if (cancelled) return;
+        setEvents(journal.events);
+        setCursor(journal.cursor);
+        cursorRef.current = journal.cursor;
         setDetail(nextDetail);
-        sendLive({ op: "subscribe", topic: "run", run_id: selectedRun, after: page.cursor });
+        historyRunRef.current = runID;
+        sendLive({ op: "subscribe", topic: "run", run_id: runID, after: journal.cursor });
       })
       .catch((reason: unknown) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "Failed to load run");
+      })
+      .finally(() => {
+        if (!cancelled) setJournalLoading(false);
       });
     return () => {
       cancelled = true;
-      sendLive({ op: "unsubscribe", topic: "run", run_id: selectedRun });
+      historyRunRef.current = "";
+      sendLive({ op: "unsubscribe", topic: "run", run_id: runID });
     };
   }, [selectedRun]);
 
-  useEffect(() => {
-    const node = transcriptRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [events, selectedRun]);
+  useTranscriptFollow(transcriptRef, events, selectedRun);
+
+  if (activityRunRef.current !== selectedRun) {
+    activityRunRef.current = selectedRun;
+    activityRef.current = null;
+  }
+  const activity = continueActivity(activityRef.current, events);
+  activityRef.current = activity;
+  const lines = activityView(activity);
 
   const rule = rules.find((item) => item.name === selectedRule);
   const agent = agents.find((item) => item.id === (selectedAgent || detail?.agent || rule?.agent));
@@ -394,14 +423,15 @@ export function App() {
           {!loading && selectedRun ? (
             <>
               <div class="center-head">
-                <button type="button" class="text" onClick={() => setSelectedRun("")}>
-                  Activity
+                <button type="button" class="text back" onClick={() => setSelectedRun("")}>
+                  Back
                 </button>
-                <span class="mono">{selectedRun}</span>
+                <span class="mono">{detail?.agent || selectedRun}</span>
               </div>
               <div class="transcript" ref={transcriptRef}>
-                {events.length === 0 ? <p class="empty">This run has no journal lines yet.</p> : null}
-                {activityLines(events).map((line) => (
+                {journalLoading ? <p class="empty">Loading the conversation…</p> : null}
+                {!journalLoading && events.length === 0 ? <p class="empty">This run has no journal lines yet.</p> : null}
+                {lines.map((line) => (
                   <ActivityLine key={line.key || line.text} line={line} />
                 ))}
               </div>

@@ -42,22 +42,28 @@ skipped and left on disk for the listener.
 
 ## Listener reads
 
-These are the only listener routes added for the panel. They do not reload
-YAML or swap the cache.
+These are the listener routes added for the panel. They do not reload
+YAML or swap the cache. `/live` only forwards events the listener has
+already journaled.
 
 | Method | Path | Body |
 |---|---|---|
 | `GET` | `/health` | `{"ok":true}` |
 | `GET` | `/generation` | active agents, rules, repositories, digest, `repositories_active`, `sync_configured`, `syncing` |
+| `GET` | `/live` | WebSocket of lifecycle events, including generation chunks. When a sync token is configured, the upgrade requires `Authorization: Bearer`. |
 
 `sync_configured` is a boolean. The token is not in the payload.
 
 ## Control API
 
 Durable reads and commands are REST. Live updates are `GET /api/live`
-WebSocket text frames. Replay is a file read. If the socket drops, reconnect
-and pass `after` set to the last `sequence` you applied; the journal is
-authoritative and the socket is not.
+WebSocket text frames. Control keeps one subscription to the listener
+`GET /live` socket. That socket publishes every lifecycle event after it is
+redacted and appended to `events.jsonl`. A generation message chunk is one
+of those events (`dev.genesis.run.chunk`), not a separate stream. If a
+socket drops, reconnect and pass `after` set to the last `sequence` you
+applied. The journal is the catch-up source; the socket is not. Catch-up
+reads the new suffix of the file, not the whole journal again.
 
 | Method | Path | Behavior |
 |---|---|---|
@@ -149,10 +155,13 @@ Client frames:
 {"op":"ping"}
 ```
 
-Server frames are `event` (one journal line), `run` (a summary whose state or
+Server frames are `event` (one lifecycle event), `run` (a summary whose state or
 sequence changed), `state` (digests and drift; refetch REST for the full
-document), `pong`, and `error`. Event frames exist only because the process
-re-read `events.jsonl`. They are not a second bus.
+document), `pong`, and `error`. Event frames are pushed from the listener
+subscription. The panel applies each new event onto the open transcript
+instead of rebuilding it from the whole history. The listener stream is not
+a second copy of the journal: overflow closes the subscriber, and the file
+fills the gap.
 
 The upgrade also requires a loopback `Host`, and a present `Origin` must be
 loopback (`127.0.0.1`, `localhost`, `[::1]`). There is
@@ -162,7 +171,7 @@ the published binding is `127.0.0.1:8790`.
 
 ## What this does not do
 
-- No second live bus. Trajectory rows come from `events.jsonl`: assistant
+- No second journal. `GET /live` repeats events already in `events.jsonl`. Trajectory rows come from that file: assistant
   text, tool name plus arguments or result text, `turn/end` `reason.error`
   message, code, and status, and `llm/retry` count, code, and message. Live
   `on_chunk` deltas append onto the open assistant or tool row when the

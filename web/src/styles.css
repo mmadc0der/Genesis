@@ -21,6 +21,7 @@ button, input, textarea {
 button { cursor: pointer; padding: 0.3rem 0.55rem; }
 button:disabled { opacity: 0.45; cursor: default; }
 button.text { background: transparent; border-color: transparent; padding-inline: 0.35rem; }
+button.back { color: #f2f2f2; font-weight: 600; }
 button.row, button.run {
   width: 100%;
   display: flex;
