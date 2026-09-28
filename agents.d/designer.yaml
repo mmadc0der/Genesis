@@ -22,8 +22,8 @@ instructions: |
   stop.
 
   Reserved OS user names include genesis and root. A worker you write uses
-  this shape. Its instructions include the listener curl and the sharing
-  facts below, so the worker knows the instruments:
+  this shape. Its instructions include the listener curl and the sharing facts
+  below, so the worker knows the instruments:
 
     user: <username>
     home: /home/<username>
@@ -39,7 +39,7 @@ instructions: |
   id in an optional `github` block. Secret values are not YAML fields.
 
   The shipped oracle is agents.d/oracle.yaml and rules.d/oracle.yaml, with
-  user oracle, home /home/oracle, cwd /home/oracle/workspace, and
+  user: oracle, home: /home/oracle, cwd: /home/oracle/workspace, and
   setup.workspace private. Its rule matches type dev.genesis.agent.finished
   and subject *.
 
@@ -59,9 +59,12 @@ instructions: |
   id, not a glob. data.message is the next turn. source is
   urn:genesis:agent:oracle or urn:genesis:agent:<the agent who owns that
   run>. The cited run must already have ended. The 202 body contains the
-  new run id. 204 means the continue was refused. The new run reuses the
-  same DSH session and the same DSH_HOME. The agent does not pass session
-  ids or paths.
+  new run id. 204 means the continue was refused. The worker does not retry
+  with another subject or a glob, and does not stat /var/lib/genesis/data
+  or check disk space. Any other status is a listener failure: the worker
+  records the status and body and stops. The new run reuses the same DSH
+  session and the same DSH_HOME. The agent does not pass session ids or
+  paths.
 
   When any session ends, the system emits dev.genesis.agent.finished.
   subject is that agent id. data.transcript is the absolute path of the

@@ -81,6 +81,9 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"urn:genesis:agent:",
 		"dev.genesis.session.continue",
 		"data.message",
+		"does not stat /var/lib/genesis/data",
+		"listener failure",
+		"does not retry",
 		"dev.genesis.agent.finished",
 		"data.transcript",
 		"mode 0755",
@@ -205,8 +208,8 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 	if !sawJanitorUser {
 		t.Fatal("workspace-janitor lost ensure_agent_user")
 	}
-	if _, err := evaluatePlan(plan); err == nil || !strings.Contains(err.Error(), "workspace-janitor") {
-		t.Fatalf("mixed designer+janitor plan must still require root for the dedicated janitor: %v", err)
+	if _, err := evaluatePlan(plan); err == nil || !strings.Contains(err.Error(), "requires root genesis launch") {
+		t.Fatalf("mixed designer+janitor plan must still require root for a dedicated user: %v", err)
 	}
 }
 
@@ -926,6 +929,9 @@ func TestCommittedOracleIsDedicatedReviewer(t *testing.T) {
 		"dev.genesis.session.continue",
 		"data.message",
 		"urn:genesis:agent:oracle",
+		"Do not retry",
+		"Do not stat /var/lib/genesis/data",
+		"listener failure",
 		"dev.genesis.agent.finished",
 		"subject *",
 		"/app/.venv",

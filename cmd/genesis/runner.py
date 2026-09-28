@@ -300,18 +300,28 @@ export function apply(ctx) {
 """
 
 
+def replace_text(path: Path, text: str) -> None:
+    # Replace through the directory. An existing file left at mode 0600 by
+    # the listener uid cannot be truncated by the agent, but the agent can
+    # replace the directory entry when it owns the directory.
+    temporary = path.parent / (path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def write_runtime_patch(home: Path) -> Path:
     plugin_path = home / ASSISTANT_STREAM_PLUGIN_NAME
-    plugin_path.write_text(ASSISTANT_STREAM_PLUGIN, encoding="utf-8")
+    replace_text(plugin_path, ASSISTANT_STREAM_PLUGIN)
     emit_path = home / EMIT_PLUGIN_NAME
-    emit_path.write_text(EMIT_PLUGIN, encoding="utf-8")
+    replace_text(emit_path, EMIT_PLUGIN)
     resume_path = home / RESUME_PLUGIN_NAME
-    resume_path.write_text(RESUME_PLUGIN, encoding="utf-8")
+    replace_text(resume_path, RESUME_PLUGIN)
     patch_path = home / "session-log-off.patch.yml"
     plugin_name = json.dumps(str(plugin_path))
     emit_name = json.dumps(str(emit_path))
     resume_name = json.dumps(str(resume_path))
-    patch_path.write_text(
+    replace_text(
+        patch_path,
         SESSION_LOG_OFF_PATCH
         + "- insert:\n"
         + "    - id: genesis-assistant-stream\n"
@@ -320,7 +330,6 @@ def write_runtime_patch(home: Path) -> Path:
         + f"      name: {emit_name}\n"
         + "    - id: genesis-session-resume\n"
         + f"      name: {resume_name}\n",
-        encoding="utf-8",
     )
     return patch_path
 

@@ -361,6 +361,38 @@ func TestSpawnedAgentUmaskLeavesWorkspaceReadable(t *testing.T) {
 	}
 }
 
+func TestChownDshHomeTreeDoesNotFollowSymlink(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a follow would chown the symlink target as root")
+	}
+	home := t.TempDir()
+	if err := os.Symlink("/etc/passwd", filepath.Join(home, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(home, "sessions")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(nested, "session.jsonl")
+	if err := os.WriteFile(marker, []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := chownDshHomeTree(home, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(home, "escape"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("symlink was replaced")
+	}
+	payload, err := os.ReadFile(marker)
+	if err != nil || string(payload) != "kept" {
+		t.Fatalf("nested session file = %q %v", payload, err)
+	}
+}
+
 func testSpawnIdentity(t *testing.T) (*user.User, reconciledIdentity, string, string, string) {
 	t.Helper()
 	account, err := user.Current()

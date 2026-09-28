@@ -619,19 +619,24 @@ func validateStableDshHome(dataDir, dshHome string) error {
 func prepareSessionHomeModes(dataDir, dshHome string) error {
 	sessionDir := filepath.Dir(dshHome)
 	sessionsDir := filepath.Dir(sessionDir)
-	for _, path := range []string{dataDir, sessionsDir, sessionDir} {
+	for _, path := range []string{dataDir, sessionsDir, sessionDir, dshHome} {
 		if err := rejectSymlinkDir(path); err != nil {
 			return err
 		}
-		if err := os.Chmod(path, dataRootMode); err != nil {
-			return fmt.Errorf("chmod %s: %w", path, err)
+		mode := os.FileMode(dataRootMode)
+		if path == dshHome {
+			mode = dataDirMode
 		}
-	}
-	if err := rejectSymlinkDir(dshHome); err != nil {
-		return err
-	}
-	if err := os.Chmod(dshHome, dataDirMode); err != nil {
-		return fmt.Errorf("chmod dsh_home: %w", err)
+		// After the first dedicated spawn, dsh_home is owned by the agent
+		// uid. The listener cannot chmod it, and that must not fail Accept.
+		// Spawn chowns the tree and sets the mode before the child runs.
+		if err := chmodOwned(path, mode); err != nil {
+			label := path
+			if path == dshHome {
+				label = "dsh_home"
+			}
+			return fmt.Errorf("chmod %s: %w", label, err)
+		}
 	}
 	return nil
 }

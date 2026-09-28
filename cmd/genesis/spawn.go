@@ -297,11 +297,70 @@ func prepareSpawnDirs(host hostAPI, dataDir string, req spawnRequest, identity r
 			return fmt.Errorf("chmod %s: %w", path, err)
 		}
 	}
-	if err := chownExistingDir(host, dshHome, uid, gid); err != nil {
+	// The listener creates this tree, so an earlier run can leave files owned
+	// by the listener at mode 0600. Chown the entries, not only the directory,
+	// or the agent cannot replace them on continuation. Symlinks are not followed.
+	if err := chownDshHomeTree(dshHome, uid, gid); err != nil {
 		return fmt.Errorf("chown dsh_home: %w", err)
 	}
 	if err := chmodExistingDir(host, dshHome, 0o700); err != nil {
 		return fmt.Errorf("chmod dsh_home: %w", err)
+	}
+	return nil
+}
+
+// chownDshHomeTree gives the agent uid every real entry under dsh_home.
+// Open and chown use NOFOLLOW so a symlink cannot retarget the walk.
+func chownDshHomeTree(root string, uid, gid int) error {
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	if err := unix.Fchown(fd, uid, gid); err != nil {
+		return err
+	}
+	return chownTreeChildren(fd, uid, gid)
+}
+
+func chownTreeChildren(dirfd int, uid, gid int) error {
+	dup, err := unix.Dup(dirfd)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(dup), "dsh-home")
+	defer file.Close()
+	entries, err := file.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "." || name == ".." {
+			continue
+		}
+		if err := unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		var info unix.Stat_t
+		if err := unix.Fstatat(dirfd, name, &info, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		if info.Mode&unix.S_IFMT != unix.S_IFDIR {
+			continue
+		}
+		child, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return err
+		}
+		err = chownTreeChildren(child, uid, gid)
+		closeErr := unix.Close(child)
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
 	}
 	return nil
 }

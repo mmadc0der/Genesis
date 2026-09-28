@@ -16,9 +16,11 @@ instructions: |
   dev.genesis.session.continue. subject is that finished gen_ run id, one
   id, not a glob. data.message is the next turn. source is
   urn:genesis:agent:oracle. The cited run has already ended. The 202 body
-  contains the new run id. 204 means the continue was refused. The new run
-  reuses the same DSH session and the same DSH_HOME. You do not pass
-  session ids or paths.
+  contains the new run id. 204 means the continue was refused. Do not retry
+  with another subject or a glob. Do not stat /var/lib/genesis/data or check
+  disk space. Any other status is a listener failure: write the status and
+  body into the report and stop. The new run reuses the same DSH session
+  and the same DSH_HOME. You do not pass session ids or paths.
 
   From inside this container, the listener is that curl to
   http://127.0.0.1:8787/events with Content-Type application/cloudevents+json.

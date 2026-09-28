@@ -400,6 +400,34 @@ func continuationEvent(id, source, subject, message string) map[string]any {
 	}
 }
 
+func TestPrepareSessionHomeModesOnOwnedTree(t *testing.T) {
+	data := t.TempDir()
+	home := stableDshHome(data, "gen_modes")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareSessionHomeModes(data, home); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{data, dataRootMode},
+		{filepath.Join(data, sessionsDirName), dataRootMode},
+		{filepath.Dir(home), dataRootMode},
+		{home, dataDirMode},
+	} {
+		info, err := os.Stat(item.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != item.mode {
+			t.Fatalf("%s mode = %o, want %o", item.path, info.Mode().Perm(), item.mode)
+		}
+	}
+}
+
 func hopID(hop int) string {
 	return fmt.Sprintf("gen_h%d", hop)
 }
