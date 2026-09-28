@@ -35,7 +35,9 @@ const (
 	defaultRunLimit        = 40
 	maxRunLimit            = 200
 	defaultEventLimit      = 200
-	maxEventLimit          = 1000
+	// Later journal pages ask for up to this many events. A common run is
+	// about 1 KB of JSON per event, so 4000 stays near 4 MB.
+	maxEventLimit = 4000
 
 	driftInSync         = "in_sync"
 	driftDraft          = "draft"

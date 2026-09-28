@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_PREVIEW_LIMIT, activityLines, activityPreview, activityView, applyPanelLoad, buildMessage, continueActivity, driftLabel, driftLine, eventLine, githubGrantSummary, maxCursor, mergeEvents, readJournal, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
+import { ACTIVITY_PREVIEW_LIMIT, activityLines, activityPreview, activityView, applyPanelLoad, buildMessage, continueActivity, driftLabel, driftLine, eventLine, githubGrantSummary, loadJournal, maxCursor, mergeEvents, planJournalRanges, readJournal, repositoryLabel, repositoryObservationSummary, repositoryPolicy, repositorySyncNotice, secretNames, shortDigest } from "./model";
 import type { Agent, ControlState, LifecycleEvent, Repository, RunSummary } from "./types";
 
 function event(sequence: string, type: string, data?: Record<string, unknown>): LifecycleEvent {
@@ -43,6 +43,32 @@ describe("control panel model", () => {
       events: [event("1", "dev.genesis.run.accepted"), event("2", "dev.genesis.run.chunk"), event("3", "dev.genesis.run.assistant")],
       cursor: "3",
     });
+  });
+
+  it("plans growing journal pages and loads them on several streams", async () => {
+    expect(planJournalRanges(800, 250)).toEqual([
+      { after: "250", limit: 500 },
+      { after: "750", limit: 50 },
+    ]);
+    const total = 800;
+    const events = Array.from({ length: total }, (_, index) => event(String(index + 1), "dev.genesis.run.chunk"));
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const journal = await loadJournal(async (after, limit) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await Promise.resolve();
+      const start = Number(after);
+      const slice = events.filter((item) => Number(item.sequence) > start).slice(0, limit);
+      inFlight -= 1;
+      const cursor = slice.at(-1)?.sequence ?? after;
+      return { events: slice, cursor, has_more: Number(cursor) < total };
+    }, { lastSeq: total, eventCount: total });
+    expect(journal.cursor).toBe(String(total));
+    expect(journal.events).toHaveLength(total);
+    expect(journal.events[0]?.sequence).toBe("1");
+    expect(journal.events[total - 1]?.sequence).toBe(String(total));
+    expect(maxInFlight).toBeGreaterThan(1);
   });
 
   it("renders settled results and does not invent token text from raw notifications", () => {

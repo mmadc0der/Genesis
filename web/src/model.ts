@@ -218,16 +218,44 @@ export interface JournalPage {
   has_more: boolean;
 }
 
+/** First page stays small. Later pages grow so a long run is fewer responses. */
+export const JOURNAL_PAGE_SIZES = [250, 500, 1000, 2000, 4000] as const;
+
+export function journalPageLimit(index: number): number {
+  const capped = Math.max(0, index);
+  return JOURNAL_PAGE_SIZES[Math.min(capped, JOURNAL_PAGE_SIZES.length - 1)];
+}
+
+export interface JournalPlan {
+  lastSeq: number;
+  eventCount: number;
+}
+
+/** Split a contiguous 1..lastSeq journal into later pages with growing limits. */
+export function planJournalRanges(lastSeq: number, covered: number): { after: string; limit: number }[] {
+  const ranges: { after: string; limit: number }[] = [];
+  let cursor = covered;
+  let sizeIndex = 1;
+  while (cursor < lastSeq) {
+    const limit = Math.min(journalPageLimit(sizeIndex), lastSeq - cursor);
+    ranges.push({ after: String(cursor), limit });
+    cursor += limit;
+    sizeIndex += 1;
+  }
+  return ranges;
+}
+
 /** Page the journal until it is caught up, so a replay is history rather than a fresh generation. */
 export async function readJournal(
-  fetchPage: (after: string) => Promise<JournalPage>,
+  fetchPage: (after: string, limit: number) => Promise<JournalPage>,
   start = "0",
+  sizeIndex = 0,
 ): Promise<{ events: LifecycleEvent[]; cursor: string }> {
   let events: LifecycleEvent[] = [];
   let after = start || "0";
   let cursor = after;
   for (let page = 0; page < 1000; page++) {
-    const next = await fetchPage(after);
+    const next = await fetchPage(after, journalPageLimit(sizeIndex + page));
     if (next.events.length > 0) events = mergeEvents(events, next.events);
     if (next.cursor) cursor = next.cursor;
     if (!next.has_more || next.events.length === 0 || !next.cursor || next.cursor === after) {
@@ -236,6 +264,78 @@ export async function readJournal(
     after = next.cursor;
   }
   return { events, cursor };
+}
+
+/**
+ * Load a run journal on several streams. The first page is small and can share
+ * its round trip with the run summary. When sequence numbers are contiguous,
+ * the rest is fetched together with growing page sizes.
+ */
+export async function loadJournal(
+  fetchPage: (after: string, limit: number) => Promise<JournalPage>,
+  plan?: Promise<JournalPlan | null> | JournalPlan | null,
+  streams = 4,
+): Promise<{ events: LifecycleEvent[]; cursor: string }> {
+  const firstLimit = journalPageLimit(0);
+  const resolved = await Promise.all([fetchPage("0", firstLimit), Promise.resolve(plan ?? null)]);
+  const first = resolved[0];
+  const schedule = resolved[1];
+  if (!first.has_more || first.events.length === 0) {
+    return { events: first.events, cursor: first.cursor || "0" };
+  }
+  const covered = Number(first.cursor);
+  const contiguous =
+    schedule != null &&
+    schedule.eventCount === schedule.lastSeq &&
+    schedule.lastSeq > covered &&
+    Number.isFinite(covered) &&
+    pageAligns(first, 0, firstLimit, schedule.lastSeq);
+  if (contiguous && schedule) {
+    const ranges = planJournalRanges(schedule.lastSeq, covered);
+    try {
+      const pages = await mapPool(ranges, streams, (range) => fetchPage(range.after, range.limit));
+      const aligned = pages.every((page, index) =>
+        pageAligns(page, Number(ranges[index].after), ranges[index].limit, schedule.lastSeq),
+      );
+      if (aligned) {
+        let events = first.events;
+        let cursor = first.cursor;
+        for (const page of pages) {
+          events = mergeEvents(events, page.events);
+          if (Number(page.cursor) > Number(cursor)) cursor = page.cursor;
+        }
+        return { events, cursor };
+      }
+    } catch {
+      // One stream failed. The sequential walk below still has the first page.
+    }
+  }
+  const rest = await readJournal(fetchPage, first.cursor || "0", 1);
+  return { events: mergeEvents(first.events, rest.events), cursor: rest.cursor || first.cursor || "0" };
+}
+
+function pageAligns(page: JournalPage, after: number, limit: number, lastSeq: number): boolean {
+  if (page.events.length === 0) return false;
+  const firstSeq = Number(page.events[0]?.sequence);
+  const last = Number(page.events[page.events.length - 1]?.sequence);
+  const expectedEnd = Math.min(lastSeq, after + limit);
+  return firstSeq === after + 1 && last === expectedEnd && page.events.length === expectedEnd - after;
+}
+
+async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(
+    Array.from({ length: workers }, async () => {
+      while (next < items.length) {
+        const index = next;
+        next += 1;
+        results[index] = await fn(items[index]);
+      }
+    }),
+  );
+  return results;
 }
 
 export function mergeRuns(current: RunSummary[], incoming: RunSummary): RunSummary[] {

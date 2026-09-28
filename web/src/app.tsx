@@ -11,6 +11,7 @@ import {
   maxCursor,
   mergeEvents,
   mergeRuns,
+  loadJournal,
   readJournal,
   presenceLabel,
   githubGrantSummary,
@@ -140,7 +141,10 @@ export function App() {
           const run = frame.run;
           if (run.run_id === selectedRunRef.current && historyRunRef.current === run.run_id && Number(run.last_seq) > Number(cursorRef.current)) {
             const after = cursorRef.current;
-            void readJournal((pageAfter) => getJSON<EventsPage>(`/api/runs/${run.run_id}/events?after=${pageAfter}&limit=1000`), after).then((journal) => {
+            void readJournal(
+              (pageAfter, limit) => getJSON<EventsPage>(`/api/runs/${run.run_id}/events?after=${pageAfter}&limit=${limit}`),
+              after,
+            ).then((journal) => {
               if (historyRunRef.current !== run.run_id) return;
               setEvents((current) => mergeEvents(current, journal.events));
               setCursor(journal.cursor);
@@ -189,10 +193,14 @@ export function App() {
     setEvents([]);
     setCursor("0");
     cursorRef.current = "0";
-    readJournal((after) => getJSON<EventsPage>(`/api/runs/${runID}/events?after=${after}&limit=1000`))
+    const detailPromise = getJSON<RunDetail>(`/api/runs/${runID}`);
+    loadJournal(
+      (after, limit) => getJSON<EventsPage>(`/api/runs/${runID}/events?after=${after}&limit=${limit}`),
+      detailPromise.then((detail) => ({ lastSeq: Number(detail.last_seq) || 0, eventCount: detail.event_count })),
+    )
       .then(async (journal) => {
         if (cancelled) return;
-        const nextDetail = await getJSON<RunDetail>(`/api/runs/${runID}`);
+        const nextDetail = await detailPromise;
         if (cancelled) return;
         setEvents(journal.events);
         setCursor(journal.cursor);
