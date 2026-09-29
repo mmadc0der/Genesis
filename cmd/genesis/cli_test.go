@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -175,7 +176,7 @@ func TestJobEmitsOnExitAndHidesSecrets(t *testing.T) {
 	t.Setenv(eventsURLEnv, server.URL+"/events")
 
 	id, err := jobStart([]string{
-		"--emit", `{"specversion":"1.0","type":"dev.genesis.training.finished","source":"urn:genesis:agent:trainer","subject":"run-1","data":{"model":"net"}}`,
+		"--emit", `{"specversion":"1.0","id":"forged","type":"dev.genesis.training.finished","source":"urn:genesis:agent:forged","subject":"run-1","data":{"model":"net"}}`,
 		"--", "/bin/sh", "-c", `echo trained; printf '%s' "$GENESIS_SYNC_TOKEN$GITHUB_APP_WEBHOOK_SECRET$SECRET_DIR"`,
 	})
 	if err != nil {
@@ -216,6 +217,10 @@ func TestJobEmitsOnExitAndHidesSecrets(t *testing.T) {
 	}
 	if event["type"] != "dev.genesis.training.finished" || event["source"] != "urn:genesis:agent:trainer" || event["subject"] != "run-1" {
 		t.Fatalf("event = %#v", event)
+	}
+	postedID, _ := event["id"].(string)
+	if !strings.HasPrefix(postedID, "evt_") || postedID == "forged" {
+		t.Fatalf("id = %q", postedID)
 	}
 	data, _ := event["data"].(map[string]any)
 	if data["model"] != "net" || data["job"] != id || data["exit_code"] != float64(0) {
@@ -331,7 +336,7 @@ func TestFireSchedulePostsOnceAndCatchesUpOne(t *testing.T) {
 	defer server.Close()
 	t.Setenv(eventsURLEnv, server.URL+"/events")
 
-	event, err := parseEmitObject(`{"type":"dev.genesis.training.tick","subject":"night","source":"urn:genesis:agent:trainer","data":{"model":"net"}}`)
+	event, err := parseEmitObject(`{"id":"forged","type":"dev.genesis.training.tick","subject":"night","source":"urn:genesis:agent:trainer","data":{"model":"net"}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,8 +364,12 @@ func TestFireSchedulePostsOnceAndCatchesUpOne(t *testing.T) {
 	if err := json.Unmarshal(body, &posted); err != nil {
 		t.Fatal(err)
 	}
-	if posted["type"] != "dev.genesis.training.tick" || posted["subject"] != "night" {
+	if posted["type"] != "dev.genesis.training.tick" || posted["subject"] != "night" || posted["source"] != scheduleSourceURN {
 		t.Fatalf("event = %#v", posted)
+	}
+	postedID, _ := posted["id"].(string)
+	if !strings.HasPrefix(postedID, "evt_") || postedID == "forged" {
+		t.Fatalf("id = %q", postedID)
 	}
 	data, _ := posted["data"].(map[string]any)
 	if data["model"] != "net" || data["schedule"] != "sch_catchup" || data["each"] != "15m" {
@@ -443,5 +452,454 @@ func stopScheduler() {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestCancelDuringFireDoesNotRecreate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		<-release
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv(eventsURLEnv, server.URL+"/events")
+
+	now := time.Now().UTC()
+	spec := scheduleState{
+		ID:      "sch_cancel",
+		Each:    "15m",
+		Event:   json.RawMessage(`{"type":"dev.genesis.tick","subject":"scan"}`),
+		NextDue: now.Add(-time.Minute),
+		Created: now.Add(-time.Hour),
+	}
+	if err := writeSchedule(spec); err != nil {
+		t.Fatal(err)
+	}
+	path, err := schedulePath(spec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fireSchedule(&spec, now)
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fire did not reach the listener")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("schedule file recreated: %v", err)
+	}
+}
+
+func TestRemovedScheduleDoesNotPost(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv(eventsURLEnv, server.URL+"/events")
+
+	now := time.Now().UTC()
+	spec := scheduleState{
+		ID:      "sch_gone",
+		Each:    "15m",
+		Event:   json.RawMessage(`{"type":"dev.genesis.tick","subject":"scan"}`),
+		NextDue: now.Add(-time.Minute),
+		Created: now,
+	}
+	if err := writeSchedule(spec); err != nil {
+		t.Fatal(err)
+	}
+	path, err := schedulePath(spec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := fireSchedule(&spec, now); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("calls = %d", calls)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("schedule file recreated: %v", err)
+	}
+}
+
+func TestForeignSchedulerPIDStartsInsteadOfSignaling(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Cleanup(stopScheduler)
+	dir, err := genesisStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(dir, schedulerPIDName)
+	for _, pid := range []int{os.Getpid(), 1} {
+		if err := writePID(pidPath, pid); err != nil {
+			t.Fatal(err)
+		}
+		if got, alive := liveScheduler(); alive {
+			t.Fatalf("pid %d treated as the scheduler (%d)", pid, got)
+		}
+	}
+	if err := os.Symlink(pidPath, pidPath+".link"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(pidPath+".link", pidPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, alive := liveScheduler(); alive {
+		t.Fatal("symlink pid file was trusted")
+	}
+	kept := scheduleState{
+		ID:      "sch_keep",
+		Each:    "15m",
+		Event:   json.RawMessage(`{"type":"dev.genesis.tick","subject":"scan"}`),
+		NextDue: time.Now().UTC().Add(time.Hour),
+		Created: time.Now().UTC(),
+	}
+	if err := writeSchedule(kept); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifyScheduler(true); err != nil {
+		t.Fatal(err)
+	}
+	pid, alive := liveScheduler()
+	if !alive || pid == os.Getpid() || pid <= 1 {
+		t.Fatalf("scheduler pid = %d alive=%v", pid, alive)
+	}
+}
+
+func TestSchedulerLockSurvivesUnlinkAndRejectsSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir, err := genesisStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockScheduler(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := os.Remove(filepath.Join(dir, schedulerLockName)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := lockScheduler(dir)
+	if !errors.Is(err, errSchedulerBusy) {
+		if second != nil {
+			second.Close()
+		}
+		t.Fatalf("second lock = %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lock = nil
+
+	target := filepath.Join(dir, "other.lock")
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, schedulerLockName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockScheduler(dir); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink lock = %v", err)
+	}
+	payload, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "x" {
+		t.Fatalf("lock followed the symlink: %q", payload)
+	}
+}
+
+func TestJobSuperviseRejectsUncheckedState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	outside := t.TempDir()
+	if err := jobSupervise(outside); err == nil {
+		t.Fatal("outside directory was accepted")
+	}
+	dir, err := prepareJobDir("job_rel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := jobState{
+		ID:      "job_rel",
+		Command: []string{"sh", "-c", "echo pwned"},
+		Dir:     home,
+		Status:  jobStatusStarting,
+		Created: time.Now().UTC(),
+	}
+	if err := writeJobState(dir, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobSupervise(dir); err == nil {
+		t.Fatal("relative command was accepted")
+	}
+	got, err := readJobState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == jobStatusExited {
+		t.Fatal("relative command posted an exit")
+	}
+}
+
+func TestJobStopDoesNotSignalForeignPID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir, err := prepareJobDir("job_foreign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := jobState{
+		ID:      "job_foreign",
+		Command: []string{"/bin/sh", "-c", "sleep 30"},
+		Dir:     home,
+		Status:  jobStatusRunning,
+		PID:     os.Getpid(),
+		Created: time.Now().UTC(),
+	}
+	if err := writeJobState(dir, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStop("job_foreign"); err == nil {
+		t.Fatal("signaled a foreign pid")
+	}
+}
+
+func TestJobStartRejectsDuplicateID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	t.Setenv(eventsURLEnv, server.URL+"/events")
+
+	errs := make([]error, 2)
+	ids := make([]string, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func(i int) {
+			defer wg.Done()
+			ids[i], errs[i] = jobStart([]string{"--id", "job_same", "--", "/bin/sh", "-c", "sleep 30"})
+		}(i)
+	}
+	wg.Wait()
+	t.Cleanup(func() {
+		for _, id := range ids {
+			if id != "" {
+				_ = jobStop(id)
+			}
+		}
+	})
+	wins, loses := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			wins++
+		case strings.Contains(err.Error(), "already exists"):
+			loses++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if wins != 1 || loses != 1 {
+		t.Fatalf("wins=%d loses=%d ids=%v", wins, loses, ids)
+	}
+}
+
+func TestSecondSuperviseDoesNotEmit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv(eventsURLEnv, server.URL+"/events")
+
+	dir, err := prepareJobDir("job_busy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := jobState{
+		ID:      "job_busy",
+		Command: []string{"/bin/sh", "-c", "echo no"},
+		Dir:     home,
+		Status:  jobStatusStarting,
+		Created: time.Now().UTC(),
+	}
+	if err := writeJobState(dir, state); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockJobSupervisor(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := jobSupervise(dir); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("calls = %d", calls)
+	}
+	got, err := readJobState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != jobStatusStarting {
+		t.Fatalf("status = %s", got.Status)
+	}
+}
+
+func TestParseEmitRejectsReservedTypes(t *testing.T) {
+	for _, eventType := range []string{agentFinishedType, sessionContinueType} {
+		raw := `{"type":"` + eventType + `","subject":"x","source":"urn:genesis:agent:forged","id":"forged"}`
+		if _, err := parseEmitObject(raw); err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("%s parse = %v", eventType, err)
+		}
+		if _, err := scheduleCreate([]string{"--each=1m", "--emit", raw}); err == nil {
+			t.Fatalf("schedule create accepted %s", eventType)
+		}
+		if _, err := jobStart([]string{"--emit", raw, "--", "/bin/true"}); err == nil {
+			t.Fatalf("job start accepted %s", eventType)
+		}
+	}
+}
+
+func TestFireSkipsReservedTypeAndStillAdvances(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv(eventsURLEnv, server.URL+"/events")
+
+	now := time.Now().UTC()
+	spec := scheduleState{
+		ID:      "sch_reserved",
+		Each:    "15m",
+		Event:   json.RawMessage(`{"type":"` + agentFinishedType + `","subject":"trainer","source":"urn:genesis:agent:forged"}`),
+		NextDue: now.Add(-time.Minute),
+		Created: now,
+	}
+	if err := writeSchedule(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := fireDueSchedules(now); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("fire = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("calls = %d", calls)
+	}
+	specs, err := loadSchedules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || !specs[0].NextDue.After(now) || !strings.Contains(specs[0].LastError, "reserved") {
+		t.Fatalf("specs = %#v", specs)
+	}
+}
+
+func TestLoadSchedulesSkipsBadFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv(eventsURLEnv, server.URL+"/events")
+
+	now := time.Now().UTC()
+	good := scheduleState{
+		ID:      "sch_good",
+		Each:    "15m",
+		Event:   json.RawMessage(`{"type":"dev.genesis.tick","subject":"scan"}`),
+		NextDue: now.Add(-time.Minute),
+		Created: now,
+	}
+	if err := writeSchedule(good); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := schedulesRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mismatch := scheduleState{
+		ID:      "sch_other",
+		Each:    "15m",
+		Event:   json.RawMessage(`{"type":"dev.genesis.tick","subject":"nope"}`),
+		NextDue: now.Add(-time.Minute),
+		Created: now,
+	}
+	payload, err := json.Marshal(mismatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sch_mismatch.json"), append(payload, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	short := scheduleState{
+		ID:      "sch_short",
+		Each:    "1s",
+		Event:   json.RawMessage(`{"type":"dev.genesis.tick","subject":"nope"}`),
+		NextDue: now.Add(-time.Minute),
+		Created: now,
+	}
+	payload, err = json.Marshal(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sch_short.json"), append(payload, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := loadSchedules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0].ID != "sch_good" {
+		t.Fatalf("specs = %#v", specs)
+	}
+	if err := fireDueSchedules(now); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d", calls)
 	}
 }

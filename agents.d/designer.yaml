@@ -86,6 +86,7 @@ instructions: |
   event. --each is a duration of at least 1m and at most 168h. The first
   fire is one interval after the schedule is created. genesis schedule
   list and genesis schedule cancel <id> manage it.
+  Genesis stamps the event id and source on every job and schedule post and rejects type dev.genesis.agent.finished and type dev.genesis.session.continue.
   This is not a rules.d interval. Do not write interval or cron in rule YAML. The loader
   rejects those fields.
 

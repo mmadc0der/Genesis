@@ -131,7 +131,15 @@ func jobStart(args []string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("command: %w", err)
 	}
-	argv[0] = resolved
+	argv[0] = filepath.Clean(resolved)
+	if !filepath.IsAbs(argv[0]) {
+		return "", errors.New("job command must be absolute")
+	}
+	for _, arg := range argv {
+		if strings.ContainsRune(arg, 0) {
+			return "", errors.New("job command contains a NUL")
+		}
+	}
 
 	dir, err := prepareJobDir(id)
 	if err != nil {
@@ -245,6 +253,9 @@ func jobStop(id string) error {
 	if pid <= 1 {
 		return fmt.Errorf("job %s has no supervisor pid", id)
 	}
+	if !jobSupervisorProcess(pid, dir) {
+		return fmt.Errorf("job %s supervisor is not running", id)
+	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
@@ -262,13 +273,28 @@ func jobStop(id string) error {
 }
 
 func jobSupervise(dir string) error {
-	dir = filepath.Clean(dir)
+	dir, err := canonicalJobDir(dir)
+	if err != nil {
+		return err
+	}
+	lock, err := lockJobSupervisor(dir)
+	if errors.Is(err, errJobBusy) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+
 	state, err := readJobState(dir)
 	if err != nil {
 		return err
 	}
-	if len(state.Command) == 0 {
-		return errors.New("job command is empty")
+	if state.ID != filepath.Base(dir) {
+		return errors.New("job id does not match its directory")
+	}
+	if err := validateJobCommand(state); err != nil {
+		return err
 	}
 	sigs := make(chan os.Signal, 1)
 	signalNotify(sigs, syscall.SIGTERM, syscall.SIGINT)
@@ -286,8 +312,8 @@ func jobSupervise(dir string) error {
 	}
 	defer logFile.Close()
 
-	command := exec.Command(state.Command[0], state.Command[1:]...)
-	command.Dir = state.Dir
+	command := exec.Command(filepath.Clean(state.Command[0]), state.Command[1:]...)
+	command.Dir = filepath.Clean(state.Dir)
 	command.Env = agentProcessEnv()
 	command.Stdin = nil
 	command.Stdout = logFile
@@ -339,24 +365,79 @@ func finishJob(dir string, state jobState, code int, startErr error) error {
 }
 
 func jobExitEvent(state jobState, code int, now time.Time) (cloudEvent, error) {
-	source := defaultAgentSource()
-	if source == "" {
-		source = jobSourceURN
-	}
-	return composeCloudEvent(state.Emit, map[string]any{
-		"specversion": cloudEventSpecVersion,
-		"id":          state.ID + "-" + strconv.FormatInt(now.Unix(), 10),
-		"source":      source,
-		"type":        jobExitedType,
-		"subject":     state.ID,
-	}, map[string]any{
-		"time":            now.Format(time.RFC3339Nano),
-		"datacontenttype": "application/json",
-	}, map[string]any{
+	return stampedCLIEvent(state.Emit, jobSourceURN, jobExitedType, state.ID, now, map[string]any{
 		"job":       state.ID,
 		"exit_code": code,
 		"command":   state.Command,
 	})
+}
+
+func canonicalJobDir(dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return "", errors.New("job directory is required")
+	}
+	dir = filepath.Clean(dir)
+	if !filepath.IsAbs(dir) {
+		return "", errors.New("job directory must be absolute")
+	}
+	root, err := jobsRoot()
+	if err != nil {
+		return "", err
+	}
+	root = filepath.Clean(root)
+	id := filepath.Base(dir)
+	if err := validateCLIID(id); err != nil {
+		return "", err
+	}
+	if dir != filepath.Join(root, id) {
+		return "", errors.New("job directory is outside the jobs root")
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("job directory must be a real directory")
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Clean(resolvedDir) != filepath.Join(filepath.Clean(resolvedRoot), id) {
+		return "", errors.New("job directory is outside the jobs root")
+	}
+	return dir, nil
+}
+
+func validateJobCommand(state jobState) error {
+	if len(state.Command) == 0 || strings.TrimSpace(state.Command[0]) == "" {
+		return errors.New("job command is empty")
+	}
+	for _, arg := range state.Command {
+		if strings.ContainsRune(arg, 0) {
+			return errors.New("job command contains a NUL")
+		}
+	}
+	command := filepath.Clean(state.Command[0])
+	if !filepath.IsAbs(command) {
+		return errors.New("job command must be absolute")
+	}
+	dir := filepath.Clean(state.Dir)
+	if !filepath.IsAbs(dir) {
+		return errors.New("job working directory must be absolute")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("job working directory: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("job working directory must be a directory")
+	}
+	return nil
 }
 
 func prepareJobDir(id string) (string, error) {
@@ -365,12 +446,14 @@ func prepareJobDir(id string) (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(root, id)
-	if _, err := os.Lstat(dir); err == nil {
-		return "", fmt.Errorf("job %s already exists", id)
-	} else if !os.IsNotExist(err) {
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		if os.IsExist(err) {
+			return "", fmt.Errorf("job %s already exists", id)
+		}
 		return "", err
 	}
-	if err := mkdirPrivate(dir); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.Remove(dir)
 		return "", err
 	}
 	return dir, nil
@@ -437,7 +520,7 @@ func openPrivateLog(path string) (*os.File, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, dataFileMode)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, dataFileMode)
 	if err != nil {
 		return nil, err
 	}

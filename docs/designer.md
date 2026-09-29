@@ -79,8 +79,10 @@ bearer.
 Use `genesis job` when work must keep running after the turn.
 `genesis job start --emit '{CloudEvent}' -- <command>` starts that command.
 When the command exits, Genesis posts that CloudEvent so a rule can match
-it and another run can resume. Neural-net training is the example: wake
-when training ends. `genesis job list`, `genesis job logs <id>`, and
+it and another run can resume. Genesis stamps the event id and source on
+every job and schedule post and rejects type `dev.genesis.agent.finished`
+and type `dev.genesis.session.continue`. Neural-net training is the example:
+wake when training ends. `genesis job list`, `genesis job logs <id>`, and
 `genesis job stop <id>` show and stop it.
 
 Use `genesis schedule` when the same event should fire on a duration.

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -164,6 +166,59 @@ func composeCloudEvent(template json.RawMessage, defaults, overlay, dataOverlay 
 	return marshalCloudEvent(fields)
 }
 
+// stampedCLIEvent is the job and schedule accept path. It matches harness
+// emit: the caller does not choose id or source, and the finished and
+// session-continue types stay reserved even if a control file is edited.
+func stampedCLIEvent(template json.RawMessage, fallbackSource, fallbackType, fallbackSubject string, now time.Time, dataOverlay map[string]any) (cloudEvent, error) {
+	if err := rejectReservedEmit(template); err != nil {
+		return nil, err
+	}
+	id, err := newLifecycleEventID()
+	if err != nil {
+		return nil, err
+	}
+	source := defaultAgentSource()
+	if source == "" {
+		source = fallbackSource
+	}
+	return composeCloudEvent(template, map[string]any{
+		"specversion": cloudEventSpecVersion,
+		"type":        fallbackType,
+		"subject":     fallbackSubject,
+	}, map[string]any{
+		"id":              id,
+		"source":          source,
+		"time":            now.UTC().Format(time.RFC3339Nano),
+		"datacontenttype": "application/json",
+	}, dataOverlay)
+}
+
+func reservedCLIEventType(eventType string) bool {
+	return eventType == agentFinishedType || eventType == sessionContinueType
+}
+
+func rejectReservedEmit(template json.RawMessage) error {
+	if len(bytes.TrimSpace(template)) == 0 {
+		return nil
+	}
+	var object map[string]any
+	if err := json.Unmarshal(template, &object); err != nil {
+		return errors.New("event must be a JSON object")
+	}
+	raw, ok := object["type"]
+	if !ok || raw == nil {
+		return nil
+	}
+	text, ok := raw.(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return errors.New("event type must be a non-empty string")
+	}
+	if reservedCLIEventType(text) {
+		return fmt.Errorf("type %s is reserved", text)
+	}
+	return nil
+}
+
 func blankEventField(value any) bool {
 	if value == nil {
 		return true
@@ -200,6 +255,9 @@ func parseEmitObject(raw string) (json.RawMessage, error) {
 		if key == "specversion" && text != cloudEventSpecVersion {
 			return nil, errors.New(`--emit specversion must be "1.0"`)
 		}
+	}
+	if text, ok := object["type"].(string); ok && reservedCLIEventType(text) {
+		return nil, fmt.Errorf("type %s is reserved", text)
 	}
 	if rawData, ok := object["data"]; ok && rawData != nil {
 		if _, ok := rawData.(map[string]any); !ok {
@@ -301,14 +359,20 @@ func mkdirPrivate(path string) error {
 }
 
 func readJSONFile(path string, dest any) error {
-	info, err := os.Lstat(path)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+	file := os.NewFile(uintptr(fd), filepath.Base(path))
+	defer file.Close()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return fmt.Errorf("%s is not a regular file", filepath.Base(path))
 	}
-	payload, err := os.ReadFile(path)
+	payload, err := io.ReadAll(file)
 	if err != nil {
 		return err
 	}

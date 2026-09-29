@@ -201,16 +201,24 @@ do not ask the agent to curl with that token.
 its own session, so it keeps going after the agent turn ends. `genesis job
 list`, `genesis job logs <id>`, and `genesis job stop <id>` inspect and stop
 it. When the command exits, a supervisor posts that CloudEvent to the
-listener `POST /events` path (no bearer). A rule can match it and start
-another run — for example, wake when neural-net training ends. With no
-`--emit`, the event type is `dev.genesis.job.exited`.
+listener `POST /events` path (no bearer). Genesis stamps `id` and `source`
+on that post and ignores a caller-supplied `id` or `source`. `source` is
+`urn:genesis:agent:<id>` when `GENESIS_AGENT` is set, and otherwise
+`urn:genesis:job`. Types `dev.genesis.agent.finished` and
+`dev.genesis.session.continue` are rejected. A rule can match the posted
+event and start another run — for example, wake when neural-net training
+ends. With no `--emit`, the event type is `dev.genesis.job.exited`.
 
 `genesis schedule --each=15m --emit '{CloudEvent}'` stores one schedule and
 keeps a small per-user ticker. `--each` is a Go duration of at least `1m`
 and at most `168h`, in whole seconds. The first fire is one interval after
-creation. Each fire posts that CloudEvent to the same `/events` accept path.
-`genesis schedule list` and `genesis schedule cancel <id>` manage it. This
-ticker is the CLI agents call. It is not a `rules.d` `interval` or `cron`
+creation. Each fire posts that CloudEvent to the same `/events` accept path,
+with a new stamped `id` and the same `source` rule (`urn:genesis:schedule`
+when `GENESIS_AGENT` is unset). One unreadable file under `schedules/` does
+not stop the other schedules. `genesis schedule list` and
+`genesis schedule cancel <id>` manage it. Cancel removes the schedule even
+if a fire is in progress. This ticker is the CLI agents call. It is not a
+`rules.d` `interval` or `cron`
 rule; the loader still rejects those fields.
 
 ## Repositories
