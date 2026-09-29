@@ -44,47 +44,58 @@ on repository events or issues) declare a dedicated OS user. Genesis's
 privileged coordinator automatically
 reconciles the account at root `genesis launch` and on agents `/sync`:
 `/bin/bash`, home and a private or shared-read workspace mode `0755`, and
-shared-write mode `0775` for the declared group. `setup.groups` lists extra
-groups. Genesis creates a missing group. The name `shared` also ensures
-`/shared`, owned by `root:shared`, mode `2770` and setgid, so members can
-place files there for other members to read. Do not list reserved groups
-such as `genesis`. `reasoning_effort` is optional: `off`, `low`, `high`, or
-`max`. Omitted, the harness default is `high`. Another agent can read a
-`0755` home or workspace and cannot write it. New files are created
-world-readable (umask `022`). Python and the harness are in the image for
-every account: `/app/.venv`, `/app/.venv/bin/python3`, and
+shared-write mode `0775` for the declared group. `shared-read` and
+`shared-write` are workspace modes, used only when the operator asks.
+`setup.groups` is separate: extra groups for an agent that places files
+for others. A private worker that never does that omits `groups`. Genesis
+creates a missing group. The group name `shared` also ensures `/shared`,
+owned by `root:shared`, mode `2770` and setgid, so members can place files
+there for other members to read. Do not list reserved groups such as
+`genesis`. `max_parallel` and `reasoning_effort` are siblings of `setup`.
+Nested under `setup`, the loader rejects the file. Omit `max_parallel` to
+keep `1`. Omit `reasoning_effort` to keep `high`. Values are `off`, `low`,
+`high`, or `max`. Write either only when the operator asks. Another agent
+can read a `0755` home or workspace and cannot write it. New files are
+created world-readable (umask `022`). Python and the harness are in the
+image for every account: `/app/.venv`, `/app/.venv/bin/python3`, and
 `/app/.venv/bin/dsh`. `uv` is used only while building that venv; the
 runtime image does not install it. Code another agent should read belongs
-in the worker workspace. The run journal under `/var/lib/genesis/data/runs`
-stays private. Transcripts are the world-readable journal copy.
-`dev.genesis.agent.finished` names the review target: `data.runid` is the
-exact `gen_` id, `data.agent` is the agent id, `data.session` is the
-absolute path of that run's `session.v3.jsonl`, and `data.definition` is
-the absolute path of that agent's definition. `data.transcript` is the
-journal copy, not the session log.
+in the worker workspace.
 
-The worker's `instructions` include the listener curl and those sharing
-facts. From inside the container the listener is `POST`
+A worker's `instructions` include the listener curl. They do not include
+host modes, Python paths, the finish event, or session continuation. From
+inside the container the listener is `POST`
 `http://127.0.0.1:8787/events` with `Content-Type: application/cloudevents+json`
-and no bearer. Port `8790` is the control panel, not that path. A custom
-event is that JSON. `source` is `urn:genesis:agent:<agent id>`. Session
+and no bearer. Port `8790` is the control panel, not that path. `source`
+is `urn:genesis:agent:<agent id>`. `202` returns the new run ids. `204`
+means nothing matched. Any other status is a listener failure.
+
+The finish event and session continuation belong in a reviewer's
+instructions. Other workers do not need them. When a session ends, the
+system emits `dev.genesis.agent.finished` with `subject` equal to that
+agent id. `data.runid` is the exact `gen_` id, `data.agent` is the agent
+id, and `data.outcome` is `ok` or `error`. `data.session` is the absolute
+path of that run's `session.v3.jsonl`, and `data.definition` is the
+absolute path of that agent's definition. Both are omitted when empty.
+`data.transcript` is the journal copy, not the session log. The run
+journal under `/var/lib/genesis/data/runs` stays private. Session
 continuation is type `dev.genesis.session.continue`: `subject` is the
 finished `gen_` run id, `data.message` is the next turn, and `source` is
 `urn:genesis:agent:oracle` or `urn:genesis:agent:<the agent who owns that
 run>`. The cited run must already have ended. `202` contains the new run
 id. `204` means the continue was refused. The new run reuses the same DSH
-session and the same `DSH_HOME`. The agent does not pass session ids or
-paths. When any session ends, the system emits
-`dev.genesis.agent.finished` with `subject` equal to that agent id.
+session and the same `DSH_HOME`.
 
 The shipped oracle (`agents.d/oracle.yaml`, `rules.d/oracle.yaml`) is that
 worker shape: user `oracle`, home `/home/oracle`, cwd
 `/home/oracle/workspace`, `setup.workspace: private`. Its rule matches
-`dev.genesis.agent.finished` with subject `*`. It reads `data.session` and
-`data.definition`, writes `reports/<runid>.md` in its workspace, and
-continues with the curl when the exit criterion is not met. Reserved OS
-user names include
-`genesis` and `root`.
+`dev.genesis.agent.finished` with subject `*`, so it reviews every finished
+agent. The designer may change that rule. A review after every finish is
+mostly redundant, and skipping those runs is fine. One example is to start
+the oracle once, when a cycle ends, instead of on every finish. It reads
+`data.session` and `data.definition`, writes `reports/<runid>.md` in its
+workspace, and continues with the curl when the exit criterion is not met.
+Reserved OS user names include `genesis` and `root`.
 
 Required shape:
 
@@ -94,6 +105,18 @@ home: /home/<username>
 cwd: /home/<username>/workspace
 setup:
   workspace: private
+```
+
+`max_parallel` and `reasoning_effort` are siblings of `setup`, written only
+when asked. `groups` stays inside `setup`, and only for an agent that
+places files for others:
+
+```yaml
+max_parallel: 2
+reasoning_effort: low
+setup:
+  groups:
+    - shared
 ```
 
 `/tmp` and `/var/tmp` are legal dedicated cwd values when the operator asked

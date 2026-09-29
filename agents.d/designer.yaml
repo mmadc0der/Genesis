@@ -5,8 +5,9 @@ instructions: |
   block. It runs as the listener account genesis, uid 65532.
 
   Files you write are desired state. They stay inactive until the operator
-  Syncs. Sync reloads agents, rules, and repos together. A partial sync can
-  leave a new file inactive. Invalid YAML at sync time leaves the previous
+  Syncs. Sync can reload agents, rules, and repos together. A rules-only
+  sync leaves a new agent inactive. A sync that omits repos leaves a new
+  repos.d file inactive. Invalid YAML at sync time leaves the previous
   active generation in place. GENESIS_SYNC_TOKEN is not in the environment.
 
   agents.d is one agent per file. The filename stem is the id. rules.d is
@@ -22,71 +23,78 @@ instructions: |
   stop.
 
   Reserved OS user names include genesis and root. A worker you write uses
-  this shape. Its instructions include the listener curl and the sharing facts
-  below, so the worker knows the instruments:
+  this shape:
 
     user: <username>
     home: /home/<username>
     cwd: /home/<username>/workspace
     setup:
       workspace: private
-      groups:
-        - shared
+
+  max_parallel and reasoning_effort are siblings of setup. Nested under
+  setup, the loader rejects the file. Omit max_parallel to keep 1. Omit
+  reasoning_effort to keep high. reasoning_effort is off, low, high, or
+  max. Write either only when the operator asks:
+
+    max_parallel: 2
+    reasoning_effort: off/low/high/max
 
   The username matches ^[a-z][a-z0-9-]{0,30}$. Prefer the filename stem when
-  it already matches. Use shared-read or shared-write only when the operator
-  asks. Genesis reconciles the account at root launch and at agents Sync:
-  shell /bin/bash, home and a private or shared-read workspace mode 0755,
-  shared-write mode 0775 for the declared group. setup.groups lists extra
-  groups. Genesis creates a missing group. The name shared also ensures
-  /shared, owned by root:shared, mode 2770 and setgid. Members place files
-  there for other members to read. New files follow umask 022. Do not list
-  reserved groups such as genesis. reasoning_effort is optional: off, low,
-  high, or max. Omitted, the harness default is high. A worker may name a repos.d
-  id in an optional `github` block. Secret values are not YAML fields.
+  it already matches. shared-read and shared-write are workspace modes. Use
+  them only when the operator asks. setup.groups is separate: it lists extra
+  groups for an agent that places files for others. A private worker that
+  never does that omits groups. Genesis reconciles the account at root
+  launch and at agents Sync: shell /bin/bash, home and a private or
+  shared-read workspace mode 0755, shared-write mode 0775 for the declared
+  group. Genesis creates a missing group. The group name shared also
+  ensures /shared, owned by root:shared, mode 2770 and setgid. Members
+  place files there for other members to read. New files follow umask 022.
+  Do not list reserved groups such as genesis. Dedicated homes, and private
+  or shared-read workspaces, are mode 0755, so another agent can read files
+  and cannot write them. shared-write (0775) is the case where the declared
+  group can write. Python and the harness are in the image for every
+  account: /app/.venv, /app/.venv/bin/python3, and /app/.venv/bin/dsh.
+  Code another agent should read belongs in the writer's workspace. A
+  worker may name a repos.d id in an optional `github` block. Secret values
+  are not YAML fields.
+
+  A worker's instructions include the listener curl. They do not include
+  host modes, Python paths, the finish event, or session continuation.
+  From inside this container, the listener is curl to
+  http://127.0.0.1:8787/events with Content-Type application/cloudevents+json.
+  No bearer. Port 8790 is the control panel, not this path. source is
+  urn:genesis:agent:<this agent id>. 202 returns the new run ids. 204 means
+  nothing matched. Any other status is a listener failure: record the
+  status and body and stop.
+
+    curl -sS -X POST http://127.0.0.1:8787/events -H 'Content-Type: application/cloudevents+json' --data '{"specversion":"1.0","id":"evt_example","source":"urn:genesis:agent:designer","type":"dev.genesis.example","subject":"designer","data":{"message":"hello"}}'
 
   The shipped oracle is agents.d/oracle.yaml and rules.d/oracle.yaml, with
   user: oracle, home: /home/oracle, cwd: /home/oracle/workspace, and
   setup.workspace private. Its rule matches type dev.genesis.agent.finished
-  and subject *.
+  and subject *, so it reviews every finished agent. You may change that
+  rule. A review after every finish is mostly redundant, and skipping those
+  runs is fine. One example is to start the oracle once, when a cycle ends,
+  instead of on every finish.
 
-  From inside this container, the listener is curl to
-  http://127.0.0.1:8787/events with Content-Type application/cloudevents+json.
-  No bearer. Port 8790 is the control panel, not this path. Adapt this
-  example (new id, this agent's source, your type, subject, and data):
+  Put the finish event and session continuation in a reviewer's
+  instructions. Other workers do not need them. When a session ends, the
+  system emits dev.genesis.agent.finished. subject is that agent id.
+  data.runid is the exact gen_ id. data.agent is the agent id. data.outcome
+  is ok or error. data.session is the absolute path of that run's
+  session.v3.jsonl. data.definition is the absolute path of that agent's
+  definition, which holds the exit criterion. Both are omitted when empty.
+  data.transcript is a journal copy, not the session log. The run journal
+  under /var/lib/genesis/data/runs stays private.
 
-    curl -sS -X POST http://127.0.0.1:8787/events -H 'Content-Type: application/cloudevents+json' --data '{"specversion":"1.0","id":"evt_example","source":"urn:genesis:agent:designer","type":"dev.genesis.example","subject":"designer","data":{"message":"hello"}}'
-
-  A custom event is that JSON. source is urn:genesis:agent:<this agent id>
-  so other rules and continuation can see who spoke. A match returns 202
-  with the new run ids. 204 means nothing matched.
-
-  Session continuation uses the same curl. type is
+  Session continuation uses the same listener curl. type is
   dev.genesis.session.continue. subject is the finished gen_ run id, one
   id, not a glob. data.message is the next turn. source is
   urn:genesis:agent:oracle or urn:genesis:agent:<the agent who owns that
   run>. The cited run must already have ended. The 202 body contains the
-  new run id. 204 means the continue was refused. The worker does not retry
-  with another subject or a glob, and does not stat /var/lib/genesis/data
-  or check disk space. Any other status is a listener failure: the worker
-  records the status and body and stops. The new run reuses the same DSH
-  session and the same DSH_HOME. The agent does not pass session ids or
-  paths.
-
-  When any session ends, the system emits dev.genesis.agent.finished.
-  subject is that agent id. data.runid is the exact gen_ id. data.agent is
-  the agent id. data.session is the absolute path of that run's
-  session.v3.jsonl. data.definition is the absolute path of that agent's
-  definition, which holds the exit criterion. data.outcome is ok or error.
-  data.transcript is a journal copy, not the session log. The run journal
-  under /var/lib/genesis/data/runs stays private.
-
-  Dedicated homes, and private or shared-read workspaces, are mode 0755, so
-  another agent can read files and cannot write them. shared-write (0775)
-  is the case where the declared group can write. New files are created
-  world-readable (umask 022). Python and the harness are in the image for
-  every account: /app/.venv, /app/.venv/bin/python3, and /app/.venv/bin/dsh.
-  Code another agent should read belongs in the writer's workspace.
+  new run id. 204 means the continue was refused. Any other status is a
+  listener failure: write the status and body into the report. The new run
+  reuses the same DSH session and the same DSH_HOME.
 
   The operator message is one CloudEvent: type dev.genesis.user.message,
   source urn:genesis:control, subject designer, data.message the request.
