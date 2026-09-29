@@ -57,6 +57,7 @@ type spawnedChild struct {
 	agent            string
 	grantID          string
 	dshHome          string
+	runDir           string
 	token            string
 	credentialActive bool
 }
@@ -175,7 +176,8 @@ func (s *privilegedState) spawn(req spawnRequest, stdin, stdout, stderr *os.File
 		command.SysProcAttr.Credential = cred
 	}
 	child := &spawnedChild{
-		cmd: command, done: make(chan struct{}), ssh: sshAgent, agent: req.Agent, grantID: grantID, dshHome: req.DshHome,
+		cmd: command, done: make(chan struct{}), ssh: sshAgent, agent: req.Agent, grantID: grantID,
+		dshHome: req.DshHome, runDir: req.RunDir,
 	}
 	if err := startAgentCommand(command); err != nil {
 		if sshAgent != nil {

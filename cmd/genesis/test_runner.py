@@ -299,6 +299,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(harness.kwargs["runtime_cwd"], self.dsh_home)
         self.assertNotEqual(harness.kwargs["dsh_home"], AGENT_HOME)
         self.assertNotEqual(harness.kwargs["dsh_home"], workspace)
+        self.assertNotIn("reasoning_effort", harness.kwargs)
         self.assertTrue(harness.home_existed)
         self.assertTrue(Path(harness.kwargs["dsh_home"]).is_dir())
         self.assertEqual(harness.environment["DEEPSEEK_API_KEY"], "genesis-key")
@@ -372,6 +373,12 @@ class RunnerTests(unittest.TestCase):
                 "DSH_SYSTEM_PROMPT": INSTRUCTIONS,
             },
         )
+
+    def test_execute_passes_reasoning_effort_when_set(self):
+        runner.execute(self.invocation(reasoning_effort="low"), harness_factory=FakeHarness)
+        self.assertEqual(FakeHarness.instances[0].kwargs["reasoning_effort"], "low")
+        with self.assertRaises(ValueError):
+            runner.execute(self.invocation(reasoning_effort="turbo"), harness_factory=FakeHarness)
 
     def test_execute_supplies_version_coupled_session_log_privacy_patch(self):
         runner.execute(

@@ -49,9 +49,12 @@ type agentDefinition struct {
 	GitHub       *agentGitHub      `yaml:"github,omitempty" json:"-"`
 	// MaxParallel is the most runs of this agent that may execute at once.
 	// Nil means 1. It never limits a different agent.
-	MaxParallel    *int `yaml:"max_parallel,omitempty" json:"max_parallel,omitempty"`
-	id             string
-	credentialMode string
+	MaxParallel *int `yaml:"max_parallel,omitempty" json:"max_parallel,omitempty"`
+	// ReasoningEffort is the DSH thinking level for this agent's harness.
+	// Empty means the adapter default, high. Allowed: off, low, high, max.
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	id              string
+	credentialMode  string
 }
 
 // agentSetup is the allowlisted host contract for a dedicated OS user.
@@ -85,6 +88,9 @@ type invocation struct {
 	UserMessage   string            `json:"user_message,omitempty"`
 	Git           string            `json:"-"`
 	Credential    string            `json:"-"`
+	// ReasoningEffort is copied from the agent at accept time. Empty omits
+	// the harness argument so DSH keeps its default.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type acceptedRun struct {
@@ -291,17 +297,18 @@ func snapshotInvocation(
 		}
 	}
 	return invocation{
-		Event:        event,
-		Rule:         matched.name,
-		Agent:        definition.id,
-		RunID:        runID,
-		User:         definition.User,
-		Cwd:          definition.Cwd,
-		Home:         definition.Home,
-		Instructions: definition.Instructions,
-		Env:          runtimeEnvironment(definition, secrets),
-		Git:          gitAccess,
-		Credential:   credential,
+		Event:           event,
+		Rule:            matched.name,
+		Agent:           definition.id,
+		RunID:           runID,
+		User:            definition.User,
+		Cwd:             definition.Cwd,
+		Home:            definition.Home,
+		Instructions:    definition.Instructions,
+		Env:             runtimeEnvironment(definition, secrets),
+		Git:             gitAccess,
+		Credential:      credential,
+		ReasoningEffort: definition.ReasoningEffort,
 	}
 }
 
@@ -596,6 +603,9 @@ func (a agentDefinition) validate() error {
 	if a.MaxParallel != nil && *a.MaxParallel < 1 {
 		return errors.New("max_parallel must be at least 1")
 	}
+	if err := validateReasoningEffort(a.ReasoningEffort); err != nil {
+		return err
+	}
 
 	seenSecrets := make(map[string]struct{}, len(a.Secrets))
 	for _, name := range a.Secrets {
@@ -629,6 +639,15 @@ func (a agentDefinition) validate() error {
 		}
 	}
 	return nil
+}
+
+func validateReasoningEffort(value string) error {
+	switch value {
+	case "", "off", "low", "high", "max":
+		return nil
+	default:
+		return errors.New("reasoning_effort must be off, low, high, or max")
+	}
 }
 
 func (r rule) validate(agents map[string]agentDefinition) error {

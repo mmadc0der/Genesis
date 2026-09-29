@@ -10,16 +10,17 @@ import (
 // accept commands. POST /events and POST /sync keep their existing semantics.
 
 type agentView struct {
-	ID           string            `json:"id"`
-	Instructions string            `json:"instructions"`
-	Cwd          string            `json:"cwd"`
-	Home         string            `json:"home"`
-	User         string            `json:"user,omitempty"`
-	Setup        *agentSetup       `json:"setup,omitempty"`
-	Env          map[string]string `json:"env"`
-	Secrets      []string          `json:"secrets"`
-	GitHub       *agentGitHubView  `json:"github,omitempty"`
-	MaxParallel  *int              `json:"max_parallel,omitempty"`
+	ID              string            `json:"id"`
+	Instructions    string            `json:"instructions"`
+	Cwd             string            `json:"cwd"`
+	Home            string            `json:"home"`
+	User            string            `json:"user,omitempty"`
+	Setup           *agentSetup       `json:"setup,omitempty"`
+	Env             map[string]string `json:"env"`
+	Secrets         []string          `json:"secrets"`
+	GitHub          *agentGitHubView  `json:"github,omitempty"`
+	MaxParallel     *int              `json:"max_parallel,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
 }
 
 type ruleView struct {
@@ -108,16 +109,17 @@ func agentViewFrom(definition agentDefinition) agentView {
 		secrets = []string{deepSeekAPIKey}
 	}
 	return agentView{
-		ID:           definition.id,
-		Instructions: definition.Instructions,
-		Cwd:          definition.Cwd,
-		Home:         definition.Home,
-		User:         definition.User,
-		Setup:        cloneAgentSetup(definition.Setup),
-		Env:          env,
-		Secrets:      append([]string(nil), secrets...),
-		GitHub:       gitHubViewFrom(definition),
-		MaxParallel:  definition.MaxParallel,
+		ID:              definition.id,
+		Instructions:    definition.Instructions,
+		Cwd:             definition.Cwd,
+		Home:            definition.Home,
+		User:            definition.User,
+		Setup:           cloneAgentSetup(definition.Setup),
+		Env:             env,
+		Secrets:         append([]string(nil), secrets...),
+		GitHub:          gitHubViewFrom(definition),
+		MaxParallel:     definition.MaxParallel,
+		ReasoningEffort: definition.ReasoningEffort,
 	}
 }
 

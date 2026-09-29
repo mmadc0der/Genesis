@@ -115,7 +115,9 @@ account name (lowercase, not `root`/`genesis`/other reserved names). Two
 agents cannot share an OS user. `home` must be `/home/<user>`. `cwd` must be
 inside that home, or exactly `/tmp` or `/var/tmp`. `setup` is allowed only with `user` and is a
 closed contract: `workspace` (`private`, `shared-read`, `shared-write`) and
-optional existing `groups`. There is no command, script, package, or shell
+optional `groups`. Genesis creates a missing group. The group `shared`
+ensures `/shared` (`root:shared`, mode `2770`, setgid) so members can place
+files there. There is no command, script, package, or shell
 field; the account always gets `/bin/bash`. `env` is the complete non-secret
 environment given to that agent's Harness runtime; omitted, it is empty. Genesis then adds named
 secrets from its own startup environment (default `DEEPSEEK_API_KEY` when the
@@ -126,6 +128,8 @@ Dedicated agents also reserve `USER`, `LOGNAME`, and `SHELL`. Secret values
 never appear in YAML. Duplicate IDs, duplicate secret names, duplicate OS
 users, unknown fields, and invalid filename stems are rejected. `max_parallel`
 is optional and defaults to 1. When set, it must be an integer of at least 1.
+`reasoning_effort` is optional: `off`, `low`, `high`, or `max`. Omitted, the
+harness keeps its default, `high`.
 
 Several rules may point at the same agent. `max_parallel` is how many runs
 of that one agent may execute at once. The default is 1: a second match for

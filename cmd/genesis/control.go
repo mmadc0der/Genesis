@@ -821,7 +821,8 @@ func sameAgent(left, right agentView) bool {
 		maps.Equal(left.Env, right.Env) &&
 		slices.Equal(left.Secrets, right.Secrets) &&
 		sameGitHub(left.GitHub, right.GitHub) &&
-		sameOptionalInt(left.MaxParallel, right.MaxParallel)
+		sameOptionalInt(left.MaxParallel, right.MaxParallel) &&
+		left.ReasoningEffort == right.ReasoningEffort
 }
 
 func sameOptionalInt(left, right *int) bool {

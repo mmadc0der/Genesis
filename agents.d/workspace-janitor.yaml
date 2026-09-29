@@ -6,6 +6,8 @@ cwd: /home/workspace-janitor/workspace
 home: /home/workspace-janitor
 setup:
   workspace: private
+  groups:
+    - shared
 env:
   PATH: /usr/local/bin:/usr/bin:/bin
   LANG: C.UTF-8

@@ -150,6 +150,25 @@ open_transcripts() {
 	find "$root/transcripts" -xdev -type f -exec chmod 0644 {} +
 }
 
+# own_tree leaves sessions mode 0700/0600 and owned by genesis. Session logs
+# are the oracle's review text. 0640 plus the oracle membership in group
+# genesis lets that account read them. Directories are group-executable so
+# the known path can be opened, and are not group-readable. Runs stay 0700.
+# Transcripts stay the separate 0644 journal copies.
+open_sessions() {
+	root=$1/sessions
+	if [ -L "$1/sessions" ]; then
+		echo "genesis: refusing to chmod a symlink under $1" >&2
+		exit 1
+	fi
+	if [ ! -d "$root" ]; then
+		return 0
+	fi
+	chmod 0711 "$root"
+	find "$root" -mindepth 1 -xdev -type d -exec chmod 0710 {} +
+	find "$root" -xdev -type f \( -name 'session.jsonl' -o -name 'session.v*.jsonl' \) -exec chmod 0640 {} +
+}
+
 if [ -e "$config" ] || [ -L "$config" ]; then
 	require_real_dir "$config" "config root"
 fi
@@ -281,6 +300,7 @@ own_tree "$data" 0700 0600
 # including a directory this mkdir just created and a root-owned one reused
 # from the volume.
 open_transcripts "$data"
+open_sessions "$data"
 lock_providers
 lock_credentials
 lock_secrets

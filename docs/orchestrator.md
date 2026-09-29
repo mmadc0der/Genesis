@@ -50,6 +50,8 @@ in that agent's queue until one of its running runs finishes. A different
 agent has its own queue and starts immediately when it is under its own
 cap. The hold is not a sync retry and not a token budget. Waiting runs
 are recorded under the run directory and started again after a restart.
+`reasoning_effort` is optional (`off`, `low`, `high`, or `max`) and is
+copied onto the run at accept time. Omitted, the harness default is `high`.
 
 ## POST /sync
 
@@ -139,8 +141,10 @@ exactly `/tmp` / `/var/tmp` (sticky, never chowned). Root will not mkdir or
 chown paths under `/tmp`, `/opt`, or other unmanaged trees.
 
 Allowlisted setup today: `workspace` (`private` / `shared-read` /
-`shared-write`) and existing supplementary `groups` (not `root`/`sudo`/other
-reserved groups). The shell is always `/bin/bash`. Deliberately deferred:
+`shared-write`) and supplementary `groups` (not `root`/`sudo`/other
+reserved groups). A missing group is created. The group `shared` also
+ensures `/shared` (`root:shared`, mode `2770`, setgid). The shell is always
+`/bin/bash`. Deliberately deferred:
 packages, file copies, extra shells, crontab, mounts, capabilities,
 sudo, and any `command` / script field. Checkout of a bound repository is
 not a setup command; a dedicated run does it with the deploy-key socket, as

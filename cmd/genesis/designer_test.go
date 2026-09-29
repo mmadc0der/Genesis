@@ -96,6 +96,9 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"home: /home/<username>",
 		"cwd: /home/<username>/workspace",
 		"workspace: private",
+		"setup.groups",
+		"/shared",
+		"reasoning_effort",
 		"GENESIS_SYNC_TOKEN is not in the environment",
 		"genesis and root",
 		"/bin/bash",
@@ -732,6 +735,10 @@ func TestDockerEntrypointReusedVolumeOpensTranscripts(t *testing.T) {
 	if err := os.WriteFile(sessionNote, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	sessionLog := filepath.Join(sessionHome, "session.v3.jsonl")
+	if err := os.WriteFile(sessionLog, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	env := strippedEnv(t,
 		"GENESIS_CONFIG_DIR="+config,
@@ -771,10 +778,16 @@ func TestDockerEntrypointReusedVolumeOpensTranscripts(t *testing.T) {
 		if got := perm(transcript); got != 0o644 {
 			t.Fatalf("transcript mode = %o", got)
 		}
-		for _, path := range []string{filepath.Join(data, "sessions"), filepath.Dir(sessionHome), sessionHome} {
-			if got := perm(path); got != 0o700 {
+		if got := perm(filepath.Join(data, "sessions")); got != 0o711 {
+			t.Fatalf("sessions mode = %o", got)
+		}
+		for _, path := range []string{filepath.Dir(sessionHome), sessionHome} {
+			if got := perm(path); got != 0o710 {
 				t.Fatalf("%s mode = %o", path, got)
 			}
+		}
+		if got := perm(sessionLog); got != 0o640 {
+			t.Fatalf("session log mode = %o", got)
 		}
 		if got := perm(sessionNote); got != 0o600 {
 			t.Fatalf("session file mode = %o", got)
@@ -838,6 +851,18 @@ func TestDockerEntrypointChownsTranscriptsOnEveryStart(t *testing.T) {
 			t.Fatalf("chown log missing transcripts:\n%s", payload)
 		}
 	}
+	sessionDir := filepath.Join(data, "sessions", "gen_owned", "dsh_home", "sessions", "proj", "session-1")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionLog := filepath.Join(sessionDir, "session.v3.jsonl")
+	if err := os.WriteFile(sessionLog, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherFile := filepath.Join(sessionDir, "notes.txt")
+	if err := os.WriteFile(otherFile, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	runOwn()
 	info, err := os.Stat(transcripts)
 	if err != nil {
@@ -877,6 +902,18 @@ func TestDockerEntrypointChownsTranscriptsOnEveryStart(t *testing.T) {
 	if runsInfo.Mode().Perm() != 0o700 {
 		t.Fatalf("reused runs mode = %o", runsInfo.Mode().Perm())
 	}
+	if info, err := os.Stat(filepath.Join(data, "sessions")); err != nil || info.Mode().Perm() != 0o711 {
+		t.Fatalf("sessions mode = %v %v", info, err)
+	}
+	if info, err := os.Stat(sessionLog); err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("session log mode = %v %v", info, err)
+	}
+	if info, err := os.Stat(sessionDir); err != nil || info.Mode().Perm() != 0o710 {
+		t.Fatalf("session dir mode = %v %v", info, err)
+	}
+	if info, err := os.Stat(otherFile); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("non-session file mode = %v %v", info, err)
+	}
 }
 
 func strippedEnv(t *testing.T, extra ...string) []string {
@@ -910,35 +947,27 @@ func TestCommittedOracleIsDedicatedReviewer(t *testing.T) {
 	if oracle.Setup == nil || oracle.Setup.Workspace != workspacePrivate {
 		t.Fatalf("oracle setup = %#v", oracle.Setup)
 	}
+	if len(oracle.Setup.Groups) != 1 || oracle.Setup.Groups[0] != sharedGroupName {
+		t.Fatalf("oracle groups = %#v", oracle.Setup.Groups)
+	}
 	if oracle.GitHub != nil {
 		t.Fatalf("oracle github = %#v", oracle.GitHub)
 	}
 	for _, phrase := range []string{
-		"data.transcript",
 		"data.runid",
 		"data.agent",
+		"data.session",
+		"data.definition",
 		"data.outcome",
 		"reports/",
-		"mode 0755",
-		"0775",
-		"umask 022",
 		"http://127.0.0.1:8787/events",
 		"application/cloudevents+json",
-		"No bearer",
-		"8790",
 		"dev.genesis.session.continue",
 		"data.message",
 		"urn:genesis:agent:oracle",
-		"Do not retry",
-		"Do not stat /var/lib/genesis/data",
 		"listener failure",
 		"dev.genesis.agent.finished",
-		"subject *",
-		"/app/.venv",
-		"/app/.venv/bin/python3",
-		"/app/.venv/bin/dsh",
-		"/var/lib/genesis/data/runs",
-		"another agent id",
+		"exit criterion",
 	} {
 		if !strings.Contains(oracle.Instructions, phrase) {
 			t.Fatalf("oracle instructions missing %q", phrase)

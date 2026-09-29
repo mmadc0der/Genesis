@@ -48,10 +48,19 @@ agent: scribe
 printf '%s\n' '{"v":1,"type":"session.created","run_id":"gen_finish","session_id":"session-finish"}'
 printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-finish","finish_reason":"completed","final_response":"TRANSCRIPT_MARKER_ok","error":null,"diagnostics":null}'
 `),
-		source:     "src",
-		logger:     logger,
-		store:      store,
-		dispatch:   server.dispatchIngress,
+		source:    "src",
+		logger:    logger,
+		store:     store,
+		agentsDir: agentsDir,
+		dispatch:  server.dispatchIngress,
+	}
+	sessionDir := filepath.Join(document.DshHome, "sessions", "proj", "session-finish")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionLog := filepath.Join(sessionDir, "session.v3.jsonl")
+	if err := os.WriteFile(sessionLog, []byte("SESSION_LOG\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	runner.Run(document)
 
@@ -80,6 +89,27 @@ printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-finish","fi
 	data := eventData(t, event)
 	if data["runid"] != "gen_finish" || data["agent"] != "worker" || data["outcome"] != outcomeOK {
 		t.Fatalf("data = %#v", data)
+	}
+	sessionAbs, err := filepath.Abs(sessionLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data["session"] != sessionAbs {
+		t.Fatalf("session = %#v", data["session"])
+	}
+	definitionAbs, err := filepath.Abs(filepath.Join(agentsDir, "worker.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data["definition"] != definitionAbs {
+		t.Fatalf("definition = %#v", data["definition"])
+	}
+	sessionInfo, err := os.Stat(sessionLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionInfo.Mode().Perm() != sessionLogMode {
+		t.Fatalf("session log mode = %o", sessionInfo.Mode().Perm())
 	}
 	transcript, _ := data["transcript"].(string)
 	if !filepath.IsAbs(transcript) {
@@ -128,10 +158,10 @@ func TestFinishOutcomeError(t *testing.T) {
 /bin/cat >/dev/null
 printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-fail","finish_reason":"error","final_response":"","error":null,"diagnostics":null}'
 `),
-		source:     "src",
-		logger:     logger,
-		store:      store,
-		dispatch:   func(event cloudEvent) int {
+		source: "src",
+		logger: logger,
+		store:  store,
+		dispatch: func(event cloudEvent) int {
 			got = append(got, event)
 			return http.StatusNoContent
 		},
@@ -188,10 +218,10 @@ agent: oracle
 /bin/cat >/dev/null
 printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-oracle","finish_reason":"completed","final_response":"done","error":null,"diagnostics":null}'
 `),
-		source:     "src",
-		logger:     logger,
-		store:      store,
-		dispatch:   server.dispatchIngress,
+		source:   "src",
+		logger:   logger,
+		store:    store,
+		dispatch: server.dispatchIngress,
 	}
 	runner.Run(document)
 
@@ -255,10 +285,10 @@ printf '%s\n' '{"v":1,"type":"emit","event":{"type":"com.example.note","subject"
 printf '%s\n' '{"v":1,"type":"notification","method":"genesis.emit","payload":{"type":"com.example.ping","subject":"from-note","source":"urn:spoofed","id":"spoof-2","data":{"via":"notification"}}}'
 printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-emit","finish_reason":"completed","final_response":"done","error":null,"diagnostics":null}'
 `),
-		source:     "src",
-		logger:     logger,
-		store:      store,
-		dispatch:   func(event cloudEvent) int {
+		source: "src",
+		logger: logger,
+		store:  store,
+		dispatch: func(event cloudEvent) int {
 			got = append(got, event)
 			return http.StatusNoContent
 		},
@@ -379,10 +409,10 @@ agent: oracle
 /bin/cat >/dev/null
 printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-sync","finish_reason":"completed","final_response":"done","error":null,"diagnostics":null}'
 `),
-		source:     "src",
-		logger:     logger,
-		store:      store,
-		dispatch:   server.dispatchIngress,
+		source:   "src",
+		logger:   logger,
+		store:    store,
+		dispatch: server.dispatchIngress,
 	}
 	runner.Run(document)
 	expectNoInvocation(t, fake.invocations)

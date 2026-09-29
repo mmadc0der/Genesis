@@ -11,11 +11,13 @@ import (
 )
 
 type memoryHost struct {
-	users    map[string]*unixAccount
-	groups   map[string]uint32
-	dirs     map[string]memoryDir
-	commands [][]string
-	nextUID  uint32
+	users      map[string]*unixAccount
+	groups     map[string]uint32
+	dirs       map[string]memoryDir
+	commands   [][]string
+	userGroups map[string][]string
+	nextUID    uint32
+	nextGID    uint32
 }
 
 type memoryDir struct {
@@ -42,6 +44,19 @@ func (m *memoryHost) LookupUser(name string) (*unixAccount, error) {
 	return &copied, nil
 }
 
+func (m *memoryHost) CreateGroup(name string) error {
+	if _, ok := m.groups[name]; ok {
+		return fmt.Errorf("group %s exists", name)
+	}
+	if m.nextGID == 0 {
+		m.nextGID = 5000
+	}
+	m.groups[name] = m.nextGID
+	m.nextGID++
+	m.commands = append(m.commands, []string{"groupadd", name})
+	return nil
+}
+
 func (m *memoryHost) LookupGroup(name string) (uint32, error) {
 	gid, ok := m.groups[name]
 	if !ok {
@@ -52,6 +67,10 @@ func (m *memoryHost) LookupGroup(name string) (uint32, error) {
 
 func (m *memoryHost) CreateUser(spec agentUserSpec) error {
 	m.commands = append(m.commands, append([]string{"useradd"}, spec.Name))
+	if m.userGroups == nil {
+		m.userGroups = map[string][]string{}
+	}
+	m.userGroups[spec.Name] = append([]string(nil), spec.Groups...)
 	if _, exists := m.users[spec.Name]; exists {
 		return fmt.Errorf("user %s exists", spec.Name)
 	}
@@ -63,6 +82,10 @@ func (m *memoryHost) CreateUser(spec agentUserSpec) error {
 
 func (m *memoryHost) UpdateUser(spec agentUserSpec) error {
 	m.commands = append(m.commands, append([]string{"usermod"}, spec.Name))
+	if m.userGroups == nil {
+		m.userGroups = map[string][]string{}
+	}
+	m.userGroups[spec.Name] = append([]string(nil), spec.Groups...)
 	account, ok := m.users[spec.Name]
 	if !ok {
 		return user.UnknownUserError(spec.Name)
@@ -391,6 +414,53 @@ func TestApplyPlanRulesOnlyDoesNotMarkUsersRetained(t *testing.T) {
 	}
 	if _, ok := state.lookupUser("workspace-janitor"); !ok {
 		t.Fatal("rules-only apply forgot the reconciled user")
+	}
+}
+
+func TestDeclaredGroupCreatesSharedWorkspace(t *testing.T) {
+	host := newMemoryHost()
+	state := &privilegedState{host: host, mutate: true, users: map[string]reconciledIdentity{}}
+	intent := privilegedIntent{
+		Kind: intentEnsureAgentUser, Agent: "oracle", User: "oracle",
+		Home: "/home/oracle", Cwd: "/home/oracle/workspace", Shell: agentShell,
+		Groups: []string{sharedGroupName}, Workspace: workspacePrivate,
+	}
+	if _, err := state.apply(privilegedPlan{Agents: true, Intents: []privilegedIntent{intent}}); err != nil {
+		t.Fatal(err)
+	}
+	got := host.userGroups["oracle"]
+	if len(got) != 1 || got[0] != sharedGroupName {
+		t.Fatalf("oracle groups = %#v", got)
+	}
+	gid, err := host.LookupGroup(sharedGroupName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := host.dirs[sharedWorkspacePath]
+	if shared.uid != 0 || shared.gid != int(gid) || shared.mode != os.FileMode(0o770)|os.ModeSetgid {
+		t.Fatalf("shared workspace = %#v", shared)
+	}
+	identity, err := lookupReconciledIdentity(host, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, group := range identity.Groups {
+		if group == gid {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("credential groups = %#v", identity.Groups)
+	}
+
+	rejected := privilegedIntent{
+		Kind: intentEnsureAgentUser, Agent: "worker", User: "worker",
+		Home: "/home/worker", Cwd: "/home/worker/workspace", Shell: agentShell,
+		Groups: []string{"genesis"}, Workspace: workspacePrivate,
+	}
+	if _, err := state.apply(privilegedPlan{Agents: true, Intents: []privilegedIntent{rejected}}); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("yaml genesis group error = %v", err)
 	}
 }
 

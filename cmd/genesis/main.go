@@ -101,6 +101,7 @@ func runListen(logger *slog.Logger, args []string) {
 		logger:     logger,
 		store:      store,
 		spawner:    asSpawner(coordinator),
+		agentsDir:  absoluteAgentsDir,
 		dispatch:   handler.dispatchIngress,
 	}
 	if ipcClient, ok := coordinator.(*ipcCoordinator); ok {

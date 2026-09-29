@@ -103,7 +103,7 @@ func putStringAttribute(event cloudEvent, key, value string) {
 	event[key] = raw
 }
 
-func newAgentFinishedEvent(agentID, runID, outcome, transcript string) (cloudEvent, error) {
+func newAgentFinishedEvent(agentID, runID, outcome, transcript, session, definition string) (cloudEvent, error) {
 	if agentID == "" || strings.Contains(agentID, "/") {
 		return nil, errors.New("finished agent id must be one path segment")
 	}
@@ -117,18 +117,28 @@ func newAgentFinishedEvent(agentID, runID, outcome, transcript string) (cloudEve
 	if err != nil {
 		return nil, err
 	}
+	data := map[string]string{
+		"runid":      runID,
+		"agent":      agentID,
+		"outcome":    outcome,
+		"transcript": transcript,
+	}
+	// session is the session.v3.jsonl path. definition is the reviewed
+	// agent's YAML, which holds the exit criterion. Empty values are omitted
+	// so a run that died before either file existed does not invent a path.
+	if session != "" {
+		data["session"] = session
+	}
+	if definition != "" {
+		data["definition"] = definition
+	}
 	return marshalCloudEvent(map[string]any{
 		"specversion": cloudEventSpecVersion,
 		"id":          id,
 		"source":      agentSource(agentID),
 		"type":        agentFinishedType,
 		"subject":     agentID,
-		"data": map[string]string{
-			"runid":      runID,
-			"agent":      agentID,
-			"outcome":    outcome,
-			"transcript": transcript,
-		},
+		"data":        data,
 	})
 }
 

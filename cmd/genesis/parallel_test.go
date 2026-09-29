@@ -52,6 +52,32 @@ func TestMaxParallelMustBeAtLeastOne(t *testing.T) {
 	}
 }
 
+func TestReasoningEffortAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	writeAgent(t, filepath.Join(dir, "worker.yaml"), agentDefinition{
+		Instructions:    "hello",
+		Cwd:             "/tmp/cwd",
+		Home:            "/tmp/home",
+		ReasoningEffort: "low",
+	})
+	agents, err := loadAgents(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agents["worker"].ReasoningEffort != "low" {
+		t.Fatalf("effort = %q", agents["worker"].ReasoningEffort)
+	}
+	writeAgent(t, filepath.Join(dir, "worker.yaml"), agentDefinition{
+		Instructions:    "hello",
+		Cwd:             "/tmp/cwd",
+		Home:            "/tmp/home",
+		ReasoningEffort: "turbo",
+	})
+	if _, err := loadAgents(dir); err == nil || !strings.Contains(err.Error(), "reasoning_effort must be off, low, high, or max") {
+		t.Fatalf("loadAgents error = %v", err)
+	}
+}
+
 func TestMaxParallelHoldsTheNextRunOfThatAgent(t *testing.T) {
 	agentsDir := t.TempDir()
 	rulesDir := t.TempDir()

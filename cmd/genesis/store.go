@@ -27,6 +27,9 @@ const (
 	stderrFileName     = "stderr.log"
 	resultFileName     = "result.json"
 	sessionFileName    = "session.json"
+	// sessionPathFileName is the absolute session.v3.jsonl path recorded
+	// for the oracle after a dedicated run. The run directory stays private.
+	sessionPathFileName = "session-path"
 	// usageFileName is the per-run token account, beside the journal.
 	usageFileName  = "usage.json"
 	dshHomeDirName = "dsh_home"

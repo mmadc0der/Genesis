@@ -399,6 +399,10 @@ def validate_invocation(value: Any) -> dict[str, Any]:
         for key, item in environment.items()
     ):
         raise TypeError("env must be an object of string values")
+    effort = value.get("reasoning_effort")
+    if effort is not None and effort != "":
+        if not isinstance(effort, str) or effort not in {"off", "low", "high", "max"}:
+            raise ValueError("reasoning_effort must be off, low, high, or max")
     return value
 
 
@@ -465,17 +469,21 @@ def execute(
         raise ValueError("session_id must be a non-empty string when set")
 
     patch_path = write_runtime_patch(home_path)
+    harness_options = {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "cwd": invocation["cwd"],
+        "runtime_cwd": dsh_home,
+        "dsh_home": dsh_home,
+        "profile": "sdk-minimal",
+        "patches": (str(patch_path),),
+    }
+    effort = invocation.get("reasoning_effort") or ""
+    if effort:
+        harness_options["reasoning_effort"] = effort
     with (
         complete_environment(environment),
-        harness_factory(
-            provider="deepseek-official",
-            model="deepseek-flash",
-            cwd=invocation["cwd"],
-            runtime_cwd=dsh_home,
-            dsh_home=dsh_home,
-            profile="sdk-minimal",
-            patches=(str(patch_path),),
-        ) as harness,
+        harness_factory(**harness_options) as harness,
     ):
         session = harness.start_session(session_id)
         if on_session_created is not None:

@@ -27,6 +27,9 @@ type processRunner struct {
 	logger     *slog.Logger
 	store      *runStore
 	spawner    privilegedSpawner
+	// agentsDir is the listener's agent definition directory. The finish
+	// event names the reviewed agent's file so the oracle does not search.
+	agentsDir string
 	// dispatch is POST /events. Nil in runner unit tests that only journal.
 	dispatch func(cloudEvent) int
 }
@@ -420,11 +423,20 @@ func (r processRunner) publishAgentFinished(journal *runJournal, document invoca
 		_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(diskErrorType, err.Error()))
 		return
 	}
+	// Dedicated runs were granted by the privileged parent. This covers a
+	// listener-owned log, and EPERM leaves an agent-owned ACL in place.
+	if err := grantSessionRead(document.DshHome, uint32(os.Geteuid()), true, 0, false); err != nil && r.logger != nil {
+		r.logger.Error("session read grant", "genesis_run_id", document.RunID, "error", err)
+	}
+	sessionPath := readRecordedSessionPath(document.RunDir, document.DshHome)
+	if sessionPath == "" {
+		sessionPath = locateSessionLog(document.DshHome)
+	}
 	outcome := outcomeOK
 	if stateName != endStateCompleted {
 		outcome = outcomeError
 	}
-	event, err := newAgentFinishedEvent(document.Agent, document.RunID, outcome, transcript)
+	event, err := newAgentFinishedEvent(document.Agent, document.RunID, outcome, transcript, sessionPath, agentDefinitionPath(r.agentsDir, document.Agent))
 	if err != nil {
 		_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(runnerErrorType, err.Error()))
 		return

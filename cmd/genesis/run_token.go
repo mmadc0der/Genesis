@@ -388,6 +388,7 @@ func (s *privilegedState) finishChild(child *spawnedChild) {
 	s.mu.Lock()
 	token := child.token
 	home := child.dshHome
+	runDir := child.runDir
 	wasActive := child.credentialActive
 	agent := child.agent
 	child.token = ""
@@ -399,6 +400,41 @@ func (s *privilegedState) finishChild(child *spawnedChild) {
 	if wasActive {
 		s.logCredential(agent, false)
 	}
+	s.grantFinishedSession(home, runDir)
+}
+
+// grantFinishedSession opens the finished DSH home to the oracle before the
+// listener emits dev.genesis.agent.finished. Listener-owned session logs
+// become mode 0640. Agent-owned homes get a named-user ACL. The absolute
+// session log path is recorded in the private run directory so the listener
+// can name it without traversing an agent-owned tree.
+func (s *privilegedState) grantFinishedSession(dshHome, runDir string) {
+	if s == nil || strings.TrimSpace(dshHome) == "" {
+		return
+	}
+	listenerUID, listenerGID, listenerOK := s.accountIDs(s.listenerUser)
+	oracleUID, _, oracleOK := s.accountIDs("oracle")
+	if err := grantSessionRead(dshHome, listenerUID, listenerOK, oracleUID, oracleOK); err != nil && s.logger != nil {
+		s.logger.Error("session read grant", "dsh_home", dshHome, "error", err)
+	}
+	sessionPath := locateSessionLog(dshHome)
+	if sessionPath == "" || runDir == "" || !listenerOK {
+		return
+	}
+	if err := writeSessionPath(runDir, sessionPath, int(listenerUID), int(listenerGID)); err != nil && s.logger != nil {
+		s.logger.Error("record session path", "run_dir", runDir, "error", err)
+	}
+}
+
+func (s *privilegedState) accountIDs(name string) (uid, gid uint32, ok bool) {
+	if s == nil || s.host == nil || name == "" {
+		return 0, 0, false
+	}
+	account, err := s.host.LookupUser(name)
+	if err != nil {
+		return 0, 0, false
+	}
+	return account.UID, account.GID, true
 }
 
 func (s *privilegedState) logCredential(agent string, active bool) {

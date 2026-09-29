@@ -44,15 +44,24 @@ on repository events or issues) declare a dedicated OS user. Genesis's
 privileged coordinator automatically
 reconciles the account at root `genesis launch` and on agents `/sync`:
 `/bin/bash`, home and a private or shared-read workspace mode `0755`, and
-shared-write mode `0775` for the declared group. Another agent can read a
+shared-write mode `0775` for the declared group. `setup.groups` lists extra
+groups. Genesis creates a missing group. The name `shared` also ensures
+`/shared`, owned by `root:shared`, mode `2770` and setgid, so members can
+place files there for other members to read. Do not list reserved groups
+such as `genesis`. `reasoning_effort` is optional: `off`, `low`, `high`, or
+`max`. Omitted, the harness default is `high`. Another agent can read a
 `0755` home or workspace and cannot write it. New files are created
 world-readable (umask `022`). Python and the harness are in the image for
 every account: `/app/.venv`, `/app/.venv/bin/python3`, and
 `/app/.venv/bin/dsh`. `uv` is used only while building that venv; the
 runtime image does not install it. Code another agent should read belongs
 in the worker workspace. The run journal under `/var/lib/genesis/data/runs`
-stays private. Transcripts are the world-readable copy, and
-`dev.genesis.agent.finished` `data.transcript` is the absolute path.
+stays private. Transcripts are the world-readable journal copy.
+`dev.genesis.agent.finished` names the review target: `data.runid` is the
+exact `gen_` id, `data.agent` is the agent id, `data.session` is the
+absolute path of that run's `session.v3.jsonl`, and `data.definition` is
+the absolute path of that agent's definition. `data.transcript` is the
+journal copy, not the session log.
 
 The worker's `instructions` include the listener curl and those sharing
 facts. From inside the container the listener is `POST`
@@ -71,9 +80,10 @@ paths. When any session ends, the system emits
 The shipped oracle (`agents.d/oracle.yaml`, `rules.d/oracle.yaml`) is that
 worker shape: user `oracle`, home `/home/oracle`, cwd
 `/home/oracle/workspace`, `setup.workspace: private`. Its rule matches
-`dev.genesis.agent.finished` with subject `*`. It reads `data.transcript`,
-writes `reports/<runid>.md` in its workspace, and continues with the curl
-when the exit criterion is not met. Reserved OS user names include
+`dev.genesis.agent.finished` with subject `*`. It reads `data.session` and
+`data.definition`, writes `reports/<runid>.md` in its workspace, and
+continues with the curl when the exit criterion is not met. Reserved OS
+user names include
 `genesis` and `root`.
 
 Required shape:

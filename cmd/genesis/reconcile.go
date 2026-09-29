@@ -19,6 +19,10 @@ import (
 const (
 	minRegularUID = 1000
 	maxOSNameLen  = 32
+	// sharedGroupName is the supplementary group that owns /shared.
+	// An agent joins it by listing the name in setup.groups.
+	sharedGroupName     = "shared"
+	sharedWorkspacePath = "/shared"
 )
 
 var (
@@ -74,6 +78,7 @@ type agentUserSpec struct {
 type hostAPI interface {
 	LookupUser(name string) (*unixAccount, error)
 	LookupGroup(name string) (uint32, error)
+	CreateGroup(name string) error
 	CreateUser(spec agentUserSpec) error
 	UpdateUser(spec agentUserSpec) error
 	EnsureDir(path string, uid, gid int, mode os.FileMode) error
@@ -354,7 +359,13 @@ func applyAgentUserIntent(host hostAPI, intent privilegedIntent) error {
 	if spec.Workspace == "" {
 		spec.Workspace = workspacePrivate
 	}
+	if err := ensureDeclaredGroups(host, spec.Groups); err != nil {
+		return fmt.Errorf("agent %s: %w", intent.Agent, err)
+	}
 	if err := validateSupplementaryGroups(host, spec); err != nil {
+		return fmt.Errorf("agent %s: %w", intent.Agent, err)
+	}
+	if err := ensureSharedWorkspace(host, spec.Groups); err != nil {
 		return fmt.Errorf("agent %s: %w", intent.Agent, err)
 	}
 
@@ -404,6 +415,60 @@ func applyAgentUserIntent(host hostAPI, intent privilegedIntent) error {
 		if err := host.EnsureDir(spec.Cwd, workspaceUID, workspaceGID, workspaceMode); err != nil {
 			return fmt.Errorf("agent %s cwd: %w", intent.Agent, err)
 		}
+	}
+	return nil
+}
+
+func isUnknownGroup(err error) bool {
+	var unknown user.UnknownGroupError
+	return errors.As(err, &unknown) || strings.Contains(strings.ToLower(err.Error()), "unknown group")
+}
+
+// ensureDeclaredGroups creates supplementary groups named in the agent spec.
+// Reserved names are refused and are not created.
+func ensureDeclaredGroups(host hostAPI, groups []string) error {
+	seen := map[string]struct{}{}
+	for _, name := range groups {
+		if err := validateOSGroupName(name); err != nil {
+			return err
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("duplicate group %q", name)
+		}
+		seen[name] = struct{}{}
+		if _, err := host.LookupGroup(name); err == nil {
+			continue
+		} else if !isUnknownGroup(err) {
+			return fmt.Errorf("group %q: %w", name, err)
+		}
+		if err := host.CreateGroup(name); err != nil {
+			return fmt.Errorf("create group %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// ensureSharedWorkspace creates /shared when an agent joins the shared group.
+// Root owns the directory. The group can create files. Setgid keeps new
+// files in that group. The process umask still applies to the file mode.
+func ensureSharedWorkspace(host hostAPI, groups []string) error {
+	joined := false
+	for _, name := range groups {
+		if name == sharedGroupName {
+			joined = true
+			break
+		}
+	}
+	if !joined {
+		return nil
+	}
+	gid, err := host.LookupGroup(sharedGroupName)
+	if err != nil {
+		return fmt.Errorf("shared workspace group: %w", err)
+	}
+	mode := os.FileMode(0o770) | os.ModeSetgid
+	if err := host.EnsureDir(sharedWorkspacePath, 0, int(gid), mode); err != nil {
+		return fmt.Errorf("shared workspace: %w", err)
 	}
 	return nil
 }
@@ -602,6 +667,10 @@ func (unixHost) LookupUser(name string) (*unixAccount, error) {
 		Home:  account.HomeDir,
 		Shell: "",
 	}, nil
+}
+
+func (unixHost) CreateGroup(name string) error {
+	return runHostCommand(hostBin("groupadd"), name)
 }
 
 func (unixHost) LookupGroup(name string) (uint32, error) {

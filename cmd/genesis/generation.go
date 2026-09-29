@@ -130,16 +130,17 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 		return "", err
 	}
 	type agentDigest struct {
-		ID           string            `json:"id"`
-		Instructions string            `json:"instructions"`
-		Cwd          string            `json:"cwd"`
-		Home         string            `json:"home"`
-		User         string            `json:"user"`
-		Setup        *agentSetup       `json:"setup"`
-		Env          map[string]string `json:"env"`
-		Secrets      []string          `json:"secrets"`
-		GitHub       *digestGitHub     `json:"github,omitempty"`
-		MaxParallel  *int              `json:"max_parallel,omitempty"`
+		ID              string            `json:"id"`
+		Instructions    string            `json:"instructions"`
+		Cwd             string            `json:"cwd"`
+		Home            string            `json:"home"`
+		User            string            `json:"user"`
+		Setup           *agentSetup       `json:"setup"`
+		Env             map[string]string `json:"env"`
+		Secrets         []string          `json:"secrets"`
+		GitHub          *digestGitHub     `json:"github,omitempty"`
+		MaxParallel     *int              `json:"max_parallel,omitempty"`
+		ReasoningEffort string            `json:"reasoning_effort,omitempty"`
 	}
 	type ruleDigest struct {
 		Name  string            `json:"name"`
@@ -156,16 +157,17 @@ func digestGeneration(agents map[string]agentDefinition, rules []rule, repos map
 	for _, id := range ids {
 		definition := agents[id]
 		agentDigests = append(agentDigests, agentDigest{
-			ID:           id,
-			Instructions: definition.Instructions,
-			Cwd:          definition.Cwd,
-			Home:         definition.Home,
-			User:         definition.User,
-			Setup:        definition.Setup,
-			Env:          definition.Env,
-			Secrets:      definition.Secrets,
-			GitHub:       gitHubDigest(definition),
-			MaxParallel:  definition.MaxParallel,
+			ID:              id,
+			Instructions:    definition.Instructions,
+			Cwd:             definition.Cwd,
+			Home:            definition.Home,
+			User:            definition.User,
+			Setup:           definition.Setup,
+			Env:             definition.Env,
+			Secrets:         definition.Secrets,
+			GitHub:          gitHubDigest(definition),
+			MaxParallel:     definition.MaxParallel,
+			ReasoningEffort: definition.ReasoningEffort,
 		})
 	}
 	ruleDigests := make([]ruleDigest, 0, len(rules))

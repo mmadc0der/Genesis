@@ -5,6 +5,7 @@ export interface Agent {
   home: string;
   user?: string;
   max_parallel?: number;
+  reasoning_effort?: string;
   setup?: {
     groups?: string[];
     workspace?: string;
