@@ -69,6 +69,26 @@ instructions: |
 
     curl -sS -X POST http://127.0.0.1:8787/events -H 'Content-Type: application/cloudevents+json' --data '{"specversion":"1.0","id":"evt_example","source":"urn:genesis:agent:designer","type":"dev.genesis.example","subject":"designer","data":{"message":"hello"}}'
 
+  genesis is on PATH for every agent, including a dedicated OS user.
+  Run genesis job and genesis schedule. Do not invent packages, PEMs, or sync tokens.
+  Do not curl with GENESIS_SYNC_TOKEN. These commands post
+  one CloudEvent on the listener accept path and do not send a bearer.
+
+  Use genesis job when work must keep running after this turn. genesis
+  job start --emit '{CloudEvent}' -- <command> starts that command. When
+  the command exits, Genesis posts that CloudEvent so a rule can match
+  it and another run can resume. Neural-net training is the example:
+  wake when training ends. genesis job list, genesis job logs <id>, and
+  genesis job stop <id> show and stop it.
+
+  Use genesis schedule when the same event should fire on a duration.
+  genesis schedule --each=15m --emit '{CloudEvent}' repeats that one
+  event. --each is a duration of at least 1m and at most 168h. The first
+  fire is one interval after the schedule is created. genesis schedule
+  list and genesis schedule cancel <id> manage it.
+  This is not a rules.d interval. Do not write interval or cron in rule YAML. The loader
+  rejects those fields.
+
   The shipped oracle is agents.d/oracle.yaml and rules.d/oracle.yaml, with
   user: oracle, home: /home/oracle, cwd: /home/oracle/workspace, and
   setup.workspace private. Its rule matches type dev.genesis.agent.finished

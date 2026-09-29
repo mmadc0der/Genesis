@@ -70,6 +70,29 @@ and no bearer. Port `8790` is the control panel, not that path. `source`
 is `urn:genesis:agent:<agent id>`. `202` returns the new run ids. `204`
 means nothing matched. Any other status is a listener failure.
 
+`genesis` is on PATH for every agent, including a dedicated OS user. Agents
+run `genesis job` and `genesis schedule`. They do not invent packages, PEMs,
+or sync tokens, and they do not curl with `GENESIS_SYNC_TOKEN`. Both
+commands post one CloudEvent on the listener accept path and do not send a
+bearer.
+
+Use `genesis job` when work must keep running after the turn.
+`genesis job start --emit '{CloudEvent}' -- <command>` starts that command.
+When the command exits, Genesis posts that CloudEvent so a rule can match
+it and another run can resume. Neural-net training is the example: wake
+when training ends. `genesis job list`, `genesis job logs <id>`, and
+`genesis job stop <id>` show and stop it.
+
+Use `genesis schedule` when the same event should fire on a duration.
+`genesis schedule --each=15m --emit '{CloudEvent}'` repeats that one event.
+`--each` is a duration of at least 1m and at most 168h. The first fire is
+one interval after the schedule is created. `genesis schedule list` and
+`genesis schedule cancel <id>` manage it. This is not a `rules.d` interval.
+Do not write `interval` or `cron` in rule YAML. The loader rejects those
+fields. A `rules.d` timer, when one exists, is a listener clock on the rule
+file. The CLI is the ticker agents start, and it fires by posting to
+`/events`.
+
 The finish event and session continuation belong in a reviewer's
 instructions. Other workers do not need them. When a session ends, the
 system emits `dev.genesis.agent.finished` with `subject` equal to that

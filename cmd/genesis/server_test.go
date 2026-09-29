@@ -141,6 +141,9 @@ func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
 			deepSeekAPIKey:     "process-secret",
 			homeEnvKey:         firstHome,
 			systemPromptEnvKey: "Test agent instructions.",
+			"PATH":             ensureGenesisOnPATH(""),
+			eventsURLEnv:       defaultEventsURL,
+			genesisAgentEnv:    "first-agent",
 		}) {
 		t.Fatalf("first invocation = %#v", got)
 	}
@@ -150,6 +153,9 @@ func TestEventServerRoutesToAllMatchesAsynchronously(t *testing.T) {
 			deepSeekAPIKey:     "process-secret",
 			homeEnvKey:         secondHome,
 			systemPromptEnvKey: "Test agent instructions.",
+			"PATH":             ensureGenesisOnPATH(""),
+			eventsURLEnv:       defaultEventsURL,
+			genesisAgentEnv:    "second-agent",
 		}) {
 		t.Fatalf("second invocation = %#v", got)
 	}
@@ -842,13 +848,15 @@ func TestRuntimeEnvironmentUsesNamedSecretsAndStaysIsolated(t *testing.T) {
 		Cwd:          "/tmp/work",
 		Home:         "/tmp/home",
 		Env:          declared,
-		Secrets:      []string{deepSeekAPIKey, "OTHER_SECRET"},
+		Secrets:      []string{deepSeekAPIKey, "OTHER_SECRET", syncTokenEnv, webhookSecretName},
 	}
 	environment := runtimeEnvironment(definition, map[string]string{
-		deepSeekAPIKey: "process-secret",
-		"OTHER_SECRET": "other-value",
-		"IGNORED":      "must-not-copy",
-	})
+		deepSeekAPIKey:    "process-secret",
+		"OTHER_SECRET":    "other-value",
+		"IGNORED":         "must-not-copy",
+		syncTokenEnv:      "sync-secret",
+		webhookSecretName: "hook-secret",
+	}, "")
 
 	if environment[deepSeekAPIKey] != "process-secret" || environment["OTHER_SECRET"] != "other-value" {
 		t.Fatalf("secrets = %#v", environment)
@@ -856,15 +864,27 @@ func TestRuntimeEnvironmentUsesNamedSecretsAndStaysIsolated(t *testing.T) {
 	if environment[homeEnvKey] != "/tmp/home" || environment[systemPromptEnvKey] != "Standing instructions." {
 		t.Fatalf("derived env = %#v", environment)
 	}
-	if environment["PATH"] != "/agent/bin" || environment["IGNORED"] != "" {
+	if !pathHasDir(environment["PATH"], "/agent/bin") || environment["IGNORED"] != "" {
 		t.Fatalf("runtime environment = %#v", environment)
+	}
+	if dir := genesisExecutableDir(); dir != "" && !pathHasDir(environment["PATH"], dir) {
+		t.Fatalf("PATH missing genesis: %q", environment["PATH"])
+	}
+	if environment[eventsURLEnv] != defaultEventsURL {
+		t.Fatalf("events url = %q", environment[eventsURLEnv])
+	}
+	if _, present := environment[syncTokenEnv]; present {
+		t.Fatal("sync token leaked into the runtime environment")
+	}
+	if _, present := environment[webhookSecretName]; present {
+		t.Fatal("webhook secret leaked into the runtime environment")
 	}
 	environment["PATH"] = "/changed"
 	if declared["PATH"] != "/agent/bin" {
 		t.Fatal("runtime environment mutated the agent")
 	}
 
-	credentialFree := runtimeEnvironment(definition, map[string]string{})
+	credentialFree := runtimeEnvironment(definition, map[string]string{}, "")
 	if _, present := credentialFree[deepSeekAPIKey]; present {
 		t.Fatalf("empty secrets were injected: %#v", credentialFree)
 	}
@@ -877,7 +897,7 @@ func TestRuntimeEnvironmentUsesNamedSecretsAndStaysIsolated(t *testing.T) {
 
 	dedicated := definition
 	dedicated.User = "workspace-janitor"
-	withUser := runtimeEnvironment(dedicated, map[string]string{})
+	withUser := runtimeEnvironment(dedicated, map[string]string{}, "")
 	if withUser["USER"] != "workspace-janitor" || withUser["LOGNAME"] != "workspace-janitor" || withUser["SHELL"] != agentShell {
 		t.Fatalf("dedicated identity env = %#v", withUser)
 	}
