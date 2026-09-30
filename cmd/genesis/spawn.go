@@ -401,16 +401,16 @@ func spawnEnv(identity reconciledIdentity, extra map[string]string) []string {
 		"USER":    identity.Username,
 		"LOGNAME": identity.Username,
 		"SHELL":   agentShell,
-		"PATH":    "/usr/local/bin:/usr/bin:/bin",
+		"PATH":    defaultAgentPATH,
 	}
 	for key, value := range extra {
-		if key == privilegedFDEnv || key == syncTokenEnv || key == listenerUserEnv || droppedChildEnv(key) {
+		if key == privilegedFDEnv || key == syncTokenEnv || key == webhookSecretName || key == listenerUserEnv || droppedChildEnv(key) {
 			continue
 		}
 		if key == "" || strings.Contains(key, "=") || strings.ContainsRune(key, '\x00') {
 			continue
 		}
-		if containsPrivateKey(value) {
+		if containsPrivateKey(value) || leakedSecretStore(value) {
 			continue
 		}
 		env[key] = value
@@ -419,6 +419,7 @@ func spawnEnv(identity reconciledIdentity, extra map[string]string) []string {
 	env["USER"] = identity.Username
 	env["LOGNAME"] = identity.Username
 	env["SHELL"] = agentShell
+	env["PATH"] = ensureGenesisOnPATH(env["PATH"])
 	out := make([]string, 0, len(env))
 	for key, value := range env {
 		out = append(out, key+"="+value)

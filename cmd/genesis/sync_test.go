@@ -310,12 +310,14 @@ func TestSyncRulesOnlySkipsUserReconcile(t *testing.T) {
 func TestSanitizedChildEnvOmitsSyncSecrets(t *testing.T) {
 	t.Setenv(syncTokenEnv, "must-not-leak")
 	t.Setenv(privilegedFDEnv, "3")
+	t.Setenv(webhookSecretName, "hook-secret")
+	t.Setenv("SECRET_DIR", "/var/lib/genesis/secrets")
 	t.Setenv("GENESIS_CAPTURE", "/tmp/keep")
 	foundCapture := false
 	for _, item := range sanitizedChildEnv() {
-		key, _, _ := strings.Cut(item, "=")
-		if key == syncTokenEnv || key == privilegedFDEnv {
-			t.Fatalf("leaked %s", key)
+		key, value, _ := strings.Cut(item, "=")
+		if key == syncTokenEnv || key == privilegedFDEnv || key == webhookSecretName || value == "/var/lib/genesis/secrets" {
+			t.Fatalf("leaked %s", item)
 		}
 		if key == "GENESIS_CAPTURE" {
 			foundCapture = true

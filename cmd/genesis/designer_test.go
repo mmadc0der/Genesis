@@ -112,6 +112,20 @@ func TestCommittedDesignerIsSharedUIDConfigEditor(t *testing.T) {
 		"There is no local-project type.",
 		"does not create a local project",
 		"/var/lib/genesis/data/runs",
+		"on PATH for every agent",
+		"dedicated OS user",
+		"genesis job",
+		"genesis schedule",
+		"Do not invent packages, PEMs, or sync tokens.",
+		"Do not curl with GENESIS_SYNC_TOKEN",
+		"listener accept path",
+		"after this turn",
+		"--each=15m",
+		"Neural-net training",
+		"genesis job stop",
+		"genesis schedule cancel",
+		"not a rules.d interval",
+		"at least 1m",
 	} {
 		if !strings.Contains(designer.Instructions, phrase) {
 			t.Fatalf("designer instructions missing %q", phrase)

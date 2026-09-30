@@ -667,8 +667,8 @@ func sanitizedChildEnv() []string {
 	environment := os.Environ()
 	filtered := make([]string, 0, len(environment))
 	for _, item := range environment {
-		key, _, _ := strings.Cut(item, "=")
-		if key == privilegedFDEnv || key == syncTokenEnv || droppedChildEnv(key) || containsPrivateKey(item) {
+		key, value, _ := strings.Cut(item, "=")
+		if key == privilegedFDEnv || key == syncTokenEnv || key == webhookSecretName || droppedChildEnv(key) || containsPrivateKey(item) || leakedSecretStore(value) {
 			continue
 		}
 		filtered = append(filtered, item)

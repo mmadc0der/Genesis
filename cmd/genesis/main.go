@@ -21,6 +21,10 @@ func main() {
 		runLaunchFromArgs(logger, args)
 	case "control":
 		runControl(logger, args)
+	case "job":
+		runJob(logger, args)
+	case "schedule":
+		runSchedule(logger, args)
 	default:
 		logger.Error("unknown command", "command", command)
 		os.Exit(2)
@@ -92,6 +96,7 @@ func runListen(logger *slog.Logger, args []string) {
 		secrets:      inheritedEnvironment(),
 		logger:       logger,
 		syncToken:    syncToken,
+		eventsURL:    eventsURLFromListen(listen),
 		coordinator:  coordinator,
 		store:        store,
 	}

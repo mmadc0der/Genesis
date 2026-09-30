@@ -113,6 +113,7 @@ type eventServer struct {
 	secrets         map[string]string
 	logger          *slog.Logger
 	syncToken       string
+	eventsURL       string
 	coordinator     privilegedCoordinator
 	store           *runStore
 	verifyWebhook   webhookVerifier
@@ -243,7 +244,7 @@ func (s *eventServer) dispatchCloudEvent(w http.ResponseWriter, event cloudEvent
 			http.Error(w, "failed to create run ID", http.StatusInternalServerError)
 			return
 		}
-		document := snapshotInvocation(event, matched, definition, runID, s.secrets)
+		document := snapshotInvocation(event, matched, definition, runID, s.secrets, s.eventsURL)
 		if err := s.store.Accept(&document, secretValues(s.secrets, definition.Secrets, document.Env)); err != nil {
 			s.log().Error("create run storage", "rule", matched.name, "agent", definition.id, "run_id", runID, "error", err)
 			for _, previous := range invocations {
@@ -286,6 +287,7 @@ func snapshotInvocation(
 	definition agentDefinition,
 	runID string,
 	secrets map[string]string,
+	eventsURL string,
 ) invocation {
 	gitAccess := ""
 	credential := ""
@@ -305,7 +307,7 @@ func snapshotInvocation(
 		Cwd:             definition.Cwd,
 		Home:            definition.Home,
 		Instructions:    definition.Instructions,
-		Env:             runtimeEnvironment(definition, secrets),
+		Env:             runtimeEnvironment(definition, secrets, eventsURL),
 		Git:             gitAccess,
 		Credential:      credential,
 		ReasoningEffort: definition.ReasoningEffort,
@@ -332,15 +334,23 @@ func inheritedEnvironment() map[string]string {
 	return environment
 }
 
-func runtimeEnvironment(definition agentDefinition, secrets map[string]string) map[string]string {
-	environment := make(map[string]string, len(definition.Env)+len(definition.Secrets)+5)
+func runtimeEnvironment(definition agentDefinition, secrets map[string]string, eventsURL string) map[string]string {
+	environment := make(map[string]string, len(definition.Env)+len(definition.Secrets)+8)
 	for key, value := range definition.Env {
+		if agentDeniedEnv(key) || leakedSecretStore(value) || containsPrivateKey(value) {
+			continue
+		}
 		environment[key] = value
 	}
 	for _, name := range definition.Secrets {
-		if value := secrets[name]; value != "" {
-			environment[name] = value
+		if agentDeniedEnv(name) {
+			continue
 		}
+		value := secrets[name]
+		if value == "" || leakedSecretStore(value) || containsPrivateKey(value) {
+			continue
+		}
+		environment[name] = value
 	}
 	environment[homeEnvKey] = definition.Home
 	environment[systemPromptEnvKey] = definition.Instructions
@@ -348,6 +358,14 @@ func runtimeEnvironment(definition agentDefinition, secrets map[string]string) m
 		environment["USER"] = definition.User
 		environment["LOGNAME"] = definition.User
 		environment["SHELL"] = agentShell
+	}
+	environment["PATH"] = ensureGenesisOnPATH(environment["PATH"])
+	if strings.TrimSpace(eventsURL) == "" {
+		eventsURL = defaultEventsURL
+	}
+	environment[eventsURLEnv] = eventsURL
+	if definition.id != "" && !strings.ContainsAny(definition.id, `/\`) {
+		environment[genesisAgentEnv] = definition.id
 	}
 	return environment
 }
@@ -615,6 +633,9 @@ func (a agentDefinition) validate() error {
 		if _, duplicate := seenSecrets[name]; duplicate {
 			return fmt.Errorf("duplicate secret %q", name)
 		}
+		if agentDeniedEnv(name) {
+			return fmt.Errorf("secrets must not declare %s", name)
+		}
 		if source, reserved := reservedEnvKey(name, a.User != ""); reserved {
 			return fmt.Errorf("secrets must not declare %s; Genesis sets it from %s", name, source)
 		}
@@ -628,8 +649,14 @@ func (a agentDefinition) validate() error {
 		if strings.ContainsRune(value, '\x00') {
 			return fmt.Errorf("env[%q] must contain no NUL", key)
 		}
+		if leakedSecretStore(value) {
+			return fmt.Errorf("env[%q] must not name the secret store", key)
+		}
 		if key == deepSeekAPIKey {
 			return fmt.Errorf("env must not declare %s; named secrets are copied from the Genesis process", key)
+		}
+		if agentDeniedEnv(key) {
+			return fmt.Errorf("env must not declare %s", key)
 		}
 		if _, secret := seenSecrets[key]; secret {
 			return fmt.Errorf("env must not declare %s; it is listed in secrets", key)
@@ -681,6 +708,10 @@ func reservedEnvKey(name string, dedicated bool) (string, bool) {
 		return "", false
 	case githubTokenEnv, ghTokenEnv:
 		return "the run installation token", true
+	case eventsURLEnv:
+		return "the listener address", true
+	case genesisAgentEnv:
+		return "the agent id", true
 	default:
 		return "", false
 	}

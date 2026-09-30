@@ -266,8 +266,14 @@ func TestSpawnEnvStripsPrivilegedKeysAndIgnoresParentPath(t *testing.T) {
 	if _, ok := got[listenerUserEnv]; ok {
 		t.Fatal("leaked listener user")
 	}
-	if got["PATH"] != "/agent/bin" {
+	if !pathHasDir(got["PATH"], "/agent/bin") {
 		t.Fatalf("PATH = %q", got["PATH"])
+	}
+	if dir := genesisExecutableDir(); dir != "" && !pathHasDir(got["PATH"], dir) {
+		t.Fatalf("PATH missing genesis: %q", got["PATH"])
+	}
+	if strings.Contains(got["PATH"], "/root/evil-bin") {
+		t.Fatalf("parent PATH leaked: %q", got["PATH"])
 	}
 	if got["HOME"] != "/home/workspace-janitor" || got["USER"] != "workspace-janitor" || got["SHELL"] != agentShell {
 		t.Fatalf("identity env = %#v", got)
@@ -293,8 +299,22 @@ func TestSpawnEnvStripsPrivilegedKeysAndIgnoresParentPath(t *testing.T) {
 		key, value, _ := strings.Cut(item, "=")
 		plainMap[key] = value
 	}
-	if plainMap["PATH"] != "/usr/local/bin:/usr/bin:/bin" {
+	if !pathHasDir(plainMap["PATH"], "/usr/local/bin") || !pathHasDir(plainMap["PATH"], "/bin") {
 		t.Fatalf("default PATH = %q", plainMap["PATH"])
+	}
+	if _, ok := plainMap[webhookSecretName]; ok {
+		t.Fatal("default spawn env kept the webhook secret")
+	}
+
+	denied := spawnEnv(reconciledIdentity{Username: "workspace-janitor", Home: "/home/workspace-janitor"}, map[string]string{
+		webhookSecretName: "hook-secret",
+		"SECRET_DIR":      "/var/lib/genesis/secrets",
+	})
+	for _, item := range denied {
+		key, value, _ := strings.Cut(item, "=")
+		if key == webhookSecretName || value == "/var/lib/genesis/secrets" {
+			t.Fatalf("spawn env kept secret store material: %s", item)
+		}
 	}
 }
 
