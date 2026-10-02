@@ -49,6 +49,11 @@ SESSION_LOG_OFF_PATCH = f"""\
 ASSISTANT_STREAM_PLUGIN_NAME = "genesis-assistant-stream.mjs"
 EMIT_PLUGIN_NAME = "genesis-emit.mjs"
 RESUME_PLUGIN_NAME = "genesis-session-resume.mjs"
+# Discarded by genesis-session-resume when GENESIS_TRANSPORT_RESTART is set.
+# session.run still needs a prompt string so the SDK creates or resumes the
+# agent. The plugin drops that prompt before it becomes a user message.
+TRANSPORT_RESTART_PROMPT = " "
+
 RESUME_PLUGIN = r"""/**
  * Resume an existing sdk-minimal session instead of creating a second one.
  *
@@ -59,6 +64,13 @@ RESUME_PLUGIN = r"""/**
  * Cordis patch rows cannot wrap that server method, so this plugin replaces
  * agents.create before the first prompt. If create or resume is missing, apply
  * throws and the process does not pretend the session was resumed.
+ *
+ * GENESIS_TRANSPORT_RESTART=1 is a Genesis process restart of that same
+ * session after a DSH TRANSPORT failure. The SDK still sends session/prompt,
+ * which would append a user message. This plugin resumes the log, drops that
+ * prompt, and wakes the agent loop so the next model request is the existing
+ * history. A placeholder step message is used only to pass the loop's empty
+ * first-step check, and its user/message append is discarded.
  *
  * A log is session.jsonl or session.vN.jsonl under
  * $DSH_HOME/sessions/<project>/<encoded session id>/. The current pin writes
@@ -72,6 +84,7 @@ export const name = 'genesis-session-resume'
 export const inject = ['agents']
 
 const SESSION_LOG_NAME = /^session(?:\.v[1-9][0-9]*)?\.jsonl$/
+const RESTART_MESSAGE_ID = 'genesis-transport-restart'
 
 export function encodeSegment(raw) {
   if (typeof raw !== 'string' || raw.length === 0) {
@@ -134,6 +147,58 @@ export function resumeOptions(options) {
   }
 }
 
+function restartStepMessage() {
+  return {
+    id: RESTART_MESSAGE_ID,
+    role: 'user',
+    content: [],
+    source: { kind: 'plugin', plugin: 'genesis-session-resume' },
+  }
+}
+
+function armTransportRestart(agent) {
+  if (
+    !agent ||
+    typeof agent.followup !== 'function' ||
+    typeof agent.wakeDriver !== 'function' ||
+    typeof agent.preStep !== 'function' ||
+    !agent.session ||
+    typeof agent.session.append !== 'function'
+  ) {
+    throw new Error('genesis-session-resume: transport restart cannot drive the resumed agent')
+  }
+  if (agent.followup.genesisTransportRestart) return
+  const originalFollowup = agent.followup
+  const originalPreStep = agent.preStep
+  const originalAppend = agent.session.append
+  agent.session.append = function genesisTransportRestartAppend(type, data, intent) {
+    if (type === 'user/message' && data && data.id === RESTART_MESSAGE_ID) {
+      return { type, data, seq: 0 }
+    }
+    return originalAppend.call(this, type, data, intent)
+  }
+  agent.preStep = async function genesisTransportRestartPreStep(target, position) {
+    const decision = await originalPreStep.call(this, target, position)
+    if (!decision || decision.kind === 'reject') return decision
+    const messages = decision.messages || []
+    if (position && position.step === 1 && messages.length === 0) {
+      return { ...decision, messages: [restartStepMessage()] }
+    }
+    return decision
+  }
+  let woke = false
+  const wrapped = function genesisTransportRestartFollowup(message) {
+    if (process.env.GENESIS_TRANSPORT_RESTART !== '1') {
+      return originalFollowup.call(this, message)
+    }
+    if (woke) return
+    woke = true
+    agent.wakeDriver()
+  }
+  wrapped.genesisTransportRestart = true
+  agent.followup = wrapped
+}
+
 function install(agents) {
   if (!agents || typeof agents.create !== 'function' || typeof agents.resume !== 'function') {
     throw new Error('genesis-session-resume: agents.create and agents.resume are required')
@@ -143,6 +208,14 @@ function install(agents) {
   const wrapped = async function genesisSessionResumeCreate(options) {
     const sessionId = options && typeof options.sessionId === 'string' ? options.sessionId : ''
     const home = typeof process.env.DSH_HOME === 'string' ? process.env.DSH_HOME : ''
+    if (process.env.GENESIS_TRANSPORT_RESTART === '1') {
+      if (!sessionId || !hasSessionLog(home, sessionId)) {
+        throw new Error('genesis-session-resume: transport restart requires a persisted session')
+      }
+      const handle = await agents.resume.call(this, resumeOptions(options))
+      armTransportRestart(handle && handle.agent)
+      return handle
+    }
     if (sessionId && hasSessionLog(home, sessionId)) {
       return agents.resume.call(this, resumeOptions(options))
     }
@@ -419,9 +492,11 @@ def execute(
         harness_factory = DeepSeekHarness
 
     # Standing identity is DSH_SYSTEM_PROMPT (sdk-minimal personaPrefix hook).
-    # A continuation passes user_message as the follow-up text. Every other
-    # run keeps the compact CloudEvent JSON as the sole user message. It is
-    # not prepended onto the standing identity.
+    # A continuation passes user_message as the follow-up text. A transport
+    # restart passes a prompt the resume plugin discards, so the resumed
+    # session gains no user message. Every other run keeps the compact
+    # CloudEvent JSON as the sole user message. It is not prepended onto
+    # the standing identity.
     # GITHUB_TOKEN and SSH_AUTH_SOCK come only from the process environment
     # that root set for this run. Invocation JSON cannot supply them.
     delivered: dict[str, str] = {}
@@ -442,6 +517,8 @@ def execute(
     environment["HOME"] = invocation["home"]
     environment["DSH_SYSTEM_PROMPT"] = invocation["instructions"]
     environment.update(delivered)
+    if invocation.get("transport_restart") is True:
+        environment["GENESIS_TRANSPORT_RESTART"] = "1"
 
     dsh_home = invocation["dsh_home"]
     home_path = Path(dsh_home)
@@ -453,7 +530,18 @@ def execute(
         raise ValueError("dsh_home must be distinct from cwd")
 
     user_message = invocation.get("user_message")
-    if user_message is None:
+    session_id = invocation.get("session_id")
+    if session_id is not None and (not isinstance(session_id, str) or not session_id):
+        raise ValueError("session_id must be a non-empty string when set")
+    # A transport restart resumes the persisted session and must not append a
+    # user turn. The prompt string only opens session/prompt; the resume plugin
+    # discards it. Every other run keeps either the continuation text or the
+    # compact CloudEvent JSON as the sole user message.
+    if invocation.get("transport_restart") is True:
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("transport_restart requires session_id")
+        message = TRANSPORT_RESTART_PROMPT
+    elif user_message is None:
         message = json.dumps(
             invocation["event"],
             ensure_ascii=False,
@@ -464,9 +552,6 @@ def execute(
         raise ValueError("user_message must be a non-empty string")
     else:
         message = user_message
-    session_id = invocation.get("session_id")
-    if session_id is not None and (not isinstance(session_id, str) or not session_id):
-        raise ValueError("session_id must be a non-empty string when set")
 
     patch_path = write_runtime_patch(home_path)
     harness_options = {

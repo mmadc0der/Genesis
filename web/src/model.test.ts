@@ -192,6 +192,22 @@ describe("control panel model", () => {
     expect(retry.text).toContain("2");
     expect(retry.text).toContain("RATE_LIMIT");
     expect(retry.text).toContain("slow down");
+
+    const restarted = eventLine(
+      event("11", "dev.genesis.run.restart", {
+        reason: "transport",
+        continued_from: "gen_prev",
+      }),
+    );
+    expect(restarted.kind).toBe("meta");
+    expect(restarted.text).toBe("Restarted after transport from gen_prev");
+    const next = eventLine(
+      event("12", "dev.genesis.run.restart", {
+        reason: "transport",
+        restart_run_id: "gen_next",
+      }),
+    );
+    expect(next.text).toBe("Restarted after transport as gen_next");
   });
 
   it("appends live deltas onto the open row and does not paint usage or finish", () => {

@@ -401,6 +401,15 @@ function tryMinify(raw: string): string | null {
   return null;
 }
 
+function restartText(data: Record<string, unknown>): string {
+  const reason = stringField(data, "reason") || "transport";
+  const from = stringField(data, "continued_from");
+  const next = stringField(data, "restart_run_id");
+  if (from) return `Restarted after ${reason} from ${from}`;
+  if (next) return `Restarted after ${reason} as ${next}`;
+  return `Restarted after ${reason}`;
+}
+
 function singleLine(text: string, limit: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   const chars = Array.from(flat);
@@ -426,6 +435,8 @@ export function eventLine(event: LifecycleEvent): ChatLine {
       return { kind: "assistant", text: assistantText(data) };
     case "dev.genesis.run.retry":
       return { kind: "retry", text: retryText(data) };
+    case "dev.genesis.run.restart":
+      return { kind: "meta", text: restartText(data) };
     case "dev.genesis.run.chunk":
       return { kind: "assistant", text: chunkText(data) };
     case "dev.genesis.run.accepted":

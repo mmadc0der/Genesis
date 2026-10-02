@@ -176,6 +176,157 @@ printf '%s\n' '{"v":1,"type":"result","deepseek_session_id":"session-fail","fini
 	}
 }
 
+func TestTransportErrorRestartsPreviousSession(t *testing.T) {
+	agentsDir := t.TempDir()
+	rulesDir := t.TempDir()
+	cwd, home := writeNamedAgent(t, agentsDir, "worker.yaml", nil)
+	server, fake := newMatchServer(t, agentsDir, rulesDir, "gen_restarted")
+	document := sampleRunInvocation("gen_transport")
+	document.Agent = "worker"
+	document.Cwd = cwd
+	document.Home = home
+	if err := server.store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	frames := filepath.Join(t.TempDir(), "frames")
+	body := strings.Join([]string{
+		`{"v":1,"type":"session.created","run_id":"gen_transport","session_id":"session-transport"}`,
+		`{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"session-transport","event":{"type":"turn/end","seq":2,"data":{"reason":{"kind":"error","error":{"message":"socket hang up","code":"TRANSPORT"}}}}}}`,
+		`{"v":1,"type":"result","deepseek_session_id":"session-transport","finish_reason":"error","final_response":"","error":{"type":"DeepSeekRunError","message":"DeepSeek run finished with finish_reason='error' and an empty final response"},"diagnostics":{"turn_end":{"type":"turn/end","data":{"reason":{"kind":"error","error":{"message":"socket hang up","code":"TRANSPORT"}}}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(frames, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finished := 0
+	runner := processRunner{
+		pythonPath: writeExecutable(t, "#!/bin/sh\ncat >/dev/null\ncat "+frames+"\nexit 1\n"),
+		source:     "src",
+		logger:     slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		store:      server.store,
+		dispatch: func(cloudEvent) int {
+			finished++
+			return http.StatusNoContent
+		},
+		restart: server.restartAfterTransport,
+	}
+	runner.Run(document)
+	if finished != 0 {
+		t.Fatalf("finish events = %d", finished)
+	}
+	got := takeInvocations(t, fake.invocations, 1)
+	expectNoInvocation(t, fake.invocations)
+	next := got[0]
+	if next.RunID != "gen_restarted" || next.Agent != "worker" || next.Rule != document.Rule {
+		t.Fatalf("restarted %#v", next)
+	}
+	if next.Rule == continuationRuleName || next.UserMessage != "" || !next.TransportRestart {
+		t.Fatalf("restart looked like a user continuation: %#v", next)
+	}
+	if next.SessionID != "session-transport" || next.ContinuedFrom != "gen_transport" || next.DshHome != document.DshHome {
+		t.Fatalf("session = %#v", next)
+	}
+	record, err := readSessionRecord(filepath.Join(next.RunDir, sessionFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Restart != transportRestartReason || record.ContinuedFrom != "gen_transport" || record.SessionID != "session-transport" {
+		t.Fatalf("session.json = %#v", record)
+	}
+	previous := readRunEvents(t, server.store, "gen_transport")
+	if previous[len(previous)-1].Type != lifecycleTypeEnd {
+		t.Fatalf("tail = %s", previous[len(previous)-1].Type)
+	}
+	var sawRestart bool
+	for _, event := range previous {
+		if event.Type != lifecycleTypeRestart {
+			continue
+		}
+		sawRestart = true
+		var data map[string]any
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		if data["reason"] != transportRestartReason || data["restart_run_id"] != "gen_restarted" || data["session_id"] != "session-transport" {
+			t.Fatalf("restart = %#v", data)
+		}
+	}
+	if !sawRestart {
+		t.Fatalf("missing restart event: %v", typesOf(previous))
+	}
+	restartedEvents := readRunEvents(t, server.store, "gen_restarted")
+	if len(restartedEvents) < 2 || restartedEvents[0].Type != lifecycleTypeAccepted || restartedEvents[1].Type != lifecycleTypeRestart {
+		t.Fatalf("new journal = %v", typesOf(restartedEvents))
+	}
+}
+
+func TestAuthErrorDoesNotRestartSession(t *testing.T) {
+	store := testStore(t)
+	document := sampleRunInvocation("gen_auth")
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	frames := filepath.Join(t.TempDir(), "frames")
+	body := strings.Join([]string{
+		`{"v":1,"type":"session.created","run_id":"gen_auth","session_id":"session-auth"}`,
+		`{"v":1,"type":"notification","method":"session.event","payload":{"sessionId":"session-auth","event":{"type":"turn/end","seq":2,"data":{"reason":{"kind":"error","error":{"message":"bad key","code":"AUTH","status":401}}}}}}`,
+		`{"v":1,"type":"result","deepseek_session_id":"session-auth","finish_reason":"error","final_response":"","error":null,"diagnostics":{"turn_end":{"type":"turn/end","data":{"reason":{"kind":"error","error":{"message":"bad key","code":"AUTH","status":401}}}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(frames, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finished := 0
+	runner := processRunner{
+		pythonPath: writeExecutable(t, "#!/bin/sh\ncat >/dev/null\ncat "+frames+"\nexit 1\n"),
+		source:     "src",
+		logger:     slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		store:      store,
+		dispatch: func(event cloudEvent) int {
+			if event.stringAttributeOrEmpty("type") == agentFinishedType {
+				finished++
+			}
+			return http.StatusNoContent
+		},
+		restart: func(invocation, string) (string, bool) {
+			t.Fatal("auth failure restarted the session")
+			return "", false
+		},
+	}
+	runner.Run(document)
+	if finished != 1 {
+		t.Fatalf("finish events = %d", finished)
+	}
+}
+
+func TestTransportRestartStopsAfterThree(t *testing.T) {
+	agentsDir := t.TempDir()
+	rulesDir := t.TempDir()
+	cwd, home := writeNamedAgent(t, agentsDir, "worker.yaml", nil)
+	server, fake := newMatchServer(t, agentsDir, rulesDir, "gen_r1", "gen_r2", "gen_r3", "gen_r4")
+	document := sampleRunInvocation("gen_root")
+	document.Agent = "worker"
+	document.Cwd = cwd
+	document.Home = home
+	if err := server.store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	current := document
+	for _, want := range []string{"gen_r1", "gen_r2", "gen_r3"} {
+		runID, ok := server.restartAfterTransport(current, "session-root")
+		if !ok || runID != want {
+			t.Fatalf("restart = %s ok=%v want %s", runID, ok, want)
+		}
+		got := takeInvocations(t, fake.invocations, 1)
+		current = got[0]
+		if current.UserMessage != "" || !current.TransportRestart || current.SessionID != "session-root" {
+			t.Fatalf("invocation = %#v", current)
+		}
+	}
+	if _, ok := server.restartAfterTransport(current, "session-root"); ok {
+		t.Fatal("fourth transport restart was accepted")
+	}
+	expectNoInvocation(t, fake.invocations)
+}
+
 func TestOracleFinishDoesNotStartOracle(t *testing.T) {
 	agentsDir := t.TempDir()
 	rulesDir := t.TempDir()

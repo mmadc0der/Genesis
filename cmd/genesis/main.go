@@ -108,6 +108,7 @@ func runListen(logger *slog.Logger, args []string) {
 		spawner:    asSpawner(coordinator),
 		agentsDir:  absoluteAgentsDir,
 		dispatch:   handler.dispatchIngress,
+		restart:    handler.restartAfterTransport,
 	}
 	if ipcClient, ok := coordinator.(*ipcCoordinator); ok {
 		handler.verifyWebhook = ipcClient.VerifyWebhook

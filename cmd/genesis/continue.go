@@ -130,6 +130,87 @@ func (s *eventServer) dispatchSessionContinue(w http.ResponseWriter, event cloud
 	}}})
 }
 
+// restartAfterTransport starts a new run on the same DSH session after the
+// harness retry budget is exhausted. It does not post session.continue and
+// does not set a user message. The caller journals the restart on the run
+// that failed. This method journals it on the new run.
+func (s *eventServer) restartAfterTransport(previous invocation, sessionID string) (string, bool) {
+	if s == nil || s.store == nil || s.runner == nil || strings.TrimSpace(sessionID) == "" {
+		return "", false
+	}
+	if previous.DshHome == "" || previous.Cwd == "" || previous.Agent == "" || previous.RunID == "" {
+		return "", false
+	}
+	s.mu.RLock()
+	syncing := s.syncing
+	current := s.generation
+	s.mu.RUnlock()
+	if syncing || current == nil {
+		s.log().Info("transport restart skipped", "run_id", previous.RunID, "error", "generation is not stable")
+		return "", false
+	}
+	definition, ok := current.agents[previous.Agent]
+	if !ok {
+		s.log().Info("transport restart skipped", "run_id", previous.RunID, "error", "agent is not in the active generation")
+		return "", false
+	}
+	if filepath.Clean(definition.Cwd) != filepath.Clean(previous.Cwd) {
+		s.log().Info("transport restart skipped", "run_id", previous.RunID, "error", "cwd does not match the agent")
+		return "", false
+	}
+	if err := validateStableDshHome(s.store.dataDir, previous.DshHome); err != nil {
+		s.log().Info("transport restart skipped", "run_id", previous.RunID, "error", err.Error())
+		return "", false
+	}
+	info, err := os.Stat(previous.DshHome)
+	if err != nil || !info.IsDir() {
+		s.log().Info("transport restart skipped", "run_id", previous.RunID, "error", "continuation home is missing")
+		return "", false
+	}
+	hops, err := s.store.transportRestartHops(previous.RunID)
+	if err != nil {
+		s.log().Info("transport restart skipped", "run_id", previous.RunID, "error", err.Error())
+		return "", false
+	}
+	if hops >= maxTransportRestarts {
+		s.log().Info("transport restart skipped", "run_id", previous.RunID, "error", fmt.Sprintf("restart would be attempt %d", hops+1))
+		return "", false
+	}
+
+	newRunID := s.newRunID
+	if newRunID == nil {
+		newRunID = newGenesisRunID
+	}
+	runID, err := newRunID()
+	if err != nil {
+		s.log().Error("create Genesis run ID", "error", err)
+		return "", false
+	}
+	document := previous
+	document.RunID = runID
+	document.RunDir = ""
+	document.SessionID = sessionID
+	document.ContinuedFrom = previous.RunID
+	document.UserMessage = ""
+	document.TransportRestart = true
+	if document.CorrelationID == "" {
+		document.CorrelationID = previous.RunID
+	}
+	if err := s.store.Accept(&document, secretValues(s.secrets, definition.Secrets, document.Env)); err != nil {
+		s.log().Error("create run storage", "run_id", runID, "error", err)
+		return "", false
+	}
+	if journal := s.store.journal(runID); journal != nil {
+		_ = journal.Publish(lifecycleTypeRestart, originGenesis, map[string]any{
+			"reason":         transportRestartReason,
+			"continued_from": previous.RunID,
+			"session_id":     sessionID,
+		})
+	}
+	s.startAgent(document, definition.parallelLimit(), definition.Secrets)
+	return runID, true
+}
+
 func (s *eventServer) refuseContinuation(runID string, reason error) {
 	if reason == nil {
 		reason = errors.New("continuation refused")

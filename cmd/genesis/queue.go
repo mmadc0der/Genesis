@@ -15,26 +15,27 @@ const queueFileName = "queue.json"
 // Secret values are not stored. They are copied back from the listener
 // when the run is started, including after a restart.
 type queuedRun struct {
-	Event           cloudEvent        `json:"event"`
-	Rule            string            `json:"rule"`
-	Agent           string            `json:"agent"`
-	RunID           string            `json:"run_id"`
-	User            string            `json:"user,omitempty"`
-	Cwd             string            `json:"cwd"`
-	Home            string            `json:"home"`
-	Instructions    string            `json:"instructions"`
-	Env             map[string]string `json:"env,omitempty"`
-	RunDir          string            `json:"run_dir"`
-	DshHome         string            `json:"dsh_home,omitempty"`
-	SessionID       string            `json:"session_id,omitempty"`
-	CorrelationID   string            `json:"correlation_id,omitempty"`
-	ContinuedFrom   string            `json:"continued_from,omitempty"`
-	UserMessage     string            `json:"user_message,omitempty"`
-	Git             string            `json:"git,omitempty"`
-	Credential      string            `json:"credential,omitempty"`
-	SecretNames     []string          `json:"secret_names,omitempty"`
-	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
-	acceptedAt      string
+	Event            cloudEvent        `json:"event"`
+	Rule             string            `json:"rule"`
+	Agent            string            `json:"agent"`
+	RunID            string            `json:"run_id"`
+	User             string            `json:"user,omitempty"`
+	Cwd              string            `json:"cwd"`
+	Home             string            `json:"home"`
+	Instructions     string            `json:"instructions"`
+	Env              map[string]string `json:"env,omitempty"`
+	RunDir           string            `json:"run_dir"`
+	DshHome          string            `json:"dsh_home,omitempty"`
+	SessionID        string            `json:"session_id,omitempty"`
+	CorrelationID    string            `json:"correlation_id,omitempty"`
+	ContinuedFrom    string            `json:"continued_from,omitempty"`
+	UserMessage      string            `json:"user_message,omitempty"`
+	TransportRestart bool              `json:"transport_restart,omitempty"`
+	Git              string            `json:"git,omitempty"`
+	Credential       string            `json:"credential,omitempty"`
+	SecretNames      []string          `json:"secret_names,omitempty"`
+	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
+	acceptedAt       string
 }
 
 func queuedRunPath(runDir string) string {
@@ -66,25 +67,26 @@ func writeQueuedRun(runDir string, document invocation, secretNames []string) er
 	names := append([]string(nil), secretNames...)
 	slices.Sort(names)
 	return writeJSONFile(queuedRunPath(runDir), queuedRun{
-		Event:           document.Event,
-		Rule:            document.Rule,
-		Agent:           document.Agent,
-		RunID:           document.RunID,
-		User:            document.User,
-		Cwd:             document.Cwd,
-		Home:            document.Home,
-		Instructions:    document.Instructions,
-		Env:             env,
-		RunDir:          runDir,
-		DshHome:         document.DshHome,
-		SessionID:       document.SessionID,
-		CorrelationID:   document.CorrelationID,
-		ContinuedFrom:   document.ContinuedFrom,
-		UserMessage:     document.UserMessage,
-		Git:             document.Git,
-		Credential:      document.Credential,
-		SecretNames:     names,
-		ReasoningEffort: document.ReasoningEffort,
+		Event:            document.Event,
+		Rule:             document.Rule,
+		Agent:            document.Agent,
+		RunID:            document.RunID,
+		User:             document.User,
+		Cwd:              document.Cwd,
+		Home:             document.Home,
+		Instructions:     document.Instructions,
+		Env:              env,
+		RunDir:           runDir,
+		DshHome:          document.DshHome,
+		SessionID:        document.SessionID,
+		CorrelationID:    document.CorrelationID,
+		ContinuedFrom:    document.ContinuedFrom,
+		UserMessage:      document.UserMessage,
+		TransportRestart: document.TransportRestart,
+		Git:              document.Git,
+		Credential:       document.Credential,
+		SecretNames:      names,
+		ReasoningEffort:  document.ReasoningEffort,
 	})
 }
 
@@ -133,24 +135,25 @@ func (record queuedRun) invocation(secrets map[string]string) invocation {
 		}
 	}
 	return invocation{
-		Event:           record.Event,
-		Rule:            record.Rule,
-		Agent:           record.Agent,
-		RunID:           record.RunID,
-		User:            record.User,
-		Cwd:             record.Cwd,
-		Home:            record.Home,
-		Instructions:    record.Instructions,
-		Env:             env,
-		RunDir:          record.RunDir,
-		DshHome:         record.DshHome,
-		SessionID:       record.SessionID,
-		CorrelationID:   record.CorrelationID,
-		ContinuedFrom:   record.ContinuedFrom,
-		UserMessage:     record.UserMessage,
-		Git:             record.Git,
-		Credential:      record.Credential,
-		ReasoningEffort: record.ReasoningEffort,
+		Event:            record.Event,
+		Rule:             record.Rule,
+		Agent:            record.Agent,
+		RunID:            record.RunID,
+		User:             record.User,
+		Cwd:              record.Cwd,
+		Home:             record.Home,
+		Instructions:     record.Instructions,
+		Env:              env,
+		RunDir:           record.RunDir,
+		DshHome:          record.DshHome,
+		SessionID:        record.SessionID,
+		CorrelationID:    record.CorrelationID,
+		ContinuedFrom:    record.ContinuedFrom,
+		UserMessage:      record.UserMessage,
+		TransportRestart: record.TransportRestart,
+		Git:              record.Git,
+		Credential:       record.Credential,
+		ReasoningEffort:  record.ReasoningEffort,
 	}
 }
 

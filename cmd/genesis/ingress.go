@@ -17,7 +17,12 @@ const (
 	// maxContinuationHops is the farthest hop index a run may have.
 	// The chain root is hop 0 and its first continuation is hop 1.
 	// A new run at hop 9 is refused.
-	maxContinuationHops     = 8
+	maxContinuationHops = 8
+	// maxTransportRestarts is how many times one chain may resume the same
+	// DSH session after a TRANSPORT failure. The next failure ends the run.
+	maxTransportRestarts    = 3
+	transportRestartReason  = "transport"
+	transportErrorCode      = "TRANSPORT"
 	continuationRuleName    = "session.continue"
 	continuationRefusedType = "ContinuationRefused"
 	syncInProgressType      = "SyncInProgress"

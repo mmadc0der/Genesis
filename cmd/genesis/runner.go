@@ -32,6 +32,9 @@ type processRunner struct {
 	agentsDir string
 	// dispatch is POST /events. Nil in runner unit tests that only journal.
 	dispatch func(cloudEvent) int
+	// restart resumes the same DSH session after a TRANSPORT failure.
+	// Nil leaves that failure as a normal ended run.
+	restart func(previous invocation, sessionID string) (string, bool)
 }
 
 type runnerResult struct {
@@ -57,6 +60,7 @@ type streamState struct {
 	errorMsg           string
 	turnEndFailure     bool
 	turnFailureMessage string
+	turnFailureCode    string
 }
 
 func (r processRunner) Run(document invocation) {
@@ -259,6 +263,9 @@ func (r processRunner) handleFrame(journal *runJournal, document invocation, lin
 				state.turnFailureMessage = message
 			}
 		}
+		if state.turnFailureCode == "" {
+			state.turnFailureCode = diagnosticsErrorCode(state.result.Diagnostics)
+		}
 		if state.turnEndFailure && isFinishWrapper(state.result.Error) {
 			state.result.Error = nil
 		}
@@ -292,6 +299,9 @@ func (r processRunner) handleNotification(journal *runJournal, document invocati
 			state.turnEndFailure = true
 			if message != "" {
 				state.turnFailureMessage = message
+			}
+			if code, _ := data["error_code"].(string); code != "" {
+				state.turnFailureCode = code
 			}
 		}
 	}
@@ -387,10 +397,26 @@ func (r processRunner) finish(
 	if state.failed || result.Error != nil || internalErr != nil || processErr != nil {
 		stateName = endStateFailed
 	}
+	restarted := ""
+	if r.restart != nil && transportFailure(state) {
+		sessionID := restartSessionID(state, journal, document)
+		if sessionID != "" {
+			if runID, ok := r.restart(document, sessionID); ok {
+				restarted = runID
+				_ = journal.Publish(lifecycleTypeRestart, originGenesis, map[string]any{
+					"reason":         transportRestartReason,
+					"restart_run_id": runID,
+					"session_id":     sessionID,
+				})
+			}
+		}
+	}
 	if err := journal.Publish(lifecycleTypeEnd, originGenesis, endPayload(exitCode, stateName)); err != nil {
 		logger.Error("persist end event", "genesis_run_id", document.RunID, "error", err)
 	}
-	r.publishAgentFinished(journal, document, stateName)
+	if restarted == "" {
+		r.publishAgentFinished(journal, document, stateName)
+	}
 
 	logErr := internalErr
 	if logErr == nil && !state.gotResult && processErr != nil && !state.turnEndFailure {

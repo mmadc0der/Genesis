@@ -321,6 +321,10 @@ func (s *runStore) Accept(inv *invocation, secretValues []string) error {
 	inv.CorrelationID = correlation
 	inv.DshHome = dshHome
 	inv.RunDir = runDir
+	restart := ""
+	if inv.TransportRestart {
+		restart = transportRestartReason
+	}
 	if err := writeSessionRecord(filepath.Join(runDir, sessionFileName), sessionRecord{
 		SessionID:     inv.SessionID,
 		DshHome:       dshHome,
@@ -328,6 +332,7 @@ func (s *runStore) Accept(inv *invocation, secretValues []string) error {
 		ContinuedFrom: inv.ContinuedFrom,
 		Cwd:           inv.Cwd,
 		Agent:         inv.Agent,
+		Restart:       restart,
 	}); err != nil {
 		return err
 	}
@@ -623,6 +628,9 @@ type sessionRecord struct {
 	ContinuedFrom string `json:"continued_from"`
 	Cwd           string `json:"cwd"`
 	Agent         string `json:"agent"`
+	// Restart is "transport" when this run resumes a session after a DSH
+	// transport failure. Empty for every other run.
+	Restart string `json:"restart,omitempty"`
 }
 
 func stableDshHome(dataDir, rootRunID string) string {
@@ -776,6 +784,35 @@ func (s *runStore) continuationHops(runID string) (int, error) {
 		}
 		hops++
 		if hops > maxContinuationHops {
+			return hops, nil
+		}
+		current = record.ContinuedFrom
+	}
+}
+
+// transportRestartHops counts consecutive transport restarts ending at runID.
+// A run that is not itself a transport restart contributes zero.
+func (s *runStore) transportRestartHops(runID string) (int, error) {
+	hops := 0
+	seen := map[string]struct{}{}
+	current := runID
+	for {
+		if _, ok := seen[current]; ok {
+			return 0, fmt.Errorf("transport restart cycle at %s", current)
+		}
+		seen[current] = struct{}{}
+		if err := validateRunID(current); err != nil {
+			return 0, err
+		}
+		record, err := readSessionRecord(filepath.Join(s.dataDir, runsDirName, current, sessionFileName))
+		if err != nil {
+			return 0, err
+		}
+		if record.Restart != transportRestartReason {
+			return hops, nil
+		}
+		hops++
+		if record.ContinuedFrom == "" || hops > maxTransportRestarts {
 			return hops, nil
 		}
 		current = record.ContinuedFrom

@@ -382,7 +382,7 @@ are observations, not ingress: do not POST them back to `/events`.
 ```
 
 Lifecycle types are `dev.genesis.run.accepted`, `start`, `session.created`,
-`turn`, `tool`, `assistant`, `retry`, `chunk`, `result`, `error`, and `end`.
+`turn`, `tool`, `assistant`, `retry`, `restart`, `chunk`, `result`, `error`, and `end`.
 Each event has a unique `evt_` id, a per-run `sequence`, `time`, run/agent/rule
 identity, optional `sessionid`, and causation (`causeid` / `causesource` /
 `causetype`) to the incoming CloudEvent. Turn, tool, assistant, retry, and
@@ -414,7 +414,14 @@ Genesis emits JSON logs. The completion record contains `genesis_run_id`,
 when the SDK returned no explicit exception. Diagnostics include the relevant
 `turn/end`, related error events, and non-session notifications. Exceptions
 and runner stderr are retained. A failed run stays asynchronous and is not
-started again. Model-request retries stay inside the harness policy above.
+started again, except a `turn/end` failure whose error code is `TRANSPORT`.
+That failure journals `dev.genesis.run.restart` and starts another run on the
+same DSH session and `dsh_home`. The new run is not a
+`dev.genesis.session.continue` event and does not append a user message; the
+resume plugin drops the SDK prompt and wakes the existing history. Three such
+restarts in a row are the limit. The failed run does not emit
+`dev.genesis.agent.finished` when a restart is accepted. Model-request retries
+stay inside the harness policy above.
 Secret values never appear in journals, slog, or `stderr.log`.
 
 ## Credential-free verification

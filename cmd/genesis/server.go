@@ -86,8 +86,11 @@ type invocation struct {
 	CorrelationID string            `json:"correlation_id,omitempty"`
 	ContinuedFrom string            `json:"continued_from,omitempty"`
 	UserMessage   string            `json:"user_message,omitempty"`
-	Git           string            `json:"-"`
-	Credential    string            `json:"-"`
+	// TransportRestart resumes the previous DSH session after a TRANSPORT
+	// failure. It is not a session.continue event and carries no user message.
+	TransportRestart bool   `json:"transport_restart,omitempty"`
+	Git              string `json:"-"`
+	Credential       string `json:"-"`
 	// ReasoningEffort is copied from the agent at accept time. Empty omits
 	// the harness argument so DSH keeps its default.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`

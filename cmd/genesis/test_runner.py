@@ -489,6 +489,35 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(harness.message, "follow up")
         self.assertEqual(result["deepseek_session_id"], "session-kept")
 
+    def test_transport_restart_does_not_send_the_event_as_the_user_message(self):
+        event = {
+            "specversion": "1.0",
+            "id": "event-restart",
+            "source": "urn:test",
+            "type": "dev.genesis.test",
+        }
+        result = runner.execute(
+            self.invocation(
+                event=event,
+                session_id="session-kept",
+                transport_restart=True,
+            ),
+            harness_factory=FakeHarness,
+        )
+        harness = FakeHarness.instances[0]
+        self.assertEqual(harness.supplied_session_id, "session-kept")
+        self.assertEqual(harness.message, runner.TRANSPORT_RESTART_PROMPT)
+        self.assertNotIn("event-restart", harness.message)
+        self.assertEqual(harness.environment.get("GENESIS_TRANSPORT_RESTART"), "1")
+        self.assertEqual(result["deepseek_session_id"], "session-kept")
+
+    def test_transport_restart_requires_session_id(self):
+        with self.assertRaises(ValueError):
+            runner.execute(
+                self.invocation(transport_restart=True),
+                harness_factory=FakeHarness,
+            )
+
     def test_resume_plugin_appends_decision_instead_of_create(self):
         node = shutil.which("node")
         if node is None:
@@ -574,6 +603,94 @@ if (fresh.join(",") !== "create") {
                 **os.environ,
                 "DSH_HOME": str(home),
                 "SESSION_ID": session_id,
+            },
+        )
+        if completed.returncode != 0:
+            self.fail(completed.stderr or completed.stdout)
+
+    def test_resume_plugin_transport_restart_drops_the_prompt(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; resume decision was not executed")
+        plugin = Path(__file__).with_name("genesis_session_resume_plugin.mjs")
+        home = Path(self.temp.name) / "restart-home"
+        session_id = "session-restart"
+        log = home / "sessions" / "proj" / session_id / "session.v3.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_text('{"type":"session"}\n', encoding="utf-8")
+        script = r"""
+import { apply } from process.env.PLUGIN_PATH;
+
+const calls = [];
+const agents = {
+  async create() {
+    calls.push("create");
+    return { created: true };
+  },
+  async resume() {
+    const agent = {
+      followup(message) {
+        calls.push(["followup", message && message.id]);
+      },
+      wakeDriver() {
+        calls.push("wake");
+      },
+      async preStep() {
+        calls.push("preStep");
+        return { kind: "enter", messages: [] };
+      },
+      session: {
+        append(type, data) {
+          calls.push(["append", type, data && data.id]);
+          return { seq: 1 };
+        },
+      },
+    };
+    return { agent };
+  },
+};
+apply({ agents });
+const handle = await agents.create({ sessionId: process.env.SESSION_ID });
+handle.agent.followup({ id: "user-1", role: "user", content: [{ type: "text", text: "keep going" }] });
+const decision = await handle.agent.preStep("next-turn", { turn: 1, step: 1 });
+const ignored = handle.agent.session.append("user/message", decision.messages[0]);
+handle.agent.session.append("tool/call", { id: "real" });
+if (calls.includes("create") || calls.some((call) => Array.isArray(call) && call[0] === "followup")) {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+if (!calls.includes("wake") || !calls.includes("preStep")) {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+if (!decision.messages || decision.messages[0].id !== "genesis-transport-restart") {
+  console.error(JSON.stringify(decision));
+  process.exit(1);
+}
+if (ignored.seq !== 0 || calls.some((call) => Array.isArray(call) && call[0] === "append" && call[2] === "genesis-transport-restart")) {
+  console.error(JSON.stringify({ ignored, calls }));
+  process.exit(1);
+}
+if (!calls.some((call) => Array.isArray(call) && call[0] === "append" && call[2] === "real")) {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+"""
+        module = Path(self.temp.name) / "restart-check.mjs"
+        module.write_text(
+            script.replace("process.env.PLUGIN_PATH", json.dumps(plugin.as_uri())),
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [node, str(module)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "DSH_HOME": str(home),
+                "SESSION_ID": session_id,
+                "GENESIS_TRANSPORT_RESTART": "1",
             },
         )
         if completed.returncode != 0:

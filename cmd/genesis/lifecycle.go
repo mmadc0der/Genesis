@@ -19,6 +19,7 @@ const (
 	lifecycleTypeTool           = "dev.genesis.run.tool"
 	lifecycleTypeAssistant      = "dev.genesis.run.assistant"
 	lifecycleTypeRetry          = "dev.genesis.run.retry"
+	lifecycleTypeRestart        = "dev.genesis.run.restart"
 	lifecycleTypeChunk          = "dev.genesis.run.chunk"
 	lifecycleTypeResult         = "dev.genesis.run.result"
 	lifecycleTypeError          = "dev.genesis.run.error"
@@ -379,6 +380,67 @@ func mappedTurnFailure(data map[string]any) (message string, ok bool) {
 	}
 	message, _ = data["error_message"].(string)
 	return message, true
+}
+
+func transportFailure(state streamState) bool {
+	if state.result.FinishReason != nil && *state.result.FinishReason == endStateCompleted {
+		return false
+	}
+	if state.turnFailureCode == transportErrorCode {
+		return true
+	}
+	return diagnosticsErrorCode(state.result.Diagnostics) == transportErrorCode
+}
+
+func restartSessionID(state streamState, journal *runJournal, document invocation) string {
+	if state.result.DeepSeekSessionID != nil && *state.result.DeepSeekSessionID != "" {
+		return *state.result.DeepSeekSessionID
+	}
+	if journal != nil && journal.session() != "" {
+		return journal.session()
+	}
+	return document.SessionID
+}
+
+func diagnosticsErrorCode(diagnostics any) string {
+	root, ok := diagnostics.(map[string]any)
+	if !ok || root == nil {
+		return ""
+	}
+	if code := turnEndErrorCode(root["turn_end"]); code != "" {
+		return code
+	}
+	events, _ := root["events"].([]any)
+	for index := len(events) - 1; index >= 0; index-- {
+		if code := turnEndErrorCode(events[index]); code != "" {
+			return code
+		}
+	}
+	return ""
+}
+
+func turnEndErrorCode(value any) string {
+	event, ok := value.(map[string]any)
+	if !ok || event == nil {
+		return ""
+	}
+	if eventType, _ := event["type"].(string); eventType != "" && eventType != "turn/end" {
+		return ""
+	}
+	data, _ := event["data"].(map[string]any)
+	reason, _ := data["reason"].(map[string]any)
+	if reason == nil {
+		return ""
+	}
+	if kind, _ := reason["kind"].(string); kind != "" && kind != "error" {
+		return ""
+	}
+	failure, _ := reason["error"].(map[string]any)
+	if failure == nil {
+		return ""
+	}
+	code, _ := failure["code"].(string)
+	return code
 }
 
 func diagnosticsTurnFailure(diagnostics any) (string, bool) {

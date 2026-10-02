@@ -9,6 +9,13 @@
  * agents.create before the first prompt. If create or resume is missing, apply
  * throws and the process does not pretend the session was resumed.
  *
+ * GENESIS_TRANSPORT_RESTART=1 is a Genesis process restart of that same
+ * session after a DSH TRANSPORT failure. The SDK still sends session/prompt,
+ * which would append a user message. This plugin resumes the log, drops that
+ * prompt, and wakes the agent loop so the next model request is the existing
+ * history. A placeholder step message is used only to pass the loop's empty
+ * first-step check, and its user/message append is discarded.
+ *
  * A log is session.jsonl or session.vN.jsonl under
  * $DSH_HOME/sessions/<project>/<encoded session id>/. The current pin writes
  * session.v3.jsonl. Encoding matches dsh-session-persistence-jsonl encodeSegment.
@@ -21,6 +28,7 @@ export const name = 'genesis-session-resume'
 export const inject = ['agents']
 
 const SESSION_LOG_NAME = /^session(?:\.v[1-9][0-9]*)?\.jsonl$/
+const RESTART_MESSAGE_ID = 'genesis-transport-restart'
 
 export function encodeSegment(raw) {
   if (typeof raw !== 'string' || raw.length === 0) {
@@ -83,6 +91,58 @@ export function resumeOptions(options) {
   }
 }
 
+function restartStepMessage() {
+  return {
+    id: RESTART_MESSAGE_ID,
+    role: 'user',
+    content: [],
+    source: { kind: 'plugin', plugin: 'genesis-session-resume' },
+  }
+}
+
+function armTransportRestart(agent) {
+  if (
+    !agent ||
+    typeof agent.followup !== 'function' ||
+    typeof agent.wakeDriver !== 'function' ||
+    typeof agent.preStep !== 'function' ||
+    !agent.session ||
+    typeof agent.session.append !== 'function'
+  ) {
+    throw new Error('genesis-session-resume: transport restart cannot drive the resumed agent')
+  }
+  if (agent.followup.genesisTransportRestart) return
+  const originalFollowup = agent.followup
+  const originalPreStep = agent.preStep
+  const originalAppend = agent.session.append
+  agent.session.append = function genesisTransportRestartAppend(type, data, intent) {
+    if (type === 'user/message' && data && data.id === RESTART_MESSAGE_ID) {
+      return { type, data, seq: 0 }
+    }
+    return originalAppend.call(this, type, data, intent)
+  }
+  agent.preStep = async function genesisTransportRestartPreStep(target, position) {
+    const decision = await originalPreStep.call(this, target, position)
+    if (!decision || decision.kind === 'reject') return decision
+    const messages = decision.messages || []
+    if (position && position.step === 1 && messages.length === 0) {
+      return { ...decision, messages: [restartStepMessage()] }
+    }
+    return decision
+  }
+  let woke = false
+  const wrapped = function genesisTransportRestartFollowup(message) {
+    if (process.env.GENESIS_TRANSPORT_RESTART !== '1') {
+      return originalFollowup.call(this, message)
+    }
+    if (woke) return
+    woke = true
+    agent.wakeDriver()
+  }
+  wrapped.genesisTransportRestart = true
+  agent.followup = wrapped
+}
+
 function install(agents) {
   if (!agents || typeof agents.create !== 'function' || typeof agents.resume !== 'function') {
     throw new Error('genesis-session-resume: agents.create and agents.resume are required')
@@ -92,6 +152,14 @@ function install(agents) {
   const wrapped = async function genesisSessionResumeCreate(options) {
     const sessionId = options && typeof options.sessionId === 'string' ? options.sessionId : ''
     const home = typeof process.env.DSH_HOME === 'string' ? process.env.DSH_HOME : ''
+    if (process.env.GENESIS_TRANSPORT_RESTART === '1') {
+      if (!sessionId || !hasSessionLog(home, sessionId)) {
+        throw new Error('genesis-session-resume: transport restart requires a persisted session')
+      }
+      const handle = await agents.resume.call(this, resumeOptions(options))
+      armTransportRestart(handle && handle.agent)
+      return handle
+    }
     if (sessionId && hasSessionLog(home, sessionId)) {
       return agents.resume.call(this, resumeOptions(options))
     }
