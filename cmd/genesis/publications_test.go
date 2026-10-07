@@ -248,9 +248,15 @@ func TestPublicationPagingAndTornTail(t *testing.T) {
 
 func TestPublicationRedactsSecrets(t *testing.T) {
 	server, current, dir := publicationTestServer(t)
-	server.secrets = map[string]string{"TOKEN": "s3cr3t-value-123456"}
+	current.agents["worker"] = agentDefinition{Secrets: []string{"TOKEN"}}
+	server.secrets = map[string]string{
+		"TOKEN":                 "s3cr3t-value-123456",
+		syncTokenEnv:            "sync-token-value-999",
+		"GENESIS_LISTENER_USER": "genesis",
+		"UNNAMED_VALUE":         "unnamed-value-777",
+	}
 	data := validInput()
-	data["body"] = "the token is s3cr3t-value-123456 ok"
+	data["body"] = "the token is s3cr3t-value-123456, sync sync-token-value-999, user genesis, other unnamed-value-777"
 	if code := submit(t, server, current, "urn:genesis:agent:oracle", data).Code; code != http.StatusAccepted {
 		t.Fatalf("status = %d", code)
 	}
@@ -258,8 +264,17 @@ func TestPublicationRedactsSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(payload, []byte("s3cr3t-value-123456")) {
-		t.Fatalf("secret reached the register: %s", payload)
+	for _, secret := range []string{"s3cr3t-value-123456", "sync-token-value-999"} {
+		if bytes.Contains(payload, []byte(secret)) {
+			t.Fatalf("secret %q reached the register: %s", secret, payload)
+		}
+	}
+	// Values nobody named as secrets are ordinary text. The listener user
+	// name is in the process environment and must stay readable.
+	for _, plain := range []string{"user genesis", "unnamed-value-777"} {
+		if !bytes.Contains(payload, []byte(plain)) {
+			t.Fatalf("%q was redacted: %s", plain, payload)
+		}
 	}
 }
 

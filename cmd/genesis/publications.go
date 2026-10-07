@@ -187,18 +187,29 @@ type publicationRegister struct {
 	path     string
 	next     uint64
 	prepared bool
-	redactor *redactor
 	now      func() time.Time
 }
 
-func newPublicationRegister(dataDir string, redactor *redactor) *publicationRegister {
+func newPublicationRegister(dataDir string) *publicationRegister {
 	dir := filepath.Join(dataDir, publicationsDirName)
 	return &publicationRegister{
-		dir:      dir,
-		path:     filepath.Join(dir, publicationRegisterName),
-		redactor: redactor,
-		now:      time.Now,
+		dir:  dir,
+		path: filepath.Join(dir, publicationRegisterName),
+		now:  time.Now,
 	}
+}
+
+// publicationRedactor hides the values a story must never carry: the sync
+// token, the model key, and every secret any agent in the generation names.
+// s.secrets is the whole process environment, so only those names are read
+// from it. Taking every value would also blank short ones such as the
+// listener user name.
+func (s *eventServer) publicationRedactor(current *generation) *redactor {
+	names := []string{syncTokenEnv}
+	for _, definition := range current.agents {
+		names = append(names, definition.Secrets...)
+	}
+	return newRedactor(secretValues(s.secrets, names, nil))
 }
 
 // prepare creates the directory, drops a torn tail left by a crash, and
@@ -239,7 +250,7 @@ func (r *publicationRegister) prepare() error {
 
 // Append stamps and writes one publication. supersedes is checked against the
 // register so a typo or another agent's story cannot be replaced.
-func (r *publicationRegister) Append(in publicationInput, from string) (publication, error) {
+func (r *publicationRegister) Append(in publicationInput, from string, redactor *redactor) (publication, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.prepare(); err != nil {
@@ -286,7 +297,7 @@ func (r *publicationRegister) Append(in publicationInput, from string) (publicat
 	if err != nil {
 		return publication{}, err
 	}
-	payload = r.redactor.bytes(payload)
+	payload = redactor.bytes(payload)
 	var stored publication
 	if err := json.Unmarshal(payload, &stored); err != nil {
 		return publication{}, fmt.Errorf("redacted publication is not JSON: %w", err)
@@ -464,7 +475,7 @@ func (s *eventServer) handlePublication(w http.ResponseWriter, event cloudEvent,
 		http.Error(w, "publication register is unavailable", http.StatusInternalServerError)
 		return
 	}
-	stored, err := register.Append(in, from)
+	stored, err := register.Append(in, from, s.publicationRedactor(current))
 	if err != nil {
 		var refused *publicationError
 		if errors.As(err, &refused) {
@@ -488,11 +499,7 @@ func (s *eventServer) publications() *publicationRegister {
 		if s.store == nil || s.store.dataDir == "" {
 			return nil
 		}
-		values := make([]string, 0, len(s.secrets))
-		for _, value := range s.secrets {
-			values = append(values, value)
-		}
-		s.pubs = newPublicationRegister(s.store.dataDir, newRedactor(values))
+		s.pubs = newPublicationRegister(s.store.dataDir)
 	}
 	return s.pubs
 }
