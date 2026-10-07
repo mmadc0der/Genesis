@@ -14,8 +14,16 @@ export interface RunRow {
   ended_at?: string;
   session_id?: string;
   cause_type?: string;
+  // rule is the rules.d file that started the run. last_seq is the length of
+  // the run journal, which control serves as a string.
+  rule?: string;
+  last_seq?: string;
   usage?: Usage;
 }
+
+// RUN_LIST_LIMIT is how many runs the Wire asks control for. Counts built from
+// the list stop growing there.
+export const RUN_LIST_LIMIT = 200;
 
 export interface LoopSpan {
   up: number;
@@ -51,6 +59,9 @@ export function loopSpan(runs: RunRow[], now: number): LoopSpan {
 
 export interface ControlState {
   drift: string;
+  // desired_error is set when the files on disk do not load (drift is then
+  // desired_invalid).
+  desired_error?: string;
   listener: {
     reachable: boolean;
     ok: boolean;
@@ -67,6 +78,8 @@ export interface AgentRow {
 export interface RuleRow {
   name: string;
   agent: string;
+  // presence is active, draft, active_only, or unknown; see docs/control.md.
+  presence?: string;
   match: Record<string, string>;
 }
 
@@ -105,7 +118,7 @@ async function getJSON<T>(path: string): Promise<T> {
 
 export async function loadSnapshot(): Promise<Snapshot> {
   const [runs, state, agents, rules] = await Promise.all([
-    getJSON<{ runs: RunRow[] }>("/api/runs?limit=200"),
+    getJSON<{ runs: RunRow[] }>(`/api/runs?limit=${RUN_LIST_LIMIT}`),
     getJSON<ControlState>("/api/state"),
     getJSON<{ agents: AgentRow[] }>("/api/agents"),
     getJSON<{ rules: RuleRow[] }>("/api/rules"),

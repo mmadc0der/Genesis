@@ -1,6 +1,21 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { StatusChip, SyncPanel } from "./Chip";
 import { categoryById, type Edition } from "./editions";
+import {
+  agentDot,
+  eventSummary,
+  isDrifted,
+  ruleDot,
+  runDot,
+  runningByAgent,
+  runningByRule,
+  runsByRule,
+  tokenBreakdown,
+  type Dot,
+} from "./hints";
 import { loadSnapshot, loopSpan, shortCause, sumUsage, type RunRow, type Snapshot, type Usage } from "./live";
+import { driftItems } from "./sync";
+import { DotHint, EventHint, Tip, TokenHint } from "./Tip";
 import { toEdition } from "./publications";
 import { Story } from "./Story";
 import { usePublications } from "./usePublications";
@@ -10,12 +25,14 @@ function formatCount(value: number) {
   return new Intl.NumberFormat("en", { maximumFractionDigits: 0 }).format(value);
 }
 
-function toneFor(run: RunRow) {
-  if (run.state === "failed") return "red";
-  if (run.cause_type === "dev.genesis.session.continue") return "violet";
-  if (run.state === "open") return "blue";
-  if (run.state === "completed") return "green";
-  return "amber";
+// StatusDot is the small coloured mark in front of a row. An empty slot (no
+// colour) is still a hover target, because "no dot" means something too.
+function StatusDot({ dot }: { dot: Dot }) {
+  return (
+    <Tip className="mark-slot" content={<DotHint dot={dot} />}>
+      <i className={dot.tone ? `mark mark-${dot.tone}` : "mark"} aria-label={dot.label} />
+    </Tip>
+  );
 }
 
 function useSmooth(target: number) {
@@ -50,23 +67,35 @@ function formatDuration(ms: number) {
   return `${rest}m`;
 }
 
-function Stat({ label, value, tone }: { label: string; value: number; tone: string }) {
+function Stat({ label, value, tone, hint }: { label: string; value: number; tone: string; hint: ReactNode }) {
   const shown = useSmooth(value);
   return (
-    <div className={`stat tone-${tone}`}>
+    <Tip as="div" className={`stat hoverable tone-${tone}`} content={hint} focusable>
       <span>{label}</span>
       <strong>{formatCount(shown)}</strong>
-    </div>
+    </Tip>
   );
 }
 
-function LiveBoard({ usage, events, up, down }: { usage: Usage; events: number; up: number; down: number }) {
+function LiveBoard({
+  usage,
+  events,
+  up,
+  down,
+  eventHint,
+}: {
+  usage: Usage;
+  events: number;
+  up: number;
+  down: number;
+  eventHint: ReactNode;
+}) {
   return (
     <section className="board" aria-label="The weather">
       <h2>The weather</h2>
       <div className="board-grid">
-        <Stat label="Tokens" value={usage.total} tone="amber" />
-        <Stat label="Events" value={events} tone="violet" />
+        <Stat label="Tokens" value={usage.total} tone="amber" hint={<TokenHint breakdown={tokenBreakdown(usage)} />} />
+        <Stat label="Events" value={events} tone="violet" hint={eventHint} />
         <div className="stat span-stat">
           <span>Span</span>
           <p className="up">
@@ -209,7 +238,7 @@ function RunList({ runs }: { runs: RunRow[] }) {
     <ul>
       {runs.map((run) => (
         <li key={run.run_id}>
-          <i className={`mark mark-${toneFor(run)}`} aria-hidden="true" />
+          <StatusDot dot={runDot(run)} />
           <span>{shortCause(run.cause_type)}</span>
           <em>
             {run.agent} · {run.state}
@@ -223,10 +252,14 @@ function RunList({ runs }: { runs: RunRow[] }) {
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [live, setLive] = useState(false);
+  // connecting is true until the socket has answered once, so the page does
+  // not announce "Offline" for the moment it takes to connect.
+  const [connecting, setConnecting] = useState(true);
   const [atTop, setAtTop] = useState(true);
   const [historyExtra, setHistoryExtra] = useState(0);
   const [views, setViews] = useState(() => createViewStack({ id: "wire" }));
-  const [driftOpen, setDriftOpen] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const closeSync = useCallback(() => setSyncOpen(false), []);
   const [now, setNow] = useState(() => Date.now());
   const refreshRef = useRef<() => void>(() => {});
   const publications = usePublications();
@@ -250,6 +283,7 @@ export default function App() {
     const socket = new WebSocket(`${proto}://${location.host}/api/live`);
     socket.onopen = () => {
       setLive(true);
+      setConnecting(false);
       socket.send(JSON.stringify({ op: "subscribe", topic: "runs" }));
       socket.send(JSON.stringify({ op: "subscribe", topic: "state" }));
     };
@@ -257,7 +291,10 @@ export default function App() {
       refresh();
       refreshPublications();
     };
-    socket.onclose = () => setLive(false);
+    socket.onclose = () => {
+      setLive(false);
+      setConnecting(false);
+    };
     return () => {
       stopped = true;
       window.clearInterval(clock);
@@ -280,6 +317,14 @@ export default function App() {
   const drifted = drift !== undefined && drift !== "in_sync";
   const agents = [...(snapshot?.agents ?? [])].sort((left, right) => left.id.localeCompare(right.id));
   const rules = snapshot?.rules ?? [];
+  const linkWord = live ? "Online" : connecting ? "Connecting" : "Offline";
+  const invalid = drift === "desired_invalid" ? snapshot?.state?.desired_error || "the files do not parse" : undefined;
+  const agentRuns = runningByAgent(runs);
+  const ruleRunning = runningByRule(runs);
+  const ruleTotals = runsByRule(runs);
+  const summary = eventSummary(runs, rules);
+  const driftedAgents = agents.filter((agent) => isDrifted(agent.presence)).length;
+  const driftedRules = rules.filter((rule) => isDrifted(rule.presence)).length;
 
   return (
     <div className="app">
@@ -287,24 +332,73 @@ export default function App() {
         <div className="nameplate">Genesis</div>
         <div className="edition">The Wire</div>
         <div className="mast-status">
-          <button
-            type="button"
-            className={drifted ? "drift-chip on" : "drift-chip"}
-            disabled={drift === undefined}
-            aria-pressed={driftOpen}
-            onClick={() => setDriftOpen((current) => !current)}
+          <div className="chip-pop">
+          <Tip
+            off={syncOpen}
+            content={
+              <>
+                <strong className={drifted ? "tip-title tone-amber" : "tip-title"}>{drifted ? "Drift" : "No drift"}</strong>
+                <span className="tip-text">
+                  {drift === undefined
+                    ? "Control has not reported the sync state."
+                    : invalid
+                      ? `Control cannot load the files on disk: ${invalid}. Nothing can sync until that is fixed.`
+                      : drifted
+                        ? `The files on disk differ from what the listener runs: ${driftedAgents} ${driftedAgents === 1 ? "agent" : "agents"} and ${driftedRules} ${driftedRules === 1 ? "rule" : "rules"} marked yellow. Click to sync them.`
+                      : "The files on disk are what the listener runs."}
+                </span>
+              </>
+            }
           >
-            <i />
-            {drift === undefined ? "Drift" : driftOpen ? drift.replaceAll("_", " ") : drifted ? "Drift" : "No drift"}
-          </button>
-          <button type="button" className={live ? "live" : "live off"} onClick={() => refreshRef.current()}>
-            <i />
-            {live ? "Live" : "Offline"}
-          </button>
-          <div className={loopLive ? "rail-status" : "rail-status stopped"}>
-            <i />
-            {loopLive ? "Live" : "Stopped"}
+            {drifted ? (
+              <StatusChip tone="amber" label="Drift" expanded={syncOpen} onClick={() => setSyncOpen((open) => !open)} />
+            ) : (
+              <StatusChip tone={drift === undefined ? "faint" : "green"} label={drift === undefined ? "Drift" : "No drift"} />
+            )}
+          </Tip>
+          {syncOpen ? (
+            <SyncPanel
+              items={driftItems(agents, rules)}
+              invalid={invalid}
+              onSynced={() => refreshRef.current()}
+              onClose={closeSync}
+            />
+          ) : null}
           </div>
+          <Tip
+            content={
+              <>
+                <strong className={live ? "tip-title tone-green" : "tip-title"}>{linkWord}</strong>
+                <span className="tip-text">
+                  {live
+                    ? "This page is connected to control and updates as runs change."
+                    : connecting
+                      ? "Opening the connection to control."
+                      : "This page lost its connection to control. Click to refresh."}
+                </span>
+              </>
+            }
+          >
+            <StatusChip
+              tone={live ? "green" : "faint"}
+              label={linkWord}
+              onClick={live || connecting ? undefined : () => refreshRef.current()}
+            />
+          </Tip>
+          <Tip
+            content={
+              <>
+                <strong className={loopLive ? "tip-title tone-green" : "tip-title"}>{loopLive ? "Live" : "Stopped"}</strong>
+                <span className="tip-text">
+                  {loopLive
+                    ? `The loop is working: ${[...busy].sort().join(", ")} running now.`
+                    : "No agent has a run in progress."}
+                </span>
+              </>
+            }
+          >
+            <StatusChip tone={loopLive ? "green" : "faint"} label={loopLive ? "Live" : "Stopped"} pulse={loopLive} />
+          </Tip>
         </div>
       </header>
       <div className="stage">
@@ -357,7 +451,13 @@ export default function App() {
               className={views.frames.length === 1 ? "view" : views.direction < 0 ? "view view-back" : "view view-forward"}
             >
               <div className="sheet">
-                <LiveBoard usage={usage} events={runs.length} up={span.up} down={span.down} />
+                <LiveBoard
+                  usage={usage}
+                  events={summary.triggers}
+                  up={span.up}
+                  down={span.down}
+                  eventHint={<EventHint summary={summary} />}
+                />
                 <EditionIndex editions={editions} />
                 {!publications.loaded ? (
                   <p className="empty">{publications.error ? "Waiting for control" : "Loading stories"}</p>
@@ -375,7 +475,7 @@ export default function App() {
               </div>
             </div>
           </main>
-          <footer className="edge">
+          <Tip as="div" className="edge" content={<TokenHint breakdown={tokenBreakdown(usage)} />}>
             <span>
               <b>{formatCount(usage.total)}</b> tokens
             </span>
@@ -383,7 +483,7 @@ export default function App() {
             <span>miss {formatCount(usage.cache_miss)}</span>
             <span>out {formatCount(usage.output)}</span>
             <span>reason {formatCount(usage.reasoning)}</span>
-          </footer>
+          </Tip>
         </div>
         <aside className="rail rail-right">
           <div className="rail-scroll">
@@ -392,11 +492,12 @@ export default function App() {
                 <ul>
                   {agents.map((agent) => {
                     const active = busy.has(agent.id);
+                    const drifting = isDrifted(agent.presence);
                     return (
                       <li key={agent.id}>
-                        <i className={active ? "mark mark-blue" : "mark"} aria-hidden="true" />
+                        <StatusDot dot={agentDot(agent.presence, agentRuns.get(agent.id) ?? 0, invalid)} />
                         <span>{agent.id}</span>
-                        <em>{active ? "running" : "idle"}</em>
+                        <em>{active ? "running" : drifting ? "not synced" : "idle"}</em>
                       </li>
                     );
                   })}
@@ -410,7 +511,7 @@ export default function App() {
                 <ul>
                   {rules.map((rule) => (
                     <li key={rule.name}>
-                      <i className="mark" aria-hidden="true" />
+                      <StatusDot dot={ruleDot(rule.presence, ruleRunning.get(rule.name) ?? 0, ruleTotals.get(rule.name) ?? 0, invalid)} />
                       <span>{shortCause(rule.match.type)}</span>
                       <em>{rule.match.subject || rule.agent}</em>
                     </li>
