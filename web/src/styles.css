@@ -1143,6 +1143,121 @@ button.chip { cursor: pointer; }
   color: #b5d5f5;
 }
 
+/* Event dispatch and agent card */
+.agent-intro-card {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #171613;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.agent-intro-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+.agent-intro-title {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+.agent-intro-title b {
+  font-size: 1.15rem;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--ink);
+}
+.rule-badge {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  padding: 0.12rem 0.45rem;
+  background: #23201b;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.event-type-badge {
+  font-size: 0.74rem;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--violet);
+  background: rgba(196, 180, 224, 0.08);
+  border: 1px solid rgba(196, 180, 224, 0.28);
+  border-radius: 4px;
+  padding: 0.15rem 0.55rem;
+}
+.agent-intro-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.5rem;
+}
+.agent-meta-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+}
+.agent-meta-label {
+  color: var(--faint);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.agent-meta-item code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.presence-tag {
+  color: var(--green);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.agent-intro-instructions {
+  margin-top: 0.2rem;
+  padding: 0.65rem 0.85rem;
+  background: #13120f;
+  border-left: 2px solid #4a4338;
+  border-radius: 4px;
+}
+.agent-intro-instructions .agent-meta-label {
+  display: block;
+  margin-bottom: 0.4rem;
+}
+.agent-intro-instructions .markdown {
+  font-size: 0.84rem;
+  color: var(--muted);
+  line-height: 1.48;
+}
+.chat-empty-prompt {
+  text-align: center;
+  padding: 2.2rem 1.5rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  border: 1px dashed #2c2822;
+  border-radius: 8px;
+  background: rgba(22, 20, 17, 0.35);
+}
+.chat-empty-prompt p {
+  margin: 0;
+}
+.chat-empty-prompt b {
+  color: var(--ink);
+}
+.chat-empty-prompt code {
+  color: var(--amber);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
 @media (max-width: 860px) {
   .stage { grid-template-columns: 1fr; }
   .rail { display: none; }

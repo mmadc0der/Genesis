@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildThread,
+  emitMessage,
   inlineParts,
   isWorking,
   sendFollowUp,
@@ -167,5 +168,28 @@ describe("sendFollowUp", () => {
   it("reports an unreachable control", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("down")));
     expect(await sendFollowUp("gen_a", "x")).toEqual({ ok: false, message: "Control did not answer." });
+  });
+});
+
+describe("emitMessage", () => {
+  it("posts the message to /api/messages and returns the new run id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ runs: [{ rule: "example.yaml", agent: "worker", run_id: "gen_created" }] }), {
+        status: 202,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await emitMessage("example.yaml", "trigger run");
+    expect(result).toEqual({ ok: true, message: "Event emitted.", runId: "gen_created" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/messages");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ rule: "example.yaml", message: "trigger run" });
+  });
+
+  it("handles 204 when no rule matched", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    const result = await emitMessage("example.yaml", "trigger run");
+    expect(result).toEqual({ ok: false, message: "No agent run was started for this event." });
   });
 });

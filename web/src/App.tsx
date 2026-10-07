@@ -21,6 +21,7 @@ import { Story } from "./Story";
 import { usePublications } from "./usePublications";
 import { createViewStack, navigateToFrame, pushView } from "./view-stack";
 import { Chat } from "./Chat";
+import { EventChat } from "./EventChat";
 import { ErrorBoundary } from "./ErrorBoundary";
 
 function formatCount(value: number) {
@@ -218,12 +219,15 @@ function RailSection({ title, children }: { title: string; children: ReactNode }
 
 // A view frame whose id starts with this opens the session of that run.
 const RUN_VIEW = "run:";
+const EVENT_VIEW = "event:";
 
 function getInitialFrameId(): string {
   if (typeof window === "undefined") return "wire";
   const params = new URLSearchParams(window.location.search);
   const runId = params.get("run");
   if (runId) return RUN_VIEW + runId;
+  const eventRule = params.get("event");
+  if (eventRule) return EVENT_VIEW + eventRule;
   return "wire";
 }
 
@@ -272,6 +276,7 @@ export default function App() {
   const [views, setViews] = useState(() => createViewStack({ id: getInitialFrameId() }));
   const frameId = views.frames[views.index].id;
   const chatRunId = frameId.startsWith(RUN_VIEW) ? frameId.slice(RUN_VIEW.length) : null;
+  const eventRuleName = frameId.startsWith(EVENT_VIEW) ? frameId.slice(EVENT_VIEW.length) : null;
 
   useEffect(() => {
     const initialId = getInitialFrameId();
@@ -284,7 +289,10 @@ export default function App() {
     const handlePopState = (event: PopStateEvent) => {
       const params = new URLSearchParams(window.location.search);
       const runId = params.get("run");
-      const targetId: string = event.state?.frameId ?? (runId ? RUN_VIEW + runId : "wire");
+      const eventRule = params.get("event");
+      const targetId: string =
+        event.state?.frameId ??
+        (runId ? RUN_VIEW + runId : eventRule ? EVENT_VIEW + eventRule : "wire");
       setViews((current) => navigateToFrame(current, targetId));
     };
 
@@ -297,7 +305,20 @@ export default function App() {
     setViews((current) => {
       if (current.frames[current.index].id === targetId) return current;
       const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("event");
       nextUrl.searchParams.set("run", runId);
+      window.history.pushState({ frameId: targetId }, "", nextUrl.toString());
+      return pushView(current, { id: targetId });
+    });
+  }, []);
+
+  const openEvent = useCallback((ruleName: string) => {
+    const targetId = EVENT_VIEW + ruleName;
+    setViews((current) => {
+      if (current.frames[current.index].id === targetId) return current;
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("run");
+      nextUrl.searchParams.set("event", ruleName);
       window.history.pushState({ frameId: targetId }, "", nextUrl.toString());
       return pushView(current, { id: targetId });
     });
@@ -308,6 +329,7 @@ export default function App() {
       if (current.frames[current.index].id === "wire") return current;
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.delete("run");
+      nextUrl.searchParams.delete("event");
       window.history.pushState({ frameId: "wire" }, "", nextUrl.toString());
       return pushView(current, { id: "wire" });
     });
@@ -480,7 +502,7 @@ export default function App() {
         <div className="center">
           <main
             className="column"
-            hidden={chatRunId !== null}
+            hidden={chatRunId !== null || eventRuleName !== null}
             onScroll={(event) => setAtTop(event.currentTarget.scrollTop < 48)}
           >
             <div
@@ -522,6 +544,32 @@ export default function App() {
               </ErrorBoundary>
             </div>
           ) : null}
+          {eventRuleName ? (
+            <div
+              key={`${frameId}-${views.index}`}
+              className={views.direction < 0 ? "view view-back view-chat" : "view view-forward view-chat"}
+            >
+              <ErrorBoundary onReset={openWire}>
+                {(() => {
+                  const selectedRule = rules.find((r) => r.name === eventRuleName);
+                  const selectedAgent = selectedRule ? agents.find((a) => a.id === selectedRule.agent) : undefined;
+                  return selectedRule ? (
+                    <EventChat
+                      rule={selectedRule}
+                      agent={selectedAgent}
+                      onBack={openWire}
+                      onRunStarted={(newRunId) => {
+                        refreshRef.current();
+                        openRun(newRunId);
+                      }}
+                    />
+                  ) : (
+                    <p className="empty">Rule {eventRuleName} not found.</p>
+                  );
+                })()}
+              </ErrorBoundary>
+            </div>
+          ) : null}
           <Tip as="div" className="edge" content={<TokenHint breakdown={tokenBreakdown(usage)} />}>
             <span>
               <b>{formatCount(usage.total)}</b> tokens
@@ -557,7 +605,20 @@ export default function App() {
               {snapshot ? (
                 <ul>
                   {rules.map((rule) => (
-                    <li key={rule.name}>
+                    <li
+                      key={rule.name}
+                      className={eventRuleName === rule.name ? "openable current" : "openable"}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Open event ${rule.name}`}
+                      onClick={() => openEvent(rule.name)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openEvent(rule.name);
+                        }
+                      }}
+                    >
                       <StatusDot dot={ruleDot(rule.presence, ruleRunning.get(rule.name) ?? 0, ruleTotals.get(rule.name) ?? 0, invalid)} />
                       <span>{shortCause(rule.match.type)}</span>
                       <em>{rule.match.subject || rule.agent}</em>
@@ -580,7 +641,7 @@ export default function App() {
       <button
         className="return"
         type="button"
-        hidden={atTop || chatRunId !== null}
+        hidden={atTop || chatRunId !== null || eventRuleName !== null}
         onClick={() => {
           document.querySelector(".column")?.scrollTo({ top: 0, behavior: "smooth" });
         }}

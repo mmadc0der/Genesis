@@ -73,6 +73,12 @@ export interface ControlState {
 export interface AgentRow {
   id: string;
   presence: string;
+  instructions?: string;
+  cwd?: string;
+  home?: string;
+  user?: string;
+  secrets?: string[];
+  reasoning_effort?: string;
 }
 
 export interface RuleRow {

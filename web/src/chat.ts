@@ -262,3 +262,36 @@ export async function sendFollowUp(runId: string, message: string): Promise<Foll
   const body = (await response.json().catch(() => ({}))) as { run_id?: string };
   return { ok: true, message: "Sent.", runId: body.run_id };
 }
+
+export interface EmitResult {
+  ok: boolean;
+  message: string;
+  runId?: string;
+}
+
+// emitMessage triggers a fresh event rule through control (/api/messages),
+// starting a new run for the associated agent.
+export async function emitMessage(rule: string, message: string): Promise<EmitResult> {
+  let response: Response;
+  try {
+    response = await fetch("/api/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rule, message }),
+    });
+  } catch {
+    return { ok: false, message: "Control did not answer." };
+  }
+  if (response.status === 204) {
+    return { ok: false, message: "No agent run was started for this event." };
+  }
+  if (!response.ok) return { ok: false, message: await readError(response) };
+  const body = (await response.json().catch(() => ({}))) as {
+    runs?: Array<{ run_id: string; agent: string; rule: string }>;
+  };
+  const runId = body.runs?.[0]?.run_id;
+  if (!runId) {
+    return { ok: false, message: "Event was accepted but no run ID was returned." };
+  }
+  return { ok: true, message: "Event emitted.", runId };
+}
