@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -113,11 +114,34 @@ func acceptedData(event cloudEvent) map[string]any {
 	eventID, _ := event.stringAttribute("id")
 	eventSource, _ := event.stringAttribute("source")
 	eventType, _ := event.stringAttribute("type")
-	return map[string]any{
+	data := map[string]any{
 		"event_id":     eventID,
 		"event_source": eventSource,
 		"event_type":   eventType,
 	}
+	// The text that started the run, so a reader of the journal can see what
+	// the agent was asked. It is the same text the agent receives; the journal
+	// redacts secrets on append.
+	if message, ok := continuationMessage(event); ok {
+		data["message"] = clipMessage(message, acceptedMessageLimit)
+	}
+	return data
+}
+
+// acceptedMessageLimit is the most bytes of a trigger's message that the
+// accepted event keeps.
+const acceptedMessageLimit = 16 * 1024
+
+// clipMessage cuts text to at most limit bytes on a rune boundary.
+func clipMessage(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 func causeFromEvent(event cloudEvent) (id, source, eventType string) {

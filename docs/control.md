@@ -85,6 +85,8 @@ reads the new suffix of the file, not the whole journal again.
 | `GET` | `/api/runs?limit=` | recent run summaries from `events.jsonl` |
 | `GET` | `/api/runs/{id}` | summary, event count, redacted `result.json`, stderr tail |
 | `GET` | `/api/runs/{id}/events?after=&limit=` | journal lines with `sequence` greater than `after` |
+| `GET` | `/api/runs/{id}/chat` | the session of that run as a conversation; see [Session chat](#session-chat) |
+| `POST` | `/api/runs/{id}/continue` | send the operator's follow-up `{message}` to that session |
 | `POST` | `/api/events` | proxy a CloudEvent to the listener; no bearer added |
 | `POST` | `/api/messages` | build a CloudEvent from `{message, rule?, type?, source?, subject?}` and proxy it |
 | `POST` | `/api/sync` | proxy to listener `POST /sync` and attach the bearer there |
@@ -150,6 +152,32 @@ Every control request, including static files and the WebSocket upgrade, must
 use a loopback `Host` (`127.0.0.1`, `localhost`, or `::1`, with or without a
 port). When `Origin` is present its host must be loopback too. Anything else
 is 403. Curl with no `Origin` is allowed when `Host` is loopback.
+
+### Session chat
+
+A session is the DSH conversation an agent keeps across runs: every run that
+shares a `session_id`. `GET /api/runs/{id}/chat` returns those runs oldest first,
+each with the `run` summary, the `trigger` that started it (`type`, `source`,
+and `message` when the event carried one), and its `items`. Items are read from
+the run journals and leave the `dev.genesis.run.chunk` frames out: `reasoning`
+and `text` from each committed assistant message, a tool `call` with its
+arguments, the tool `result`, and `error`. Text is cut at 48 KiB and tool
+arguments and results at 8 KiB, with `truncated` set. A run that has not
+created its session yet is its own session. Provider retries are counted in
+`retries`. Control keeps how far it has read each journal, so a poll reads only
+the new lines.
+
+`continue_run` is the run a follow-up cites: the newest run, once it has ended.
+While a run is open it is empty and `continue_blocked` says why.
+
+`POST /api/runs/{id}/continue` takes `{"message": "…"}` (JSON, at most 16 KiB)
+for the newest run of the session and posts `dev.genesis.session.continue` to
+the listener with source `urn:genesis:control`. `202` returns `{"run_id": …}` for
+the new run. `409` means the run is not the newest one, is still open, or the
+listener refused the continue (it answered `204`), for example because the
+agent is not in the active generation. The new run reuses the same DSH session,
+so the agent keeps its context. The accepted event of a run now carries
+`data.message`, the text that started it, up to 16 KiB.
 
 ### WebSocket
 

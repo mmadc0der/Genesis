@@ -49,8 +49,12 @@ func (s *eventServer) dispatchSessionContinue(w http.ResponseWriter, event cloud
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	// The operator speaks through the control panel. That source may continue
+	// any ended run, and the hop limit below, which stops agents from chaining
+	// each other forever, does not apply to a person.
+	operator := continuationFromOperator(event)
 	emitter, ok := continuationEmitter(event)
-	if !ok || (emitter != oracleAgentID && emitter != cited.Agent) {
+	if !operator && (!ok || (emitter != oracleAgentID && emitter != cited.Agent)) {
 		s.refuseContinuation(subject, errors.New("continuation emitter is not allowed"))
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -89,7 +93,7 @@ func (s *eventServer) dispatchSessionContinue(w http.ResponseWriter, event cloud
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if hops >= maxContinuationHops {
+	if !operator && hops >= maxContinuationHops {
 		s.refuseContinuation(subject, fmt.Errorf("continuation would be hop %d", hops+1))
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -240,6 +244,14 @@ func continuationEmitter(event cloudEvent) (string, bool) {
 		return "", false
 	}
 	return id, true
+}
+
+// continuationFromOperator reports whether the event names the control panel
+// as its source. Like every source on the listener it is an assertion, not
+// proof: the listener is a trusted local service.
+func continuationFromOperator(event cloudEvent) bool {
+	source, ok := event.stringAttribute("source")
+	return ok && source == controlSource
 }
 
 func continuationMessage(event cloudEvent) (string, bool) {

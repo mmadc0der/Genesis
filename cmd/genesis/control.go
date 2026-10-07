@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -84,6 +86,8 @@ type controlServer struct {
 	newEventID      func() (string, error)
 	journalMu       sync.Mutex
 	journals        map[string]journalSnap
+	indexes         map[string]journalIndex
+	gates           sync.Map
 	liveMu          sync.Mutex
 	liveSet         map[*liveSubs]struct{}
 	feedOnce        sync.Once
@@ -96,6 +100,19 @@ type journalSnap struct {
 	offset  int64
 	summary runSummary
 	seen    map[string]struct{}
+	count   int
+}
+
+// journalIndex maps sequence numbers to byte offsets so a page or a live
+// tail can seek instead of parsing the whole journal again. It is built for
+// a run that the panel actually opens, not for every run on the list.
+type journalIndex struct {
+	size  int64
+	end   int64
+	count int
+	seqs  []uint64
+	ats   []int64
+	ready bool
 }
 
 type controlState struct {
@@ -415,6 +432,8 @@ func (c *controlServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			c.handlePublication(w, r)
+		case chatRouted(r.URL.Path):
+			c.handleChatRoute(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/runs/"):
 			if !requireMethod(w, r, http.MethodGet) {
 				return
@@ -905,7 +924,7 @@ func (c *controlServer) handleRunRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := queryLimit(r, "limit", defaultEventLimit, maxEventLimit)
-	page, err := c.readEvents(id, after, limit)
+	page, err := c.readEvents(r.Context(), id, after, limit)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.NotFound(w, r)
@@ -956,16 +975,15 @@ func (c *controlServer) listRuns(limit int) ([]runSummary, error) {
 }
 
 func (c *controlServer) readRunDetail(runID string) (runDetail, error) {
-	events, err := c.readRunEvents(runID)
+	summary, count, err := c.summarizeCounted(context.Background(), runID)
 	if err != nil {
 		return runDetail{}, err
 	}
-	if len(events) == 0 {
+	if count == 0 {
 		return runDetail{}, os.ErrNotExist
 	}
-	detail := runDetail{runSummary: summarizeRun(events), EventCount: len(events)}
+	detail := runDetail{runSummary: summary, EventCount: count}
 	runDir := filepath.Join(c.dataDir, runsDirName, runID)
-	detail.Usage = usageFromRun(runDir, events)
 	if result, err := os.ReadFile(filepath.Join(runDir, resultFileName)); err == nil && json.Valid(result) {
 		detail.Result = json.RawMessage(redactPrivateKeys(result))
 	}
@@ -975,59 +993,78 @@ func (c *controlServer) readRunDetail(runID string) (runDetail, error) {
 	return detail, nil
 }
 
-func (c *controlServer) readEvents(runID string, after uint64, limit int) (eventsPage, error) {
-	events, err := c.readRunEvents(runID)
+func (c *controlServer) readEvents(ctx context.Context, runID string, after uint64, limit int) (eventsPage, error) {
+	if err := validateRunID(runID); err != nil {
+		return eventsPage{}, err
+	}
+	if limit < 1 {
+		limit = defaultEventLimit
+	}
+	gate := c.runGate(runID)
+	gate.Lock()
+	defer gate.Unlock()
+	idx, err := c.ensureIndexLocked(ctx, runID)
 	if err != nil {
 		return eventsPage{}, err
 	}
-	if len(events) == 0 {
+	if idx.count == 0 {
 		return eventsPage{}, os.ErrNotExist
 	}
-	filtered := make([]lifecycleEvent, 0, len(events))
-	for _, event := range events {
+	path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
+	events := make([]lifecycleEvent, 0, limit)
+	more := false
+	_, err = walkJournal(path, idx.byteAfter(after), func(event lifecycleEvent, _, _ int64) bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		seq, ok := eventSequence(event)
 		if !ok || seq <= after {
-			continue
+			return true
 		}
-		filtered = append(filtered, event)
+		if len(events) == limit {
+			more = true
+			return false
+		}
+		event.Data = redactPrivateKeys(event.Data)
+		events = append(events, event)
+		return true
+	})
+	if err != nil {
+		return eventsPage{}, err
 	}
-	page := eventsPage{RunID: runID, Events: []lifecycleEvent{}, Cursor: strconv.FormatUint(after, 10)}
-	if limit < len(filtered) {
-		page.HasMore = true
-		filtered = filtered[:limit]
+	if ctx.Err() != nil && len(events) == 0 {
+		return eventsPage{}, ctx.Err()
 	}
-	if len(filtered) > 0 {
-		page.Events = filtered
-		if seq, ok := eventSequence(filtered[len(filtered)-1]); ok {
+	page := eventsPage{RunID: runID, Events: events, Cursor: strconv.FormatUint(after, 10), HasMore: more}
+	if len(events) > 0 {
+		if seq, ok := eventSequence(events[len(events)-1]); ok {
 			page.Cursor = strconv.FormatUint(seq, 10)
 		}
 	}
 	return page, nil
 }
 
-func (c *controlServer) readRunEvents(runID string) ([]lifecycleEvent, error) {
-	if err := validateRunID(runID); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
-	if _, err := os.Stat(path); err != nil {
-		return nil, err
-	}
-	events, err := readJournalPrefix(path)
-	if err != nil {
-		return nil, err
-	}
-	for index := range events {
-		events[index].Data = redactPrivateKeys(events[index].Data)
-	}
-	return events, nil
+func (c *controlServer) summarizeCached(runID string) (runSummary, error) {
+	summary, _, err := c.summarizeCounted(context.Background(), runID)
+	return summary, err
 }
 
-func (c *controlServer) summarizeCached(runID string) (runSummary, error) {
+func (c *controlServer) summarizeCounted(ctx context.Context, runID string) (runSummary, int, error) {
+	gate := c.runGate(runID)
+	gate.Lock()
+	defer gate.Unlock()
+	snap, err := c.loadSummaryLocked(ctx, runID)
+	if err != nil {
+		return runSummary{}, 0, err
+	}
+	return snap.summary, snap.count, nil
+}
+
+func (c *controlServer) loadSummaryLocked(ctx context.Context, runID string) (journalSnap, error) {
 	path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
 	info, err := os.Stat(path)
 	if err != nil {
-		return runSummary{}, err
+		return journalSnap{}, err
 	}
 	usagePath := filepath.Join(c.dataDir, runsDirName, runID, usageFileName)
 	c.journalMu.Lock()
@@ -1038,43 +1075,166 @@ func (c *controlServer) summarizeCached(runID string) (runSummary, error) {
 		if account, _, found := readUsageAccount(usagePath); found {
 			summary.Usage = account
 		}
-		return summary, nil
+		snap.summary = summary
+		return snap, nil
 	}
 	offset := int64(0)
 	summary := runSummary{State: runStateOpen, LastSeq: "0"}
-	if ok && info.Size() >= snap.offset {
+	var seen map[string]struct{}
+	count := 0
+	if ok && snap.offset > 0 && snap.offset <= info.Size() {
 		offset = snap.offset
 		summary = snap.summary
+		seen = cloneSeen(snap.seen)
+		count = snap.count
 	}
-	events, next, err := readJournalFrom(path, offset)
-	if err != nil {
-		return runSummary{}, err
-	}
-	for index := range events {
-		events[index].Data = redactPrivateKeys(events[index].Data)
-	}
-	if offset == 0 {
-		summary = summarizeRun(events)
-	} else if len(events) > 0 {
-		summary = foldRunSummary(summary, events)
-	}
-	account, seen, fromFile := readUsageAccount(usagePath)
+	account, fileSeen, fromFile := readUsageAccount(usagePath)
 	if fromFile {
 		summary.Usage = account
-	} else if offset == 0 {
-		summary.Usage, seen = foldUsage(tokenAccount{}, nil, events)
-	} else if len(events) > 0 {
-		summary.Usage, seen = foldUsage(summary.Usage, snap.seen, events)
-	} else {
-		seen = snap.seen
+		seen = fileSeen
+	}
+	cancelled := false
+	next, err := walkJournal(path, offset, func(event lifecycleEvent, _, _ int64) bool {
+		if ctx.Err() != nil {
+			cancelled = true
+			return false
+		}
+		event.Data = redactPrivateKeys(event.Data)
+		summary = foldRunSummary(summary, []lifecycleEvent{event})
+		if !fromFile {
+			summary.Usage, seen = absorbUsage(summary.Usage, seen, event)
+		}
+		count++
+		return true
+	})
+	if err != nil {
+		return journalSnap{}, err
+	}
+	stored := journalSnap{size: info.Size(), offset: next, summary: summary, seen: seen, count: count}
+	if cancelled {
+		stored.size = next
 	}
 	c.journalMu.Lock()
 	if c.journals == nil {
 		c.journals = map[string]journalSnap{}
 	}
-	c.journals[runID] = journalSnap{size: info.Size(), offset: next, summary: summary, seen: seen}
+	c.journals[runID] = stored
 	c.journalMu.Unlock()
-	return summary, nil
+	if cancelled {
+		return journalSnap{}, ctx.Err()
+	}
+	return stored, nil
+}
+
+func (c *controlServer) runGate(runID string) *sync.Mutex {
+	gate, ok := c.gates.Load(runID)
+	if ok {
+		return gate.(*sync.Mutex)
+	}
+	gate, _ = c.gates.LoadOrStore(runID, new(sync.Mutex))
+	return gate.(*sync.Mutex)
+}
+
+func (c *controlServer) ensureIndexLocked(ctx context.Context, runID string) (journalIndex, error) {
+	path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
+	info, err := os.Stat(path)
+	if err != nil {
+		return journalIndex{}, err
+	}
+	c.journalMu.Lock()
+	idx := c.indexes[runID]
+	c.journalMu.Unlock()
+	if idx.ready && idx.size == info.Size() {
+		return idx, nil
+	}
+	start := int64(0)
+	seqs := []uint64{}
+	ats := []int64{}
+	count := 0
+	if idx.end > 0 && idx.end <= info.Size() {
+		start = idx.end
+		seqs = append(seqs, idx.seqs...)
+		ats = append(ats, idx.ats...)
+		count = idx.count
+	}
+	cancelled := false
+	end, err := walkJournal(path, start, func(event lifecycleEvent, at, _ int64) bool {
+		if ctx.Err() != nil {
+			cancelled = true
+			return false
+		}
+		count++
+		if seq, ok := eventSequence(event); ok {
+			seqs = append(seqs, seq)
+			ats = append(ats, at)
+		}
+		return true
+	})
+	if err != nil {
+		return journalIndex{}, err
+	}
+	built := journalIndex{
+		size:  info.Size(),
+		end:   end,
+		count: count,
+		seqs:  seqs,
+		ats:   ats,
+		ready: !cancelled,
+	}
+	c.journalMu.Lock()
+	if c.indexes == nil {
+		c.indexes = map[string]journalIndex{}
+	}
+	c.indexes[runID] = built
+	c.journalMu.Unlock()
+	if cancelled {
+		return journalIndex{}, ctx.Err()
+	}
+	return built, nil
+}
+
+func (idx journalIndex) byteAfter(after uint64) int64 {
+	pos := sort.Search(len(idx.seqs), func(i int) bool { return idx.seqs[i] > after })
+	if pos >= len(idx.seqs) {
+		return idx.end
+	}
+	return idx.ats[pos]
+}
+
+func cloneSeen(in map[string]struct{}) map[string]struct{} {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(in))
+	for id := range in {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+func absorbUsage(account tokenAccount, seen map[string]struct{}, event lifecycleEvent) (tokenAccount, map[string]struct{}) {
+	if event.Type != lifecycleTypeChunk {
+		return account, seen
+	}
+	frame, ok := parseUsageFrame(event.Data)
+	if !ok {
+		return account, seen
+	}
+	if frame.attemptID != "" {
+		if _, exists := seen[frame.attemptID]; exists {
+			return account, seen
+		}
+		if seen == nil {
+			seen = map[string]struct{}{}
+		}
+		seen[frame.attemptID] = struct{}{}
+	}
+	account.CacheHit += frame.cacheHit
+	account.CacheMiss += frame.cacheMiss
+	account.Output += frame.output
+	account.Reasoning += frame.reasoning
+	account.Attempts++
+	return account.normalized(), seen
 }
 
 func summarizeRun(events []lifecycleEvent) runSummary {

@@ -111,7 +111,10 @@ finished `gen_` run id, `data.message` is the next turn, and `source` is
 `urn:genesis:agent:oracle` or `urn:genesis:agent:<the agent who owns that
 run>`. The cited run must already have ended. `202` contains the new run
 id. `204` means the continue was refused. The new run reuses the same DSH
-session and the same `DSH_HOME`.
+session and the same `DSH_HOME`. A chain of agent continuations stops at hop
+9. The operator speaks as `urn:genesis:control`, which may continue any ended
+run and is not counted against that limit; the Wire's session chat sends its
+follow-ups that way.
 
 Publications are the stories the operator reads on the Wire. An agent files
 one with `genesis publish`; the listener accepts it only from an agent whose

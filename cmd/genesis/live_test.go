@@ -133,6 +133,25 @@ func TestReadJournalFromResumesAtOffset(t *testing.T) {
 	}
 }
 
+func TestWalkJournalStopsBeforeRejectedRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), eventsFileName)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendLifecycle(t, path, sampleLifecycle("gen_walk", "1", lifecycleTypeAccepted, map[string]any{"event_type": "dev.genesis.run"}))
+	appendLifecycle(t, path, sampleLifecycle("gen_walk", "2", lifecycleTypeEnd, map[string]any{"state": endStateCompleted}))
+	next, err := walkJournal(path, 0, func(event lifecycleEvent, _, _ int64) bool {
+		return event.Sequence != "2"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, _, err := readJournalFrom(path, next)
+	if err != nil || len(events) != 1 || events[0].Sequence != "2" {
+		t.Fatalf("rejected record = %v %#v", err, events)
+	}
+}
+
 func TestSummarizeCachedFoldsNewJournalLines(t *testing.T) {
 	control, _ := newPanelFixture(t)
 	runID := "gen_cache"
@@ -153,6 +172,36 @@ func TestSummarizeCachedFoldsNewJournalLines(t *testing.T) {
 	second, err := control.summarizeCached(runID)
 	if err != nil || second.LastSeq != "2" || second.State != runStateCompleted {
 		t.Fatalf("second summary = %#v %v", second, err)
+	}
+}
+
+func TestControlEventPageSeeksBySequence(t *testing.T) {
+	control, _ := newPanelFixture(t)
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+	runID := "gen_pages"
+	dir := filepath.Join(control.dataDir, runsDirName, runID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, eventsFileName)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, seq := range []string{"1", "2", "3", "4"} {
+		appendLifecycle(t, path, sampleLifecycle(runID, seq, lifecycleTypeChunk, map[string]any{"text": seq}))
+	}
+	first := getJSON[eventsPage](t, panel.URL+"/api/runs/"+runID+"/events?after=0&limit=2")
+	if len(first.Events) != 2 || !first.HasMore || first.Events[0].Sequence != "1" || first.Cursor != "2" {
+		t.Fatalf("first page = %#v", first)
+	}
+	second := getJSON[eventsPage](t, panel.URL+"/api/runs/"+runID+"/events?after=2&limit=2")
+	if len(second.Events) != 2 || second.HasMore || second.Events[0].Sequence != "3" || second.Cursor != "4" {
+		t.Fatalf("second page = %#v", second)
+	}
+	tail := getJSON[eventsPage](t, panel.URL+"/api/runs/"+runID+"/events?after=4&limit=2")
+	if len(tail.Events) != 0 || tail.HasMore {
+		t.Fatalf("tail page = %#v", tail)
 	}
 }
 

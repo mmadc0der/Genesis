@@ -35,3 +35,17 @@ export function pushView(stack: ViewStack, frame: ViewFrame): ViewStack {
   frames.push(frame);
   return { frames, index: frames.length - 1, direction: 1 };
 }
+
+export function navigateToFrame(stack: ViewStack, frameId: string): ViewStack {
+  if (stack.frames[stack.index]?.id === frameId) return stack;
+  const targetIndex = stack.frames.findIndex((f) => f.id === frameId);
+  if (targetIndex !== -1) {
+    return {
+      ...stack,
+      index: targetIndex,
+      direction: targetIndex < stack.index ? -1 : 1,
+    };
+  }
+  return pushView(stack, { id: frameId });
+}
+

@@ -19,7 +19,9 @@ import { DotHint, EventHint, Tip, TokenHint } from "./Tip";
 import { toEdition } from "./publications";
 import { Story } from "./Story";
 import { usePublications } from "./usePublications";
-import { canBack, canForward, createViewStack, goBack, goForward } from "./view-stack";
+import { createViewStack, navigateToFrame, pushView } from "./view-stack";
+import { Chat } from "./Chat";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 function formatCount(value: number) {
   return new Intl.NumberFormat("en", { maximumFractionDigits: 0 }).format(value);
@@ -185,21 +187,6 @@ function FeedEnd({
   );
 }
 
-function Arrow() {
-  return (
-    <svg viewBox="0 0 12 12" width="1em" height="1em" aria-hidden="true">
-      <path
-        d="M4.2 2.2 L8 6 L4.2 9.8"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 function RailSection({ title, children }: { title: string; children: ReactNode }) {
   const [open, setOpen] = useState(true);
   return (
@@ -229,15 +216,40 @@ function RailSection({ title, children }: { title: string; children: ReactNode }
   );
 }
 
+// A view frame whose id starts with this opens the session of that run.
+const RUN_VIEW = "run:";
+
+function getInitialFrameId(): string {
+  if (typeof window === "undefined") return "wire";
+  const params = new URLSearchParams(window.location.search);
+  const runId = params.get("run");
+  if (runId) return RUN_VIEW + runId;
+  return "wire";
+}
+
 const HISTORY_PREVIEW = 8;
 const HISTORY_PAGE = 20;
 
-function RunList({ runs }: { runs: RunRow[] }) {
+// RunList lists runs. Opening one shows its session as a chat in the middle.
+function RunList({ runs, current, onOpen }: { runs: RunRow[]; current: string | null; onOpen: (runId: string) => void }) {
   if (runs.length === 0) return <p className="rail-note">None</p>;
   return (
     <ul>
       {runs.map((run) => (
-        <li key={run.run_id}>
+        <li
+          key={run.run_id}
+          className={run.run_id === current ? "openable current" : "openable"}
+          role="button"
+          tabIndex={0}
+          aria-label={`Open the ${run.agent} session`}
+          onClick={() => onOpen(run.run_id)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onOpen(run.run_id);
+            }
+          }}
+        >
           <StatusDot dot={runDot(run)} />
           <span>{shortCause(run.cause_type)}</span>
           <em>
@@ -257,7 +269,49 @@ export default function App() {
   const [connecting, setConnecting] = useState(true);
   const [atTop, setAtTop] = useState(true);
   const [historyExtra, setHistoryExtra] = useState(0);
-  const [views, setViews] = useState(() => createViewStack({ id: "wire" }));
+  const [views, setViews] = useState(() => createViewStack({ id: getInitialFrameId() }));
+  const frameId = views.frames[views.index].id;
+  const chatRunId = frameId.startsWith(RUN_VIEW) ? frameId.slice(RUN_VIEW.length) : null;
+
+  useEffect(() => {
+    const initialId = getInitialFrameId();
+    if (!window.history.state || window.history.state.frameId !== initialId) {
+      window.history.replaceState({ frameId: initialId }, "");
+    }
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      const params = new URLSearchParams(window.location.search);
+      const runId = params.get("run");
+      const targetId: string = event.state?.frameId ?? (runId ? RUN_VIEW + runId : "wire");
+      setViews((current) => navigateToFrame(current, targetId));
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const openRun = useCallback((runId: string) => {
+    const targetId = RUN_VIEW + runId;
+    setViews((current) => {
+      if (current.frames[current.index].id === targetId) return current;
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set("run", runId);
+      window.history.pushState({ frameId: targetId }, "", nextUrl.toString());
+      return pushView(current, { id: targetId });
+    });
+  }, []);
+
+  const openWire = useCallback(() => {
+    setViews((current) => {
+      if (current.frames[current.index].id === "wire") return current;
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("run");
+      window.history.pushState({ frameId: "wire" }, "", nextUrl.toString());
+      return pushView(current, { id: "wire" });
+    });
+  }, []);
   const [syncOpen, setSyncOpen] = useState(false);
   const closeSync = useCallback(() => setSyncOpen(false), []);
   const [now, setNow] = useState(() => Date.now());
@@ -329,8 +383,10 @@ export default function App() {
   return (
     <div className="app">
       <header className="mast">
-        <div className="nameplate">Genesis</div>
-        <div className="edition">The Wire</div>
+        <button type="button" className="nameplate-link" onClick={openWire} title="Genesis wire">
+          Genesis
+        </button>
+        <span className="edition">The Wire</span>
         <div className="mast-status">
           <div className="chip-pop">
           <Tip
@@ -404,12 +460,12 @@ export default function App() {
       <div className="stage">
         <aside className="rail rail-left">
           <RailSection title="Running">
-            {snapshot ? <RunList runs={running} /> : <p className="rail-note">Waiting for control</p>}
+            {snapshot ? <RunList runs={running} current={chatRunId} onOpen={openRun} /> : <p className="rail-note">Waiting for control</p>}
           </RailSection>
           <RailSection title="History">
             {snapshot ? (
               <>
-                <RunList runs={historyVisible} />
+                <RunList runs={historyVisible} current={chatRunId} onOpen={openRun} />
                 {historyHasMore ? (
                   <button type="button" className="show-more" onClick={() => setHistoryExtra((current) => current + HISTORY_PAGE)}>
                     More
@@ -422,28 +478,9 @@ export default function App() {
           </RailSection>
         </aside>
         <div className="center">
-          <div className="view-bar">
-            <button
-              type="button"
-              className="view-arrow back"
-              aria-label="Back"
-              disabled={!canBack(views)}
-              onClick={() => setViews(goBack)}
-            >
-              <Arrow />
-            </button>
-            <button
-              type="button"
-              className="view-arrow"
-              aria-label="Forward"
-              disabled={!canForward(views)}
-              onClick={() => setViews(goForward)}
-            >
-              <Arrow />
-            </button>
-          </div>
           <main
             className="column"
+            hidden={chatRunId !== null}
             onScroll={(event) => setAtTop(event.currentTarget.scrollTop < 48)}
           >
             <div
@@ -475,6 +512,16 @@ export default function App() {
               </div>
             </div>
           </main>
+          {chatRunId ? (
+            <div
+              key={`${frameId}-${views.index}`}
+              className={views.direction < 0 ? "view view-back view-chat" : "view view-forward view-chat"}
+            >
+              <ErrorBoundary onReset={openWire}>
+                <Chat runId={chatRunId} onBack={openWire} />
+              </ErrorBoundary>
+            </div>
+          ) : null}
           <Tip as="div" className="edge" content={<TokenHint breakdown={tokenBreakdown(usage)} />}>
             <span>
               <b>{formatCount(usage.total)}</b> tokens
@@ -533,7 +580,7 @@ export default function App() {
       <button
         className="return"
         type="button"
-        hidden={atTop}
+        hidden={atTop || chatRunId !== null}
         onClick={() => {
           document.querySelector(".column")?.scrollTo({ top: 0, behavior: "smooth" });
         }}

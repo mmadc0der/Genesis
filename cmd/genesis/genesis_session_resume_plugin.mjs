@@ -12,9 +12,17 @@
  * GENESIS_TRANSPORT_RESTART=1 is a Genesis process restart of that same
  * session after a DSH TRANSPORT failure. The SDK still sends session/prompt,
  * which would append a user message. This plugin resumes the log, drops that
- * prompt, and wakes the agent loop so the next model request is the existing
- * history. A placeholder step message is used only to pass the loop's empty
- * first-step check, and its user/message append is discarded.
+ * prompt, and wakes the agent loop when a turn was in flight. A placeholder
+ * step message is used only to pass the loop's empty first-step check, and its
+ * user/message append is discarded.
+ *
+ * The Python SDK's session.run() blocks on session/prompt until agent.followup
+ * completes the RPC, then waits for session.status idle (see deepseek_harness
+ * Session.run). After wakeDriver, the runtime normally issues a second followup
+ * when the turn ends; if the persisted log already ends on turn/end (parent run
+ * finished the turn before exit), only one followup arrives and session.run
+ * hangs unless we ack the prompt immediately. Mid-turn restarts ack on turn/end
+ * append instead.
  *
  * A log is session.jsonl or session.vN.jsonl under
  * $DSH_HOME/sessions/<project>/<encoded session id>/. The current pin writes
@@ -29,6 +37,7 @@ export const inject = ['agents']
 
 const SESSION_LOG_NAME = /^session(?:\.v[1-9][0-9]*)?\.jsonl$/
 const RESTART_MESSAGE_ID = 'genesis-transport-restart'
+const PROMPT_ACK_MESSAGE_ID = 'genesis-transport-prompt-ack'
 
 export function encodeSegment(raw) {
   if (typeof raw !== 'string' || raw.length === 0) {
@@ -58,26 +67,50 @@ function directoryEntries(dir) {
   }
 }
 
-export function hasSessionLog(dshHome, sessionId) {
-  if (typeof dshHome !== 'string' || dshHome.length === 0) return false
-  if (typeof sessionId !== 'string' || sessionId.length === 0) return false
+export function sessionLogPath(dshHome, sessionId) {
+  if (typeof dshHome !== 'string' || dshHome.length === 0) return null
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null
   let segment
   try {
     segment = encodeSegment(sessionId)
   } catch {
-    return false
+    return null
   }
   const projects = directoryEntries(path.join(dshHome, 'sessions'))
-  if (projects === null) return false
+  if (projects === null) return null
   for (const project of projects) {
     if (!project.isDirectory()) continue
     const entries = directoryEntries(path.join(dshHome, 'sessions', project.name, segment))
     if (entries === null) continue
     for (const entry of entries) {
-      if (entry.isFile() && isSessionLogName(entry.name)) return true
+      if (entry.isFile() && isSessionLogName(entry.name)) {
+        return path.join(dshHome, 'sessions', project.name, segment, entry.name)
+      }
     }
   }
-  return false
+  return null
+}
+
+export function readLastSessionLogEvent(dshHome, sessionId) {
+  const logPath = sessionLogPath(dshHome, sessionId)
+  if (!logPath) return null
+  try {
+    const text = fs.readFileSync(logPath, 'utf8').trimEnd()
+    if (!text) return null
+    const lines = text.split('\n')
+    return JSON.parse(lines[lines.length - 1])
+  } catch {
+    return null
+  }
+}
+
+export function resumeEndsOnTurnEnd(dshHome, sessionId) {
+  const last = readLastSessionLogEvent(dshHome, sessionId)
+  return Boolean(last && last.type === 'turn/end')
+}
+
+export function hasSessionLog(dshHome, sessionId) {
+  return sessionLogPath(dshHome, sessionId) != null
 }
 
 export function resumeOptions(options) {
@@ -100,7 +133,16 @@ function restartStepMessage() {
   }
 }
 
-function armTransportRestart(agent) {
+function promptAckMessage() {
+  return {
+    id: PROMPT_ACK_MESSAGE_ID,
+    role: 'user',
+    content: [],
+    source: { kind: 'plugin', plugin: 'genesis-session-resume' },
+  }
+}
+
+function armTransportRestart(agent, sessionId) {
   if (
     !agent ||
     typeof agent.followup !== 'function' ||
@@ -112,14 +154,27 @@ function armTransportRestart(agent) {
     throw new Error('genesis-session-resume: transport restart cannot drive the resumed agent')
   }
   if (agent.followup.genesisTransportRestart) return
+  const home = typeof process.env.DSH_HOME === 'string' ? process.env.DSH_HOME : ''
+  const resumeWithIdleTurn = resumeEndsOnTurnEnd(home, sessionId)
   const originalFollowup = agent.followup
   const originalPreStep = agent.preStep
   const originalAppend = agent.session.append
+  let pendingTurnAck = false
+
+  const ackPrompt = () => {
+    originalFollowup.call(agent, promptAckMessage())
+  }
+
   agent.session.append = function genesisTransportRestartAppend(type, data, intent) {
     if (type === 'user/message' && data && data.id === RESTART_MESSAGE_ID) {
       return { type, data, seq: 0 }
     }
-    return originalAppend.call(this, type, data, intent)
+    const result = originalAppend.call(this, type, data, intent)
+    if (pendingTurnAck && type === 'turn/end') {
+      pendingTurnAck = false
+      queueMicrotask(() => ackPrompt())
+    }
+    return result
   }
   agent.preStep = async function genesisTransportRestartPreStep(target, position) {
     const decision = await originalPreStep.call(this, target, position)
@@ -130,14 +185,21 @@ function armTransportRestart(agent) {
     }
     return decision
   }
-  let woke = false
+  let droppedTransportPrompt = false
   const wrapped = function genesisTransportRestartFollowup(message) {
     if (process.env.GENESIS_TRANSPORT_RESTART !== '1') {
       return originalFollowup.call(this, message)
     }
-    if (woke) return
-    woke = true
-    agent.wakeDriver()
+    if (!droppedTransportPrompt) {
+      droppedTransportPrompt = true
+      if (resumeWithIdleTurn) {
+        return originalFollowup.call(this, promptAckMessage())
+      }
+      pendingTurnAck = true
+      agent.wakeDriver()
+      return
+    }
+    return originalFollowup.call(this, message)
   }
   wrapped.genesisTransportRestart = true
   agent.followup = wrapped
@@ -157,7 +219,7 @@ function install(agents) {
         throw new Error('genesis-session-resume: transport restart requires a persisted session')
       }
       const handle = await agents.resume.call(this, resumeOptions(options))
-      armTransportRestart(handle && handle.agent)
+      armTransportRestart(handle && handle.agent, sessionId)
       return handle
     }
     if (sessionId && hasSessionLog(home, sessionId)) {

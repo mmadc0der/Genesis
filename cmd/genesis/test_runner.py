@@ -617,7 +617,7 @@ if (fresh.join(",") !== "create") {
         session_id = "session-restart"
         log = home / "sessions" / "proj" / session_id / "session.v3.jsonl"
         log.parent.mkdir(parents=True)
-        log.write_text('{"type":"session"}\n', encoding="utf-8")
+        log.write_text('{"type":"step/start","seq":1,"data":{"turn":2}}\n', encoding="utf-8")
         script = r"""
 import { apply } from process.env.PLUGIN_PATH;
 
@@ -652,31 +652,99 @@ const agents = {
 apply({ agents });
 const handle = await agents.create({ sessionId: process.env.SESSION_ID });
 handle.agent.followup({ id: "user-1", role: "user", content: [{ type: "text", text: "keep going" }] });
-const decision = await handle.agent.preStep("next-turn", { turn: 1, step: 1 });
-const ignored = handle.agent.session.append("user/message", decision.messages[0]);
-handle.agent.session.append("tool/call", { id: "real" });
-if (calls.includes("create") || calls.some((call) => Array.isArray(call) && call[0] === "followup")) {
+handle.agent.session.append("turn/end", { reason: { kind: "completed" } });
+await new Promise((resolve) => queueMicrotask(resolve));
+if (calls.includes("create")) {
   console.error(JSON.stringify(calls));
   process.exit(1);
 }
-if (!calls.includes("wake") || !calls.includes("preStep")) {
-  console.error(JSON.stringify(calls));
+const followups = calls.filter((call) => Array.isArray(call) && call[0] === "followup");
+if (followups.length !== 1 || followups[0][1] !== "genesis-transport-prompt-ack") {
+  console.error(JSON.stringify({ followups, calls }));
   process.exit(1);
 }
-if (!decision.messages || decision.messages[0].id !== "genesis-transport-restart") {
-  console.error(JSON.stringify(decision));
-  process.exit(1);
-}
-if (ignored.seq !== 0 || calls.some((call) => Array.isArray(call) && call[0] === "append" && call[2] === "genesis-transport-restart")) {
-  console.error(JSON.stringify({ ignored, calls }));
-  process.exit(1);
-}
-if (!calls.some((call) => Array.isArray(call) && call[0] === "append" && call[2] === "real")) {
+if (!calls.includes("wake")) {
   console.error(JSON.stringify(calls));
   process.exit(1);
 }
 """
         module = Path(self.temp.name) / "restart-check.mjs"
+        module.write_text(
+            script.replace("process.env.PLUGIN_PATH", json.dumps(plugin.as_uri())),
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [node, str(module)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "DSH_HOME": str(home),
+                "SESSION_ID": session_id,
+                "GENESIS_TRANSPORT_RESTART": "1",
+            },
+        )
+        if completed.returncode != 0:
+            self.fail(completed.stderr or completed.stdout)
+
+    def test_resume_plugin_transport_restart_idle_turn_acks_prompt(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; resume decision was not executed")
+        plugin = Path(__file__).with_name("genesis_session_resume_plugin.mjs")
+        home = Path(self.temp.name) / "idle-restart-home"
+        session_id = "session-idle-restart"
+        log = home / "sessions" / "proj" / session_id / "session.v3.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_text(
+            '{"type":"turn/end","seq":9,"data":{"reason":{"kind":"completed"}}}\n',
+            encoding="utf-8",
+        )
+        script = r"""
+import { apply } from process.env.PLUGIN_PATH;
+
+const calls = [];
+const agents = {
+  async create() {
+    calls.push("create");
+    return { created: true };
+  },
+  async resume() {
+    const agent = {
+      followup(message) {
+        calls.push(["followup", message && message.id]);
+      },
+      wakeDriver() {
+        calls.push("wake");
+      },
+      async preStep() {
+        return { kind: "enter", messages: [] };
+      },
+      session: {
+        append(type, data) {
+          calls.push(["append", type]);
+          return { seq: 1 };
+        },
+      },
+    };
+    return { agent };
+  },
+};
+apply({ agents });
+const handle = await agents.create({ sessionId: process.env.SESSION_ID });
+handle.agent.followup({ id: "user-1", role: "user", content: [{ type: "text", text: " " }] });
+const followups = calls.filter((call) => Array.isArray(call) && call[0] === "followup");
+if (followups.length !== 1 || followups[0][1] !== "genesis-transport-prompt-ack") {
+  console.error(JSON.stringify({ followups, calls }));
+  process.exit(1);
+}
+if (calls.includes("wake")) {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+"""
+        module = Path(self.temp.name) / "idle-restart-check.mjs"
         module.write_text(
             script.replace("process.env.PLUGIN_PATH", json.dumps(plugin.as_uri())),
             encoding="utf-8",

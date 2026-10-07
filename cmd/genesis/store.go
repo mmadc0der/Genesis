@@ -943,6 +943,67 @@ func readJournalFrom(path string, offset int64) ([]lifecycleEvent, int64, error)
 	return events, consumed, nil
 }
 
+// walkJournal visits complete records at and after offset. visit returns
+// false to leave the current record unconsumed. A torn or invalid trailing
+// line is left unconsumed so a later read can pick it up. The returned
+// offset is the first unread byte.
+func walkJournal(path string, offset int64, visit func(event lifecycleEvent, at, next int64) bool) (int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) && offset <= 0 {
+			return 0, nil
+		}
+		return offset, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return offset, err
+	}
+	if offset < 0 || offset > info.Size() {
+		offset = 0
+	}
+	if offset == info.Size() {
+		return offset, nil
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return offset, err
+	}
+	reader := bufio.NewReaderSize(file, 64*1024)
+	consumed := offset
+	for {
+		at := consumed
+		line, newline, tooLong, err := readJournalLine(reader)
+		if tooLong || err != nil {
+			break
+		}
+		if len(line) == 0 && !newline {
+			break
+		}
+		width := int64(len(line))
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			consumed += width
+			if !newline {
+				break
+			}
+			continue
+		}
+		var event lifecycleEvent
+		if err := json.Unmarshal(trimmed, &event); err != nil {
+			break
+		}
+		if !visit(event, at, consumed+width) {
+			return at, nil
+		}
+		consumed += width
+		if !newline {
+			break
+		}
+	}
+	return consumed, nil
+}
+
 func readJournalLine(reader *bufio.Reader) (line []byte, newline bool, tooLong bool, err error) {
 	for {
 		frag, readErr := reader.ReadSlice('\n')

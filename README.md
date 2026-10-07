@@ -424,7 +424,10 @@ started again, except a `turn/end` failure whose error code is `TRANSPORT`.
 That failure journals `dev.genesis.run.restart` and starts another run on the
 same DSH session and `dsh_home`. The new run is not a
 `dev.genesis.session.continue` event and does not append a user message; the
-resume plugin drops the SDK prompt and wakes the existing history. Three such
+resume plugin drops the SDK prompt. If the persisted session already ends on
+`turn/end`, it acks `session/prompt` immediately so the Python SDK's
+`session.run` can wait for `session.status` idle; otherwise it wakes the
+in-flight turn and acks the prompt when `turn/end` is appended. Three such
 restarts in a row are the limit. The failed run does not emit
 `dev.genesis.agent.finished` when a restart is accepted. Model-request retries
 stay inside the harness policy above.

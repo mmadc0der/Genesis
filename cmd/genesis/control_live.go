@@ -252,46 +252,16 @@ func (c *controlServer) flushLive(ctx context.Context, subs *liveSubs) {
 			}
 			continue
 		}
-		events, next, err := readJournalFrom(path, watch.offset)
+		advanced, next, err := c.tailRun(ctx, subs, runID, watch)
 		if err != nil {
 			continue
-		}
-		advanced := watch.after
-		emittedAll := true
-		for _, event := range events {
-			seq, ok := eventSequence(event)
-			if !ok || seq <= advanced {
-				continue
-			}
-			subs.mu.Lock()
-			current, watching := subs.runs[runID]
-			already := watching && current.gen == watch.gen && seq <= current.after
-			subs.mu.Unlock()
-			if already {
-				continue
-			}
-			event.Data = redactPrivateKeys(event.Data)
-			copied := event
-			if !subs.emit(liveFrame{
-				Op:     "event",
-				Topic:  "run",
-				RunID:  runID,
-				Cursor: event.Sequence,
-				Event:  &copied,
-			}) {
-				emittedAll = false
-				break
-			}
-			advanced = seq
 		}
 		subs.mu.Lock()
 		if current, ok := subs.runs[runID]; ok && current.gen == watch.gen && current.offset == watch.offset {
 			if current.after == watch.after {
 				current.after = advanced
 			}
-			if emittedAll {
-				current.offset = next
-			}
+			current.offset = next
 			subs.runs[runID] = current
 		}
 		subs.mu.Unlock()
@@ -341,6 +311,53 @@ func (c *controlServer) flushLive(ctx context.Context, subs *liveSubs) {
 			subs.mu.Unlock()
 		}
 	}
+}
+
+func (c *controlServer) tailRun(ctx context.Context, subs *liveSubs, runID string, watch runWatch) (uint64, int64, error) {
+	gate := c.runGate(runID)
+	gate.Lock()
+	defer gate.Unlock()
+	idx, err := c.ensureIndexLocked(ctx, runID)
+	if err != nil {
+		return watch.after, watch.offset, err
+	}
+	start := watch.offset
+	if start <= 0 || start > idx.size {
+		start = idx.byteAfter(watch.after)
+	}
+	advanced := watch.after
+	path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
+	next, err := walkJournal(path, start, func(event lifecycleEvent, _, _ int64) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		seq, ok := eventSequence(event)
+		if !ok || seq <= advanced {
+			return true
+		}
+		subs.mu.Lock()
+		current, watching := subs.runs[runID]
+		already := watching && current.gen == watch.gen && seq <= current.after
+		subs.mu.Unlock()
+		if already {
+			advanced = seq
+			return true
+		}
+		event.Data = redactPrivateKeys(event.Data)
+		copied := event
+		if !subs.emit(liveFrame{
+			Op:     "event",
+			Topic:  "run",
+			RunID:  runID,
+			Cursor: event.Sequence,
+			Event:  &copied,
+		}) {
+			return false
+		}
+		advanced = seq
+		return true
+	})
+	return advanced, next, err
 }
 
 func (c *controlServer) liveNotice(ctx context.Context) liveStateNotice {

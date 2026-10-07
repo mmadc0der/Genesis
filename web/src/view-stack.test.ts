@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canBack, canForward, createViewStack, goBack, goForward, pushView } from "./view-stack";
+import { canBack, canForward, createViewStack, goBack, goForward, navigateToFrame, pushView } from "./view-stack";
 
 describe("view stack", () => {
   it("starts with one frame and no history", () => {
@@ -26,5 +26,21 @@ describe("view stack", () => {
     stack = goBack(stack);
     stack = pushView(stack, { id: "b" });
     expect(stack.frames.map((frame) => frame.id)).toEqual(["wire", "b"]);
+  });
+
+  it("navigates to an existing frame with correct direction", () => {
+    let stack = pushView(createViewStack({ id: "wire" }), { id: "run:1" });
+    stack = pushView(stack, { id: "run:2" });
+    const backTo1 = navigateToFrame(stack, "run:1");
+    expect(backTo1.index).toBe(1);
+    expect(backTo1.direction).toBe(-1);
+    const forwardTo2 = navigateToFrame(backTo1, "run:2");
+    expect(forwardTo2.index).toBe(2);
+    expect(forwardTo2.direction).toBe(1);
+    const same = navigateToFrame(forwardTo2, "run:2");
+    expect(same).toBe(forwardTo2);
+    const pushedNew = navigateToFrame(same, "run:3");
+    expect(pushedNew.index).toBe(3);
+    expect(pushedNew.frames[3].id).toBe("run:3");
   });
 });
