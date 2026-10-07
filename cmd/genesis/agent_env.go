@@ -193,8 +193,11 @@ func stampedCLIEvent(template json.RawMessage, fallbackSource, fallbackType, fal
 	}, dataOverlay)
 }
 
+// reservedCLIEventType lists the types a job or schedule --emit may not name.
+// A publication comes only from genesis publish, which checks the reporter
+// group in the listener.
 func reservedCLIEventType(eventType string) bool {
-	return eventType == agentFinishedType || eventType == sessionContinueType
+	return eventType == agentFinishedType || eventType == sessionContinueType || eventType == publicationSubmittedType
 }
 
 func rejectReservedEmit(template json.RawMessage) error {

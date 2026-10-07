@@ -126,6 +126,9 @@ type eventServer struct {
 	syncing    bool
 	generation *generation
 	slots      parallelGate
+
+	pubMu sync.Mutex
+	pubs  *publicationRegister
 }
 
 func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +197,10 @@ func (s *eventServer) dispatchCloudEvent(w http.ResponseWriter, event cloudEvent
 	s.mu.RUnlock()
 	if current == nil {
 		http.Error(w, "generation is not loaded", http.StatusInternalServerError)
+		return
+	}
+	if eventType, ok := event.stringAttribute("type"); ok && eventType == publicationSubmittedType {
+		s.handlePublication(w, event, current)
 		return
 	}
 	if eventType, ok := event.stringAttribute("type"); ok && eventType == sessionContinueType {

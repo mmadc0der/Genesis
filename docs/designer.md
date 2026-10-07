@@ -47,7 +47,8 @@ reconciles the account at root `genesis launch` and on agents `/sync`:
 shared-write mode `0775` for the declared group. `shared-read` and
 `shared-write` are workspace modes, used only when the operator asks.
 `setup.groups` is separate: extra groups for an agent that places files
-for others. A private worker that never does that omits `groups`. Genesis
+for others, and `reporter` for an agent that publishes. A private worker
+that does neither omits `groups`. Genesis
 creates a missing group. The group name `shared` also ensures `/shared`,
 owned by `root:shared`, mode `2770` and setgid, so members can place files
 there for other members to read. Do not list reserved groups such as
@@ -80,8 +81,9 @@ Use `genesis job` when work must keep running after the turn.
 `genesis job start --emit '{CloudEvent}' -- <command>` starts that command.
 When the command exits, Genesis posts that CloudEvent so a rule can match
 it and another run can resume. Genesis stamps the event id and source on
-every job and schedule post and rejects type `dev.genesis.agent.finished`
-and type `dev.genesis.session.continue`. Neural-net training is the example:
+every job and schedule post and rejects type `dev.genesis.agent.finished`,
+type `dev.genesis.session.continue`, and type
+`dev.genesis.publication.submitted`. Neural-net training is the example:
 wake when training ends. `genesis job list`, `genesis job logs <id>`, and
 `genesis job stop <id>` show and stop it.
 
@@ -111,15 +113,25 @@ run>`. The cited run must already have ended. `202` contains the new run
 id. `204` means the continue was refused. The new run reuses the same DSH
 session and the same `DSH_HOME`.
 
+Publications are the stories the operator reads on the Wire. An agent files
+one with `genesis publish`; the listener accepts it only from an agent whose
+`setup.groups` contains `reporter`. The designer adds `reporter` to another
+worker only when the operator wants that worker to publish, and then puts
+the `genesis publish` line and the meaning of the four kinds in that
+worker's instructions. The format, limits, and register are in
+[publications.md](publications.md).
+
 The shipped oracle (`agents.d/oracle.yaml`, `rules.d/oracle.yaml`) is that
 worker shape: user `oracle`, home `/home/oracle`, cwd
-`/home/oracle/workspace`, `setup.workspace: private`. Its rule matches
+`/home/oracle/workspace`, `setup.workspace: private`, and `setup.groups`
+`shared` and `reporter`. It is the shipped reporter. Its rule matches
 `dev.genesis.agent.finished` with subject `*`, so it reviews every finished
 agent. The designer may change that rule. A review after every finish is
 mostly redundant, and skipping those runs is fine. One example is to start
 the oracle once, when a cycle ends, instead of on every finish. It reads
 `data.session` and `data.definition`, writes `reports/<runid>.md` in its
-workspace, and continues with the curl when the exit criterion is not met.
+workspace, files one publication for each report with `genesis publish`,
+and continues with the curl when the exit criterion is not met.
 Reserved OS user names include `genesis` and `root`.
 
 Required shape:
@@ -134,7 +146,7 @@ setup:
 
 `max_parallel` and `reasoning_effort` are siblings of `setup`, written only
 when asked. `groups` stays inside `setup`, and only for an agent that
-places files for others:
+places files for others or publishes (`reporter`):
 
 ```yaml
 max_parallel: 2

@@ -25,6 +25,8 @@ func main() {
 		runJob(logger, args)
 	case "schedule":
 		runSchedule(logger, args)
+	case "publish":
+		runPublish(logger, args)
 	default:
 		logger.Error("unknown command", "command", command)
 		os.Exit(2)

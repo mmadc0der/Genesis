@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { categoryById, feed } from "./editions";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { categoryById, type Edition } from "./editions";
 import { loadSnapshot, loopSpan, shortCause, sumUsage, type RunRow, type Snapshot, type Usage } from "./live";
+import { toEdition } from "./publications";
 import { Story } from "./Story";
+import { usePublications } from "./usePublications";
 import { canBack, canForward, createViewStack, goBack, goForward } from "./view-stack";
 
 function formatCount(value: number) {
@@ -81,9 +83,9 @@ function LiveBoard({ usage, events, up, down }: { usage: Usage; events: number; 
   );
 }
 
-function EditionIndex() {
+function EditionIndex({ editions }: { editions: Edition[] }) {
   const [tip, setTip] = useState<{ id: string; x: number; y: number } | null>(null);
-  const hovered = tip ? feed.find((edition) => edition.id === tip.id) : undefined;
+  const hovered = tip ? editions.find((edition) => edition.id === tip.id) : undefined;
 
   function showTip(id: string, target: HTMLButtonElement) {
     const box = target.getBoundingClientRect();
@@ -93,7 +95,7 @@ function EditionIndex() {
   return (
     <>
       <nav className="edition-index" aria-label="Leads">
-        {feed.map((edition) => {
+        {editions.map((edition) => {
           const category = categoryById(edition.category);
           return (
             <button
@@ -117,6 +119,40 @@ function EditionIndex() {
         </div>
       ) : null}
     </>
+  );
+}
+
+// FeedEnd sits under the last story. When it comes within reach of the
+// scrolling column, the next older page is requested. The effect restarts
+// after every page, so a short page cannot leave the feed stuck.
+function FeedEnd({
+  hasOlder,
+  loading,
+  count,
+  onNeed,
+}: {
+  hasOlder: boolean;
+  loading: boolean;
+  count: number;
+  onNeed: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || !hasOlder || loading) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) onNeed();
+      },
+      { root: node.closest(".column"), rootMargin: "0px 0px 600px 0px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasOlder, loading, count, onNeed]);
+  return (
+    <div ref={ref} className="feed-end" aria-live="polite">
+      {loading ? "Loading earlier stories" : !hasOlder && count > 0 ? "That is every story." : null}
+    </div>
   );
 }
 
@@ -193,6 +229,8 @@ export default function App() {
   const [driftOpen, setDriftOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const refreshRef = useRef<() => void>(() => {});
+  const publications = usePublications();
+  const refreshPublications = publications.refresh;
 
   useEffect(() => {
     let stopped = false;
@@ -215,15 +253,19 @@ export default function App() {
       socket.send(JSON.stringify({ op: "subscribe", topic: "runs" }));
       socket.send(JSON.stringify({ op: "subscribe", topic: "state" }));
     };
-    socket.onmessage = () => refresh();
+    socket.onmessage = () => {
+      refresh();
+      refreshPublications();
+    };
     socket.onclose = () => setLive(false);
     return () => {
       stopped = true;
       window.clearInterval(clock);
       socket.close();
     };
-  }, []);
+  }, [refreshPublications]);
 
+  const editions = useMemo(() => publications.items.map((item) => toEdition(item, now)), [publications.items, now]);
   const runs = snapshot?.runs ?? [];
   const running = runs.filter((run) => run.state === "open");
   const history = runs.filter((run) => run.state !== "open");
@@ -316,12 +358,20 @@ export default function App() {
             >
               <div className="sheet">
                 <LiveBoard usage={usage} events={runs.length} up={span.up} down={span.down} />
-                <EditionIndex />
-                {feed.length === 0 ? (
+                <EditionIndex editions={editions} />
+                {!publications.loaded ? (
+                  <p className="empty">{publications.error ? "Waiting for control" : "Loading stories"}</p>
+                ) : editions.length === 0 ? (
                   <p className="empty">No publications yet.</p>
                 ) : (
-                  feed.map((edition) => <Story key={edition.id} edition={edition} />)
+                  editions.map((edition) => <Story key={edition.id} edition={edition} />)
                 )}
+                <FeedEnd
+                  hasOlder={publications.hasOlder}
+                  loading={publications.loadingOlder}
+                  count={editions.length}
+                  onNeed={publications.loadOlder}
+                />
               </div>
             </div>
           </main>

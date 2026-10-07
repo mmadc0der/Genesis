@@ -469,6 +469,32 @@ body {
   color: #4a453d;
 }
 
+.story-body {
+  margin: 0.6rem 0 0;
+  max-width: 38rem;
+  font-size: 0.85rem;
+}
+.story-body summary {
+  cursor: pointer;
+  color: var(--faint);
+  letter-spacing: 0.04em;
+}
+.story-body pre {
+  margin: 0.5rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  color: #d9d1c3;
+}
+.feed-end {
+  min-height: 2.4rem;
+  padding: 0.8rem 0 1.2rem;
+  color: var(--faint);
+  font-size: 0.78rem;
+  text-align: center;
+}
+.feed-end:empty { min-height: 1px; padding: 0; }
+
 .mark {
   width: 0.45rem;
   height: 0.45rem;

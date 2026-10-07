@@ -373,6 +373,11 @@ func (c *controlServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.handleRuns(w, r)
+	case "/api/publications":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		c.handlePublications(w, r)
 	case "/api/events":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
@@ -405,6 +410,11 @@ func (c *controlServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			c.handleRepository(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/publications/"):
+			if !requireMethod(w, r, http.MethodGet) {
+				return
+			}
+			c.handlePublication(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/runs/"):
 			if !requireMethod(w, r, http.MethodGet) {
 				return

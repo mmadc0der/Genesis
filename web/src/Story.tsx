@@ -10,6 +10,12 @@ export function Story({ edition }: { edition: Edition }) {
       </div>
       <h2>{edition.headline}</h2>
       <p className="lede">{edition.lede}</p>
+      {edition.body ? (
+        <details className="story-body">
+          <summary>Full account</summary>
+          <pre>{edition.body}</pre>
+        </details>
+      ) : null}
       <p className="byline">
         {edition.byline.map((part) => (
           <span key={part}>{part}</span>

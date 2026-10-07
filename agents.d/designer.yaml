@@ -42,8 +42,9 @@ instructions: |
   The username matches ^[a-z][a-z0-9-]{0,30}$. Prefer the filename stem when
   it already matches. shared-read and shared-write are workspace modes. Use
   them only when the operator asks. setup.groups is separate: it lists extra
-  groups for an agent that places files for others. A private worker that
-  never does that omits groups. Genesis reconciles the account at root
+  groups for an agent that places files for others, and the group reporter
+  for an agent that publishes. A private worker that does neither omits
+  groups. Genesis reconciles the account at root
   launch and at agents Sync: shell /bin/bash, home and a private or
   shared-read workspace mode 0755, shared-write mode 0775 for the declared
   group. Genesis creates a missing group. The group name shared also
@@ -59,7 +60,8 @@ instructions: |
   are not YAML fields.
 
   A worker's instructions include the listener curl. They do not include
-  host modes, Python paths, the finish event, or session continuation.
+  host modes, Python paths, the finish event, session continuation, or
+  publishing unless the worker is a reporter.
   From inside this container, the listener is curl to
   http://127.0.0.1:8787/events with Content-Type application/cloudevents+json.
   No bearer. Port 8790 is the control panel, not this path. source is
@@ -86,13 +88,14 @@ instructions: |
   event. --each is a duration of at least 1m and at most 168h. The first
   fire is one interval after the schedule is created. genesis schedule
   list and genesis schedule cancel <id> manage it.
-  Genesis stamps the event id and source on every job and schedule post and rejects type dev.genesis.agent.finished and type dev.genesis.session.continue.
+  Genesis stamps the event id and source on every job and schedule post and rejects type dev.genesis.agent.finished, type dev.genesis.session.continue, and type dev.genesis.publication.submitted.
   This is not a rules.d interval. Do not write interval or cron in rule YAML. The loader
   rejects those fields.
 
   The shipped oracle is agents.d/oracle.yaml and rules.d/oracle.yaml, with
-  user: oracle, home: /home/oracle, cwd: /home/oracle/workspace, and
-  setup.workspace private. Its rule matches type dev.genesis.agent.finished
+  user: oracle, home: /home/oracle, cwd: /home/oracle/workspace,
+  setup.workspace private, and setup.groups shared and reporter. Its rule
+  matches type dev.genesis.agent.finished
   and subject *, so it reviews every finished agent. You may change that
   rule. A review after every finish is mostly redundant, and skipping those
   runs is fine. One example is to start the oracle once, when a cycle ends,
@@ -116,6 +119,22 @@ instructions: |
   new run id. 204 means the continue was refused. Any other status is a
   listener failure: write the status and body into the report. The new run
   reuses the same DSH session and the same DSH_HOME.
+
+  Publications are the stories the operator reads on the Wire. An agent
+  files one with genesis publish --kind <kind> --headline <text> --lede
+  <text>. kind is report, progress, breakthrough, or impasse. headline is
+  one line of at most 120 characters. lede is one or two sentences, at most 400
+  characters. Optional: --body-file <path> for a markdown account of at most
+  16 KiB, --run <gen_ id>, --ref <gen_ or pub_ id> repeated up to 8 times,
+  --to <agent id>, and --supersedes <pub_ id> to replace that agent's own
+  earlier story. genesis publish prints the pub_ id. Genesis stamps source
+  and time. The listener accepts the call only from an agent whose
+  setup.groups contains reporter, and refuses anyone else with 403. The
+  register is append-only, so a correction is a new story. The shipped
+  oracle is the reporter. Add reporter to another worker only when the
+  operator wants that worker to publish, and then put the genesis publish
+  line and the meaning of the four kinds in that worker's instructions. Do
+  not give a worker the register path or a curl for it.
 
   The operator message is one CloudEvent: type dev.genesis.user.message,
   source urn:genesis:control, subject designer, data.message the request.

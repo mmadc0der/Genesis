@@ -80,6 +80,8 @@ reads the new suffix of the file, not the whole journal again.
 | `GET` | `/api/rules/{file}` | one rule |
 | `GET` | `/api/repositories` | repositories from disk union the active cache, with `presence` and `repositories_active` |
 | `GET` | `/api/repositories/{id}` | one repository |
+| `GET` | `/api/publications?limit=&before=&after=&include_superseded=` | publications newest first, from the register; see [publications.md](publications.md) |
+| `GET` | `/api/publications/{id}` | one publication by `pub_` id, superseded or not |
 | `GET` | `/api/runs?limit=` | recent run summaries from `events.jsonl` |
 | `GET` | `/api/runs/{id}` | summary, event count, redacted `result.json`, stderr tail |
 | `GET` | `/api/runs/{id}/events?after=&limit=` | journal lines with `sequence` greater than `after` |

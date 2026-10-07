@@ -964,7 +964,7 @@ func TestCommittedOracleIsDedicatedReviewer(t *testing.T) {
 	if oracle.Setup == nil || oracle.Setup.Workspace != workspacePrivate {
 		t.Fatalf("oracle setup = %#v", oracle.Setup)
 	}
-	if len(oracle.Setup.Groups) != 1 || oracle.Setup.Groups[0] != sharedGroupName {
+	if len(oracle.Setup.Groups) != 2 || oracle.Setup.Groups[0] != sharedGroupName || oracle.Setup.Groups[1] != reporterGroupName {
 		t.Fatalf("oracle groups = %#v", oracle.Setup.Groups)
 	}
 	if oracle.GitHub != nil {
@@ -985,10 +985,25 @@ func TestCommittedOracleIsDedicatedReviewer(t *testing.T) {
 		"listener failure",
 		"dev.genesis.agent.finished",
 		"exit criterion",
+		"You are the reporter",
+		"genesis publish --kind report",
+		"--body-file reports/<runid>.md",
+		"--supersedes",
+		"at most 120 characters",
+		"at most 400 characters",
+		"at most 16 KiB",
 	} {
 		if !strings.Contains(oracle.Instructions, phrase) {
 			t.Fatalf("oracle instructions missing %q", phrase)
 		}
+	}
+	for _, kind := range publicationKinds {
+		if !strings.Contains(oracle.Instructions, kind) {
+			t.Fatalf("oracle instructions do not name publication kind %q", kind)
+		}
+	}
+	if maxPublicationHeadline != 120 || maxPublicationLede != 400 || maxPublicationBody != 16<<10 {
+		t.Fatal("publication limits changed: update the oracle and designer instructions and docs/publications.md")
 	}
 	for _, phrase := range []string{
 		"useradd",
@@ -1015,9 +1030,22 @@ func TestCommittedOracleIsDedicatedReviewer(t *testing.T) {
 		"workspace: private",
 		"mostly redundant",
 		"when a cycle ends",
+		"genesis publish --kind <kind> --headline <text> --lede",
+		"setup.groups contains reporter",
+		"dev.genesis.publication.submitted",
+		"append-only",
+		"at most 120 characters",
+		"at most 400",
+		"16 KiB",
+		"setup.groups shared and reporter",
 	} {
 		if !strings.Contains(designer.Instructions, phrase) {
 			t.Fatalf("designer instructions missing %q", phrase)
+		}
+	}
+	for _, kind := range publicationKinds {
+		if !strings.Contains(designer.Instructions, kind) {
+			t.Fatalf("designer instructions do not name publication kind %q", kind)
 		}
 	}
 

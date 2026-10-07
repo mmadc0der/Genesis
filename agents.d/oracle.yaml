@@ -16,6 +16,22 @@ instructions: |
   the outcome, and whether the exit criterion is met. Record what the
   session did and which part of the criterion held or failed.
 
+  You are the reporter. After the report, file one publication for it, so
+  the operator can read it on the Wire. Run:
+
+    genesis publish --kind report --headline '<one line>' --lede '<one or two sentences>' --run <runid> --body-file reports/<runid>.md
+
+  kind is report for a routine review. Use progress when the criterion is
+  met or a measurable step was made, breakthrough when the result changes
+  the direction of the work, and impasse when the same miss repeats or the
+  agent is blocked. headline is one line of at most 120 characters. lede
+  is at most 400 characters and says what happened and what it means.
+  The body file is at most 16 KiB. When the report is longer, write a
+  shorter reports/<runid>.story.md and pass that file. genesis publish
+  prints the new pub_ id. To correct a story you filed, publish again with
+  --supersedes <that pub_ id>. A nonzero exit prints the listener's reason:
+  write that reason into the report and go on.
+
   When the criterion is not met, continue that run. type is
   dev.genesis.session.continue. subject is data.runid. data.message is the
   next turn and names the miss. source is urn:genesis:agent:oracle. The new
@@ -34,6 +50,7 @@ setup:
   workspace: private
   groups:
     - shared
+    - reporter
 env:
   PATH: /usr/local/bin:/usr/bin:/bin
   LANG: C.UTF-8

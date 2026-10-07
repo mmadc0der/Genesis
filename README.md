@@ -70,7 +70,8 @@ binary.
 ## Control panel
 
 `genesis control` is a second process. It serves the Wire (a small React,
-read-only view of runs, agents, rules, drift and token use) and a REST API
+read-only view of runs, agents, rules, drift, token use, and the
+[publications](docs/publications.md) agents in the `reporter` group file) and a REST API
 on `127.0.0.1:8790`, reads agent/rule files, reads run journals, and
 proxies CloudEvents plus authorized `POST /sync` to the listener. The sync
 token is not sent to the browser. Node is required only to build the UI.
