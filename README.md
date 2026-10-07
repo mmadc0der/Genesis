@@ -69,8 +69,9 @@ binary.
 
 ## Control panel
 
-`genesis control` is a second process. It serves a small Preact UI and REST
-API on `127.0.0.1:8790`, reads agent/rule files, reads run journals, and
+`genesis control` is a second process. It serves the Wire (a small React,
+read-only view of runs, agents, rules, drift and token use) and a REST API
+on `127.0.0.1:8790`, reads agent/rule files, reads run journals, and
 proxies CloudEvents plus authorized `POST /sync` to the listener. The sync
 token is not sent to the browser. Node is required only to build the UI.
 See [docs/control.md](docs/control.md).
@@ -87,8 +88,10 @@ npm run build --prefix web
 
 Open `http://127.0.0.1:8790/`. The listener stays on `127.0.0.1:8787`.
 `GET /health` and `GET /generation` are read-only views of that process.
-Select the `designer.yaml` rule (`dev.genesis.user.message`) to send a
-user message to the shared-UID designer. After it writes YAML, click Sync.
+The Wire UI has no message composer or Sync button yet. To message the
+shared-UID designer, `POST /api/messages` with `{"rule":"designer.yaml",
+"message":"..."}`. After it writes YAML, `POST /api/sync` with `{}`. See
+[docs/designer.md](docs/designer.md).
 
 ## Agents
 
@@ -182,9 +185,9 @@ start; later filesystem edits are inactive until an authorized `POST /sync`.
 A missing agent reference or leftover `run` block fails closed at load or
 sync time.
 
-`rules.d/designer.yaml` is the dedicated user-message rule. The control panel
-copies its match (`type: dev.genesis.user.message`, `source:
-urn:genesis:control`, `subject: designer`) and puts the composer text in
+`rules.d/designer.yaml` is the dedicated user-message rule. `POST
+/api/messages` copies its match (`type: dev.genesis.user.message`, `source:
+urn:genesis:control`, `subject: designer`) and puts the message text in
 `data.message`.
 
 The rule name is its filename. Rules have no `cwd`, environment, arguments,

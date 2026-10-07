@@ -10,11 +10,11 @@ OS user, and not an authorized `/sync` client.
 |---|---|---|
 | Agent | `agents.d/designer.yaml` | No `user` / `setup`. `cwd` is `/var/lib/genesis/config`. `home` is `/home/genesis`. |
 | Rule | `rules.d/designer.yaml` | Exact match on `type=dev.genesis.user.message`, `source=urn:genesis:control`, `subject=designer`. |
-| Panel | Control composer | Select `designer.yaml` (shown as `dev.genesis.user.message`). Type a message. Send. Then Sync after it writes YAML. |
+| Control API | `POST /api/messages` | `{"rule":"designer.yaml","message":"…"}`. Then `POST /api/sync` with `{}` after it writes YAML. The Wire UI has no composer or Sync button yet. |
 | Schema | `/usr/share/genesis/schema/repository-declaration.txt` | Loader contract for `repos.d`. World-readable in the image. Not copied into the config volume. |
 
-The listener UID (`genesis` in Compose, uid `65532`) runs this agent. The
-panel Details row is **Shared listener UID**. Output files it creates under
+The listener UID (`genesis` in Compose, uid `65532`) runs this agent. It has
+no `user`, so it is the **shared listener UID**. Output files it creates under
 the config volume are owned by `genesis`. That is expected, not a dedicated-user
 proof.
 
@@ -31,7 +31,7 @@ Provider identities live in `/etc/genesis/providers.d`; see
 it writes may name a `repos.d` id in an optional `github` block. Secret
 values are not YAML fields. Genesis reconciles OS users from worker YAML.
 After it writes files, an operator must **Sync**.
-The panel Sync reloads agents, rules, and repos together. A rules-only sync
+`POST /api/sync` with `{}` reloads agents, rules, and repos together. A rules-only sync
 can leave a new agent inactive. A sync that omits repos leaves a new
 `repos.d` file inactive. Disk edits stay inactive until then. Matching
 active/draft digests only mean the cache equals the files currently on the
@@ -163,7 +163,7 @@ for shared or ephemeral work.
 ```
 
 The compact CloudEvent JSON is the SDK user message. `data.message` is the
-text from the composer. The listener still matches only the **active**
+text from the request. The listener still matches only the **active**
 generation, so a newly seeded designer rule does not run until Sync if the
 process was already up with an older cache. A container start that ran the
 entrypoint first loads whatever is on the volume, including newly copied
@@ -200,7 +200,7 @@ This signature is **not** a passing dedicated-user test:
 - `getent passwd` inside the listener container lists `genesis` and does not
   list `workspace-janitor`
 - files the agent wrote are owned by `genesis`
-- the control panel Details row says **Shared listener UID**
+- the agent has no `user` (shared listener UID)
 - active and draft digests match
 
 It is the expected picture of **persisted pre-upgrade named-volume config**.
@@ -275,8 +275,8 @@ curl -i http://127.0.0.1:8790/api/sync \
   --data '{"scope":["agents","rules"]}'
 ```
 
-Then in the panel select `dev.genesis.user.message` / `designer.yaml`, send a
-message, and wait for the run. Edits remain drafts until Sync.
+Then `POST /api/messages` with `{"rule":"designer.yaml","message":"…"}` and
+wait for the run. Edits remain drafts until Sync.
 
 ## Destructive clean-volume smoke
 
@@ -302,9 +302,9 @@ curl -s http://127.0.0.1:8790/api/agents
 ```
 
 After a clean volume the janitor YAML includes `user: workspace-janitor`,
-launch creates that OS user, and the panel shows `OS user workspace-janitor`
-for that agent. The designer still omits `user` and still shows Shared
-listener UID.
+launch creates that OS user, and `/api/agents` reports `user:
+workspace-janitor` for that agent. The designer still omits `user` and still
+runs as the shared listener UID.
 
 `sh scripts/wsl-docker-smoke.sh` without `--reset-volumes` keeps the named
 volumes. If the volume janitor lacks `user:`, that script fails closed and

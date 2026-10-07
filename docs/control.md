@@ -32,6 +32,11 @@ uv run --locked ./bin/genesis launch \
   -web web/dist
 ```
 
+The UI in `web/` is the Wire: a read-only React view of runs, agents, rules,
+drift, token use and loop span. It does not yet send messages, sync, show a
+run transcript, or show repositories. Those are API-only for now. The previous
+Preact panel that did is in git history.
+
 Build the UI with `npm ci --prefix web && npm run build --prefix web`.
 `npm run dev --prefix web` serves Vite on `127.0.0.1:4179` and proxies `/api`
 to the control process. The shipped UI is the files the Go process serves.
@@ -124,9 +129,10 @@ the active generation, so a draft rule does not match until sync.
 
 The committed `designer.yaml` rule is the dedicated user-message match
 (`dev.genesis.user.message` / `urn:genesis:control` / `subject: designer`).
-Select it in the panel. The designer agent has no `user`; Details shows
-Shared listener UID. After it writes YAML, click Sync. See
-[designer.md](designer.md).
+Send it with `POST /api/messages` (`{"rule":"designer.yaml","message":"…"}`).
+The designer agent has no `user`, so it runs as the shared listener UID. After
+it writes YAML, `POST /api/sync` with `{}`. The Wire UI has no composer or
+Sync button yet. See [designer.md](designer.md).
 
 `POST /api/sync` always requires `Content-Type: application/json` and one JSON
 object (`{}` selects agents, rules, and repos). A missing media type is 415.
@@ -158,8 +164,8 @@ Client frames:
 Server frames are `event` (one lifecycle event), `run` (a summary whose state or
 sequence changed), `state` (digests and drift; refetch REST for the full
 document), `pong`, and `error`. Event frames are pushed from the listener
-subscription. The panel applies each new event onto the open transcript
-instead of rebuilding it from the whole history. The listener stream is not
+subscription. A client can apply each new event onto what it already holds
+instead of rebuilding from the whole history. The listener stream is not
 a second copy of the journal: overflow closes the subscriber, and the file
 fills the gap.
 
@@ -171,21 +177,11 @@ the published binding is `127.0.0.1:8790`.
 
 ## What this does not do
 
-- No second journal. `GET /live` repeats events already in `events.jsonl`. Trajectory rows come from that file: assistant
-  text, tool name plus arguments or result text, `turn/end` `reason.error`
-  message, code, and status, and `llm/retry` count, code, and message. Live
-  `on_chunk` deltas append onto the open assistant or tool row when the
-  runtime actually forwards them. `usage` and `finish` frames are not painted.
-  Each activity row is one line until it is clicked. Clicking the row toggles
-  the full text already produced for that row; clicking again collapses it.
-  Assistant messages, reasoning, tool results, retry text, and turn failures
-  use a single-line preview, with an ellipsis when the text is longer.
-  Tool-call arguments are compacted to one short line instead of pretty-printed
-  JSON. A displayed assistant body or tool result is capped at 16 KiB; the journal
-  line keeps the redacted frame up to the existing 16 MiB cap. The journal
-  format is unchanged. The run-level
-  error stays the wrapper string only when no `turn/end` failure object was
-  journaled.
+- No second journal. `GET /live` repeats events already in `events.jsonl`. Live
+  `on_chunk` deltas are journaled only when the runtime actually forwards
+  them. A journal line keeps the redacted frame up to the existing 16 MiB cap.
+  The journal format is unchanged. The run-level error stays the wrapper
+  string only when no `turn/end` failure object was journaled.
 - No database, SSE channel, or external broker.
 - No YAML form editor, charts, or component library.
 - No cancel, retry, queue, or run timeout.
