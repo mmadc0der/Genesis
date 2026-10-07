@@ -258,9 +258,11 @@ it or `providers.d/example.yaml` into `genesis-config`. Compose bind-mounts
 `./runtime/secrets` onto `/var/lib/genesis/secrets` for the root listener
 only. `runtime/` is gitignored. On start, root tightens provider files to
 `0640` and secret files to `0600`. The entrypoint does not create
-`/var/lib/genesis/secrets` or the files inside it. Startup exits when that
-directory is missing, or when `GITHUB_APP_RECONCILER_PEM`, `GITHUB_APP_ID`,
-or `GITHUB_APP_WEBHOOK_SECRET` is missing. Dedicated agent users cannot read
+`/var/lib/genesis/secrets` or the files inside it. When that directory
+exists, startup locks it. `GITHUB_APP_RECONCILER_PEM`, `GITHUB_APP_ID`,
+and `GITHUB_APP_WEBHOOK_SECRET` may be absent. A symlink or other non-file
+at one of those names exits. GitHub calls fail closed until the files they
+need are present. Dedicated agent users cannot read
 the provider directory.
 
 An agent may declare an optional `github` capability: a `repos.d`

@@ -243,9 +243,12 @@ owned by root, and is not a symlink. It must not overlap agents, rules,
 repos, providers, data, the designer config root, `/home`, or the
 credential store. Compose mounts `./runtime/secrets` on the root service
 only. The entrypoint does not create that directory or any secret file.
-If the directory is missing, or if `GITHUB_APP_RECONCILER_PEM`,
-`GITHUB_APP_ID`, or `GITHUB_APP_WEBHOOK_SECRET` is missing, it exits.
-The listener process, control, and agents do not receive the flag or
+When the directory exists, startup locks it. `GITHUB_APP_RECONCILER_PEM`,
+`GITHUB_APP_ID`, and `GITHUB_APP_WEBHOOK_SECRET` may be absent. A symlink
+or other non-file at one of those names exits. GitHub calls fail closed
+until the App id and the PEM named by the reconciler identity are present.
+Webhook verification fails closed until `GITHUB_APP_WEBHOOK_SECRET` is
+present. The listener process, control, and agents do not receive the flag or
 the mount.
 
 Each file is a regular file whose name is the provider secret reference.

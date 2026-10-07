@@ -1449,11 +1449,19 @@ func TestEntrypointSecretDirectoryStaysPrivate(t *testing.T) {
 	}
 	empty := t.TempDir()
 	output, err = run(empty, "own-config")
-	if err == nil || !bytes.Contains(output, []byte("secret file is missing")) {
-		t.Fatalf("missing secret file error = %v\n%s", err, output)
+	if err != nil {
+		t.Fatalf("empty secrets directory: %v\n%s", err, output)
 	}
 	if _, statErr := os.Stat(filepath.Join(empty, "GITHUB_APP_ID")); !os.IsNotExist(statErr) {
 		t.Fatalf("entrypoint created a secret file: %v", statErr)
+	}
+	linked := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(linked, "GITHUB_APP_ID")); err != nil {
+		t.Fatal(err)
+	}
+	output, err = run(linked, "own-config")
+	if err == nil || !bytes.Contains(output, []byte("secret file is not a regular file")) {
+		t.Fatalf("secret symlink error = %v\n%s", err, output)
 	}
 	output, err = run(secrets, "own-config")
 	if err != nil {

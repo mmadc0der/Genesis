@@ -4,9 +4,10 @@
 # upgrades can deliver newly shipped agents and rules. repos.d is created when
 # missing; image defaults are copied only if that directory exists in the image.
 # providers.d is not seeded. It stays outside this volume. The secrets
-# directory is not created. A missing directory, or a missing
-# GITHUB_APP_RECONCILER_PEM, GITHUB_APP_ID, or GITHUB_APP_WEBHOOK_SECRET,
-# exits. When
+# directory is not created. When that directory exists, startup locks it.
+# GITHUB_APP_RECONCILER_PEM, GITHUB_APP_ID, and GITHUB_APP_WEBHOOK_SECRET
+# may be absent. A symlink or other non-file at one of those names exits.
+# When
 # GENESIS_PROVIDERS_DIR or /etc/genesis/providers.d exists, root tightens
 # that directory in place (0750 root:genesis, files 0640) and does not
 # follow symlinks. The example provider file is not copied here.
@@ -262,8 +263,9 @@ lock_secrets() {
 	fi
 	for name in GITHUB_APP_RECONCILER_PEM GITHUB_APP_ID GITHUB_APP_WEBHOOK_SECRET; do
 		file=$path/$name
-		if [ -L "$file" ] || [ ! -f "$file" ]; then
-			echo "genesis: secret file is missing: $name" >&2
+		# Absent is a local-only start. A symlink or other non-file is not.
+		if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
+			echo "genesis: secret file is not a regular file: $name" >&2
 			exit 1
 		fi
 	done
