@@ -10,8 +10,8 @@ import {
 } from "./chat";
 import { sumUsage } from "./live";
 import { Markdown } from "./Markdown";
+import { onLive, watchRun } from "./liveSocket";
 
-const POLL_MS = 2000;
 const STICK_PX = 96;
 
 function clock(value: string) {
@@ -125,6 +125,10 @@ function ExpandableEntry({
   const contentRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(defaultOpen);
   const [tall, setTall] = useState(false);
+
+  useEffect(() => {
+    if (defaultOpen) setOpen(true);
+  }, [defaultOpen]);
 
   useLayoutEffect(() => {
     const el = contentRef.current;
@@ -346,41 +350,38 @@ export function Chat({
       });
     };
     tick();
-    const timer = window.setInterval(tick, POLL_MS);
-
-    // Subscribe to live run events for token chunks
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${proto}://${location.host}/api/live`);
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ op: "subscribe", topic: "run", run_id: runId, after: "now" }));
-    };
-    socket.onmessage = (event) => {
+    watchRun(runId);
+    const unlisten = onLive((frame) => {
+      if (stopped || (frame.run_id && frame.run_id !== runId)) return;
       try {
-        const frame = JSON.parse(event.data);
         if (frame.op === "event" && frame.event) {
           const ev = frame.event;
           if (ev.type === "dev.genesis.run.chunk") {
-            const body = ev.data || {};
+            const body = (ev.data || {}) as {
+              raw?: { payload?: { chunk?: { type?: string; text?: string; name?: string; argumentsDelta?: string } } };
+              chunk_type?: string;
+            };
             const raw = body.raw?.payload?.chunk || {};
+            const text = raw.text ?? "";
             const chunkType = body.chunk_type || raw.type;
-            if (chunkType === "reasoning-delta" && raw.text) {
+            if (chunkType === "reasoning-delta" && text) {
               streamingActive.current = true;
               setLiveSegs((curr) =>
                 continueLive(
                   curr,
                   "thought",
-                  (last) => (last.kind === "thought" ? { ...last, text: last.text + raw.text } : last),
-                  () => ({ id: 0, kind: "thought", text: raw.text }),
+                  (last) => (last.kind === "thought" ? { ...last, text: last.text + text } : last),
+                  () => ({ id: 0, kind: "thought", text }),
                 ),
               );
-            } else if (chunkType === "text-delta" && raw.text) {
+            } else if (chunkType === "text-delta" && text) {
               streamingActive.current = true;
               setLiveSegs((curr) =>
                 continueLive(
                   curr,
                   "text",
-                  (last) => (last.kind === "text" ? { ...last, text: last.text + raw.text } : last),
-                  () => ({ id: 0, kind: "text", text: raw.text }),
+                  (last) => (last.kind === "text" ? { ...last, text: last.text + text } : last),
+                  () => ({ id: 0, kind: "text", text }),
                 ),
               );
             } else if (chunkType === "tool-call-delta") {
@@ -412,13 +413,13 @@ export function Chat({
       } catch {
         // ignore malformed frame
       }
-    };
+    });
 
     return () => {
       stopped = true;
       streamingActive.current = false;
-      window.clearInterval(timer);
-      socket.close();
+      unlisten();
+      watchRun(null);
     };
   }, [runId, refresh]);
 

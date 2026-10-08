@@ -21,6 +21,7 @@ import { PublicationPage, Story } from "./Story";
 import { usePublications } from "./usePublications";
 import { createViewStack, navigateToFrame, pushView } from "./view-stack";
 import { Chat } from "./Chat";
+import { onLive, retainLive } from "./liveSocket";
 import { EventChat } from "./EventChat";
 import { AgentView } from "./AgentView";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -463,64 +464,41 @@ export default function App() {
     refreshRef.current = refresh;
     refresh();
     const clock = window.setInterval(() => setNow(Date.now()), 15000);
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    let socket: WebSocket | null = null;
-    let reconnect = 0;
+    const release = retainLive();
     const applyRun = (row: RunRow) => {
       if (!row.run_id) return;
-      snapGen.current += 1;
+      pendingRuns.set(row.run_id, row);
       setSnapshot((current) => {
-        if (!current) {
-          pendingRuns.set(row.run_id, row);
-          return current;
-        }
+        if (!current) return current;
         return { ...current, runs: upsertRun(current.runs, row) };
       });
     };
-    const connect = () => {
-      if (stopped) return;
-      socket = new WebSocket(`${proto}://${location.host}/api/live`);
-      socket.onopen = () => {
-        setLive(true);
-        setConnecting(false);
-        socket?.send(JSON.stringify({ op: "subscribe", topic: "runs" }));
-        socket?.send(JSON.stringify({ op: "subscribe", topic: "state" }));
-      };
-      socket.onmessage = (event) => {
-        let frame: { op?: string; run?: RunRow };
-        try {
-          frame = JSON.parse(String(event.data));
-        } catch {
-          return;
-        }
-        if (frame.op === "run" && frame.run) {
-          applyRun(frame.run);
-          return;
-        }
-        if (frame.op === "state") {
-          refresh();
-          refreshPublications();
-        }
-      };
-      socket.onclose = () => {
-        setLive(false);
-        setConnecting(false);
-        if (!stopped) reconnect = window.setTimeout(connect, 1000);
-      };
-    };
-    connect();
+    setLive(true);
+    setConnecting(false);
+    const unlisten = onLive((frame) => {
+      if (frame.op === "run" && frame.run) {
+        applyRun(frame.run as RunRow);
+        return;
+      }
+      if (frame.op === "state") {
+        refresh();
+        refreshPublications();
+      }
+    });
     return () => {
       stopped = true;
-      window.clearTimeout(reconnect);
       window.clearInterval(clock);
-      socket?.close();
+      unlisten();
+      release();
     };
   }, [refreshPublications]);
 
   const editions = useMemo(() => publications.items.map((item) => toEdition(item, now)), [publications.items, now]);
   const runs = snapshot?.runs ?? [];
   const running = runs.filter((run) => run.state === "open");
-  const history = runs.filter((run) => run.state !== "open");
+  const history = runs
+    .filter((run) => run.state !== "open")
+    .sort((left, right) => (right.ended_at || "").localeCompare(left.ended_at || ""));
   const historyShown = HISTORY_PREVIEW + historyExtra;
   const historyVisible = history.slice(0, historyShown);
   const historyHasMore = history.length > historyShown;
