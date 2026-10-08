@@ -1,0 +1,3 @@
+[submodule "submodules/eventer"]
+	path = submodules/eventer
+	url = https://github.com/mmadc0der/Eventer.git

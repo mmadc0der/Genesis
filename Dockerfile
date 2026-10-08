@@ -7,12 +7,20 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
+FROM rust:1.85-bookworm AS eventer-build
+WORKDIR /src/eventer
+COPY submodules/eventer ./
+RUN cargo build --release -p eventer --lib
+
 FROM golang:1.26-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
-RUN CGO_ENABLED=0 go build -o /out/genesis ./cmd/genesis
+COPY pkg ./pkg
+COPY submodules/eventer/include ./submodules/eventer/include
+COPY --from=eventer-build /src/eventer/target/release/libeventer.a ./submodules/eventer/target/release/libeventer.a
+RUN CGO_ENABLED=1 go build -o /out/genesis ./cmd/genesis
 
 FROM python:3.12-bookworm AS python-deps
 COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /usr/local/bin/uv
@@ -33,7 +41,7 @@ COPY --from=python-deps /app/.venv /app/.venv
 COPY --from=web /src/dist /usr/share/genesis/web
 COPY agents.d /usr/share/genesis/defaults/agents.d
 COPY rules.d /usr/share/genesis/defaults/rules.d
-COPY schema/repository-declaration.txt /usr/share/genesis/schema/repository-declaration.txt
+COPY schema /usr/share/genesis/schema
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/genesis /usr/local/bin/docker-entrypoint.sh \
 	&& chmod -R a+rX /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web /usr/share/genesis/schema \
