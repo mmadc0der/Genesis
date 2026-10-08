@@ -69,15 +69,23 @@ type chatRun struct {
 	Retries int `json:"retries,omitempty"`
 }
 
+type activeTurnData struct {
+	Thought  string `json:"thought,omitempty"`
+	Text     string `json:"text,omitempty"`
+	ToolName string `json:"tool_name,omitempty"`
+	ToolArgs string `json:"tool_args,omitempty"`
+}
+
 type chatSession struct {
-	RunID     string    `json:"run_id"`
-	SessionID string    `json:"session_id,omitempty"`
-	Agent     string    `json:"agent"`
-	Runs      []chatRun `json:"runs"`
+	RunID           string          `json:"run_id"`
+	SessionID       string          `json:"session_id,omitempty"`
+	Agent           string          `json:"agent"`
+	Runs            []chatRun       `json:"runs"`
 	// ContinueRun is the run a follow-up cites. It is empty while a run is
 	// open or when nothing can be continued, and ContinueBlocked then says why.
-	ContinueRun     string `json:"continue_run,omitempty"`
-	ContinueBlocked string `json:"continue_blocked,omitempty"`
+	ContinueRun     string          `json:"continue_run,omitempty"`
+	ContinueBlocked string          `json:"continue_blocked,omitempty"`
+	ActiveTurn      *activeTurnData `json:"active_turn,omitempty"`
 }
 
 // chatState is the condensed journal of one run, read forward only. It keeps
@@ -88,6 +96,108 @@ type chatState struct {
 	trigger chatTrigger
 	items   []chatItem
 	retries int
+}
+
+type activeStream struct {
+	mu         sync.Mutex
+	runID      string
+	thought    strings.Builder
+	text       strings.Builder
+	toolName   string
+	toolCallID string
+	toolArgs   strings.Builder
+	lastAt     string
+}
+
+var activeStreams = struct {
+	sync.Mutex
+	byRun map[string]*activeStream
+}{byRun: map[string]*activeStream{}}
+
+func getOrCreateStream(runID string) *activeStream {
+	activeStreams.Lock()
+	defer activeStreams.Unlock()
+	s, ok := activeStreams.byRun[runID]
+	if !ok {
+		s = &activeStream{runID: runID}
+		activeStreams.byRun[runID] = s
+	}
+	return s
+}
+
+func discardStream(runID string) {
+	activeStreams.Lock()
+	defer activeStreams.Unlock()
+	delete(activeStreams.byRun, runID)
+}
+
+func (s *activeStream) snapshot() *activeTurnData {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	thought := s.thought.String()
+	text := s.text.String()
+	toolArgs := s.toolArgs.String()
+	if thought == "" && text == "" && toolArgs == "" && s.toolName == "" {
+		return nil
+	}
+	return &activeTurnData{
+		Thought:  thought,
+		Text:     text,
+		ToolName: s.toolName,
+		ToolArgs: toolArgs,
+	}
+}
+
+func absorbChunkToStream(event lifecycleEvent) {
+	if event.RunID == "" {
+		return
+	}
+	var body struct {
+		ChunkType string `json:"chunk_type"`
+		Frame     string `json:"frame"`
+		Raw       struct {
+			Payload struct {
+				Chunk struct {
+					Type           string `json:"type"`
+					Text           string `json:"text"`
+					Name           string `json:"name"`
+					ID             string `json:"id"`
+					ArgumentsDelta string `json:"argumentsDelta"`
+				} `json:"chunk"`
+			} `json:"payload"`
+		} `json:"raw"`
+	}
+	if err := json.Unmarshal(event.Data, &body); err != nil {
+		return
+	}
+	chunk := body.Raw.Payload.Chunk
+	chunkType := body.ChunkType
+	if chunkType == "" {
+		chunkType = chunk.Type
+	}
+	stream := getOrCreateStream(event.RunID)
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if event.Time != "" {
+		stream.lastAt = event.Time
+	}
+	switch chunkType {
+	case "reasoning-delta":
+		stream.thought.WriteString(chunk.Text)
+	case "text-delta":
+		stream.text.WriteString(chunk.Text)
+	case "tool-call-delta":
+		if chunk.Name != "" {
+			stream.toolName = chunk.Name
+		}
+		if chunk.ID != "" {
+			stream.toolCallID = chunk.ID
+		}
+		stream.toolArgs.WriteString(chunk.ArgumentsDelta)
+	}
 }
 
 var chatStates = struct {
@@ -213,6 +323,16 @@ func (c *controlServer) readChatSession(runID string) (chatSession, error) {
 		session.Agent = summary.Agent
 	}
 	session.ContinueRun, session.ContinueBlocked = continueTarget(runs)
+
+	// If the newest run is still in-progress, attach any in-flight active turn
+	if len(runs) > 0 && runs[len(runs)-1].State == runStateOpen {
+		activeStreams.Lock()
+		stream := activeStreams.byRun[runs[len(runs)-1].RunID]
+		activeStreams.Unlock()
+		if stream != nil {
+			session.ActiveTurn = stream.snapshot()
+		}
+	}
 	return session, nil
 }
 

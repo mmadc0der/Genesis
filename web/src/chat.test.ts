@@ -4,6 +4,7 @@ import {
   emitMessage,
   inlineParts,
   isWorking,
+  liveToolCommand,
   sendFollowUp,
   sourceLabel,
   textBlocks,
@@ -52,6 +53,12 @@ describe("tool text", () => {
 
   it("cuts a long summary", () => {
     expect(toolSummary(JSON.stringify({ command: "x".repeat(300) })).length).toBe(140);
+  });
+
+  it("extracts a streaming command from incomplete JSON", () => {
+    expect(liveToolCommand('{"command": "ls -la /workspace')).toBe("ls -la /workspace");
+    expect(liveToolCommand('{"command": "echo \\"hi\\""}')).toBe('echo "hi"');
+    expect(liveToolCommand("")).toBe("");
   });
 });
 

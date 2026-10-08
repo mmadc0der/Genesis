@@ -102,7 +102,7 @@ func (c *controlServer) handleLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"127.0.0.1:*", "localhost:*", "[::1]:*"},
+		OriginPatterns: []string{"*"},
 	})
 	if err != nil {
 		c.logger.Info("control live rejected", "error", err)
@@ -112,7 +112,7 @@ func (c *controlServer) handleLive(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(maxSyncBytes)
 
 	subs := newLiveSubs()
-	subs.out = make(chan liveFrame, 256)
+	subs.out = make(chan liveFrame, 4096)
 	c.addLive(subs)
 	c.ensureListenerFeed()
 	ctx, cancel := context.WithCancel(r.Context())
@@ -187,6 +187,16 @@ func (c *controlServer) applySubscribe(subs *liveSubs, op liveClientOp) {
 	case "run":
 		if err := validateRunID(op.RunID); err != nil {
 			subs.notes = append(subs.notes, liveNote{op: "error", message: "invalid run id"})
+			break
+		}
+		if op.After == "now" {
+			subs.runGen++
+			idx, _ := c.ensureIndexLocked(context.Background(), op.RunID)
+			lastSeq := uint64(0)
+			if len(idx.seqs) > 0 {
+				lastSeq = idx.seqs[len(idx.seqs)-1]
+			}
+			subs.runs[op.RunID] = runWatch{after: lastSeq, gen: subs.runGen, offset: idx.size}
 			break
 		}
 		after, err := parseCursor(op.After)
@@ -335,6 +345,10 @@ func (c *controlServer) tailRun(ctx context.Context, subs *liveSubs, runID strin
 		if !ok || seq <= advanced {
 			return true
 		}
+		if isEphemeralEvent(event.Type, event.Data) {
+			advanced = seq
+			return true
+		}
 		subs.mu.Lock()
 		current, watching := subs.runs[runID]
 		already := watching && current.gen == watch.gen && seq <= current.after
@@ -470,6 +484,11 @@ func (c *controlServer) removeLive(subs *liveSubs) {
 }
 
 func (c *controlServer) deliverListenerEvent(event lifecycleEvent) {
+	if event.Type == lifecycleTypeChunk {
+		absorbChunkToStream(event)
+	} else if event.Type == lifecycleTypeAssistant || event.Type == lifecycleTypeTurn || event.Type == lifecycleTypeTool || event.Type == lifecycleTypeEnd || event.Type == lifecycleTypeResult {
+		discardStream(event.RunID)
+	}
 	c.liveMu.Lock()
 	defer c.liveMu.Unlock()
 	for subs := range c.liveSet {

@@ -28,6 +28,13 @@ export interface ChatRun {
   retries?: number;
 }
 
+export interface ActiveTurn {
+  thought?: string;
+  text?: string;
+  tool_name?: string;
+  tool_args?: string;
+}
+
 export interface ChatSession {
   run_id: string;
   session_id?: string;
@@ -35,6 +42,7 @@ export interface ChatSession {
   runs: ChatRun[];
   continue_run?: string;
   continue_blocked?: string;
+  active_turn?: ActiveTurn;
 }
 
 export type Entry =
@@ -83,6 +91,26 @@ export function toolSummary(args: string | undefined) {
   const command = parsed && typeof parsed.command === "string" ? parsed.command : null;
   const text = (command ?? args ?? "").replace(/\s+/g, " ").trim();
   return text.length > 140 ? `${text.slice(0, 139)}…` : text;
+}
+
+// liveToolCommand extracts a shell command from potentially incomplete JSON
+// as it streams in character-by-character from the model.
+export function liveToolCommand(args: string | undefined): string {
+  if (!args) return "";
+  const parsed = parseArguments(args);
+  if (parsed && typeof parsed.command === "string") {
+    return parsed.command;
+  }
+  const match = args.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  if (match) {
+    try {
+      return JSON.parse(`"${match[1]}"`);
+    } catch {
+      return match[1].replace(/\\"/g, '"');
+    }
+  }
+  const trimmed = args.trim();
+  return trimmed.length > 140 ? `${trimmed.slice(0, 139)}…` : trimmed;
 }
 
 // toolArguments is the call as the reader opens it: a command as written, other

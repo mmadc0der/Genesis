@@ -563,6 +563,14 @@ func (j *runJournal) Publish(eventType, origin string, data any) error {
 		j.mu.Unlock()
 		return fmt.Errorf("redacted lifecycle event is not JSON: %w", err)
 	}
+	if isEphemeralEvent(eventType, published.Data) {
+		if eventType == lifecycleTypeChunk {
+			j.noteUsage(published.Data)
+		}
+		j.mu.Unlock()
+		j.bus.publish(published)
+		return nil
+	}
 	if _, err := j.file.Write(append(payload, '\n')); err != nil {
 		j.seq--
 		j.mu.Unlock()

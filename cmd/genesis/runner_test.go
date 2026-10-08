@@ -570,13 +570,13 @@ func TestTurnEndFailureSkipsWrapperError(t *testing.T) {
 	}
 	processRunner{pythonPath: fakePython, source: "src", logger: logger, store: store}.Run(document)
 	events := readRunEvents(t, store, document.RunID)
+	// Text delta chunk is ephemeral and skipped from events.jsonl, but usage chunk is recorded
 	assertEventTypes(t, events, []string{
 		lifecycleTypeAccepted,
 		lifecycleTypeStart,
 		lifecycleTypeSessionCreated,
 		lifecycleTypeAssistant,
 		lifecycleTypeTool,
-		lifecycleTypeChunk,
 		lifecycleTypeChunk,
 		lifecycleTypeRetry,
 		lifecycleTypeTurn,
@@ -594,31 +594,21 @@ func TestTurnEndFailureSkipsWrapperError(t *testing.T) {
 		t.Fatal("wrapper replaced the turn/end failure")
 	}
 	var turn map[string]any
-	if err := json.Unmarshal(events[8].Data, &turn); err != nil {
+	if err := json.Unmarshal(events[7].Data, &turn); err != nil {
 		t.Fatal(err)
 	}
 	if turn["error_message"] != "bad key" || turn["error_code"] != "AUTH" || turn["error_status"] != float64(401) {
 		t.Fatalf("turn data = %#v", turn)
 	}
-	var chunk map[string]any
-	if err := json.Unmarshal(events[5].Data, &chunk); err != nil {
-		t.Fatal(err)
-	}
-	if chunk["chunk_type"] != "text-delta" {
-		t.Fatalf("chunk = %#v", chunk)
-	}
-	if events[5].Origin != "sdk.session.on_chunk" || events[5].SessionID != "session-1" {
-		t.Fatalf("chunk event origin %q session %q", events[5].Origin, events[5].SessionID)
-	}
 	var usage map[string]any
-	if err := json.Unmarshal(events[6].Data, &usage); err != nil {
+	if err := json.Unmarshal(events[5].Data, &usage); err != nil {
 		t.Fatal(err)
 	}
 	if usage["chunk_type"] != "usage" {
 		t.Fatalf("usage chunk = %#v", usage)
 	}
-	if events[6].Origin != "sdk.session.on_chunk" || events[6].SessionID != "session-1" {
-		t.Fatalf("usage chunk event origin %q session %q", events[6].Origin, events[6].SessionID)
+	if events[5].Origin != "sdk.session.on_chunk" || events[5].SessionID != "session-1" {
+		t.Fatalf("usage chunk event origin %q session %q", events[5].Origin, events[5].SessionID)
 	}
 	var end map[string]any
 	if err := json.Unmarshal(events[len(events)-1].Data, &end); err != nil {

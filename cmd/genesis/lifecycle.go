@@ -91,6 +91,31 @@ type sdkSessionEvent struct {
 	Data json.RawMessage `json:"data"`
 }
 
+// isEphemeralEvent returns true for events that should stream live but not be stored on disk.
+// Token delta chunks (text-delta, reasoning-delta, tool-call-delta, block-start/end) are ephemeral.
+// Usage frames are persistent rollup data; they either write usage.json or stay recorded.
+func isEphemeralEvent(eventType string, data any) bool {
+	if eventType != lifecycleTypeChunk {
+		return false
+	}
+	if data == nil {
+		return true
+	}
+	raw, ok := data.(json.RawMessage)
+	if !ok {
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			return true
+		}
+		raw = encoded
+	}
+	// If it's a usage frame, it is not ephemeral (or writes to usage.json)
+	if _, ok := parseUsageFrame(raw); ok {
+		return false
+	}
+	return true
+}
+
 func genesisSource(runID string) string {
 	return "urn:genesis:run:" + runID
 }
