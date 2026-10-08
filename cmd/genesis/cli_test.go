@@ -25,6 +25,9 @@ func TestMain(m *testing.M) {
 		case "schedule":
 			runSchedule(slog.New(slog.NewJSONHandler(os.Stderr, nil)), os.Args[2:])
 			os.Exit(0)
+		case "events":
+			runEvents(slog.New(slog.NewJSONHandler(os.Stderr, nil)), os.Args[2:])
+			os.Exit(0)
 		}
 	}
 	os.Exit(m.Run())

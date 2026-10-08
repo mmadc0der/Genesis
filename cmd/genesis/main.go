@@ -27,6 +27,8 @@ func main() {
 		runSchedule(logger, args)
 	case "publish":
 		runPublish(logger, args)
+	case "events":
+		runEvents(logger, args)
 	default:
 		logger.Error("unknown command", "command", command)
 		os.Exit(2)

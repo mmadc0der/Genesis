@@ -41,7 +41,8 @@ COPY --from=python-deps /app/.venv /app/.venv
 COPY --from=web /src/dist /usr/share/genesis/web
 COPY agents.d /usr/share/genesis/defaults/agents.d
 COPY rules.d /usr/share/genesis/defaults/rules.d
-COPY schema /usr/share/genesis/schema
+COPY schema/repository-declaration.txt /usr/share/genesis/schema/repository-declaration.txt
+COPY schema/cloudevents-eventer.json /usr/share/genesis/schema/cloudevents-eventer.json
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/genesis /usr/local/bin/docker-entrypoint.sh \
 	&& chmod -R a+rX /app/.venv /usr/share/genesis/defaults /usr/share/genesis/web /usr/share/genesis/schema \

@@ -165,9 +165,13 @@ func (s *eventServer) loadInitialGeneration() error {
 }
 
 func (s *eventServer) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleGetEvents(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method must be POST", http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method must be GET or POST", http.StatusMethodNotAllowed)
 		return
 	}
 

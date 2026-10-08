@@ -97,6 +97,18 @@ fields. A `rules.d` timer, when one exists, is a listener clock on the rule
 file. The CLI is the ticker agents start, and it fires by posting to
 `/events`.
 
+Use `genesis events` to search, grep, tail, and follow events across the loop:
+- `genesis events`: print the 20 most recent events as JSON lines.
+- `genesis events -n <N>` / `--tail <N>`: show the last N events.
+- `genesis events -f` / `--follow`: follow live events as they arrive (`tail -f` semantics).
+- `genesis events "<pattern>"` / `--grep "<pattern>"`: grep events matching regex or text pattern.
+- `genesis events -i` / `--ignore-case`: case-insensitive pattern matching.
+- `genesis events --type <type>`: filter by CloudEvent type (e.g. `dev.genesis.agent.finished`).
+- `genesis events --agent <agent>`: filter by agent id.
+- `genesis events --run <run_id>`: filter by run id.
+- `genesis events --since <duration|timestamp>`: filter events since duration (e.g. `10m`, `1h`, `1d`) or timestamp.
+- `genesis events --format <json|short|pretty>`: choose output format (`json` line-by-line is default for pipes and jq).
+
 The finish event and session continuation belong in a reviewer's
 instructions. Other workers do not need them. When a session ends, the
 system emits `dev.genesis.agent.finished` with `subject` equal to that
