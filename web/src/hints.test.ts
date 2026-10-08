@@ -142,9 +142,9 @@ describe("tokenBreakdown", () => {
 
 describe("eventSummary", () => {
   const runs = [
-    run({ state: "open", cause_type: "dev.genesis.user.message", rule: "a.yaml", last_seq: "10" }),
-    run({ state: "completed", cause_type: "dev.genesis.agent.finished", rule: "b.yaml", last_seq: "30" }),
-    run({ state: "completed", cause_type: "dev.genesis.agent.finished", rule: "b.yaml", last_seq: "5" }),
+    run({ state: "open", cause_type: "dev.genesis.user.message", rule: "a.yaml", last_seq: "100", events: 10 }),
+    run({ state: "completed", cause_type: "dev.genesis.agent.finished", rule: "b.yaml", last_seq: "300", events: 30 }),
+    run({ state: "completed", cause_type: "dev.genesis.agent.finished", rule: "b.yaml", last_seq: "50", events: 5 }),
     run({ state: "failed", cause_type: "dev.genesis.agent.finished", rule: "b.yaml" }),
   ];
   const rules = [rule("a.yaml", "active"), rule("b.yaml", "active"), rule("c.yaml", "draft"), rule("d.yaml", "active")];

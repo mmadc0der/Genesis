@@ -14,10 +14,12 @@ export interface RunRow {
   ended_at?: string;
   session_id?: string;
   cause_type?: string;
-  // rule is the rules.d file that started the run. last_seq is the length of
-  // the run journal, which control serves as a string.
+  // rule is the rules.d file that started the run. last_seq is the latest
+  // stored sequence number. events is how many journal lines are stored;
+  // sequence numbers also advance for chunks that are not written.
   rule?: string;
   last_seq?: string;
+  events?: number;
   usage?: Usage;
 }
 

@@ -65,34 +65,50 @@ function RunningTimer({ since }: { since: string }) {
 }
 
 function ExpandableLiveBlock({ children }: { children: React.ReactNode }) {
-  const [fullyOpen, setFullyOpen] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [tall, setTall] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
-    if (!fullyOpen && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (!el) return;
+    const style = getComputedStyle(el);
+    const line = parseFloat(style.lineHeight);
+    const row = Number.isFinite(line) && line > 0 ? line : 22;
+    const nextTall = el.scrollHeight > row * 4 + (tall ? -row : row);
+    if (nextTall !== tall) setTall(nextTall);
+    if (!open && el.scrollHeight > Number(el.dataset.seenHeight || 0)) {
+      el.scrollTop = el.scrollHeight;
+      el.dataset.seenHeight = String(el.scrollHeight);
     }
   });
 
+  const toggle = () => {
+    if (tall) setOpen((prev) => !prev);
+  };
+
   return (
     <div
-      className={`live-block-container ${fullyOpen ? "live-block-full" : "live-block-semi"}`}
-      onClick={() => setFullyOpen((prev) => !prev)}
-      role="button"
-      tabIndex={0}
+      className={`live-block-container ${tall ? (open ? "live-block-expanded" : "live-block-collapsed") : "live-block-fit"}`}
+      onClick={toggle}
+      role={tall ? "button" : undefined}
+      tabIndex={tall ? 0 : undefined}
       onKeyDown={(e) => {
+        if (!tall) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          setFullyOpen((prev) => !prev);
+          toggle();
         }
       }}
     >
       <div className="live-scroll-window" ref={scrollRef}>
         {children}
       </div>
-      <div className="live-block-hint">
-        <span>{fullyOpen ? "▲ collapse to live rows" : "▼ click to fully open"}</span>
-      </div>
+      {tall ? (
+        <div className="live-block-hint">
+          <span>{open ? "▲ collapse" : "▼ click to expand"}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -106,24 +122,54 @@ function ExpandableEntry({
   defaultOpen?: boolean;
   className?: string;
 }) {
+  const contentRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(defaultOpen);
+  const [tall, setTall] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const measure = () => {
+      const msg = el.querySelector(".msg");
+      const target = msg ?? el;
+      const style = getComputedStyle(target);
+      const line = parseFloat(style.lineHeight);
+      const row = Number.isFinite(line) && line > 0 ? line : 22;
+      const meta = target.querySelector(".msg-meta");
+      const metaH = meta instanceof HTMLElement ? meta.offsetHeight + 6 : 0;
+      const pad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+      setTall(target.scrollHeight > metaH + pad + row * 4 + 1);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [children]);
+
+  const toggle = () => {
+    if (tall) setOpen((prev) => !prev);
+  };
+
   return (
     <div
-      className={`entry-card ${open ? "entry-open" : "entry-closed"} ${className}`}
-      onClick={() => setOpen((prev) => !prev)}
-      role="button"
-      tabIndex={0}
+      className={`entry-card ${tall ? (open ? "entry-open" : "entry-closed") : "entry-fit"} ${className}`}
+      onClick={toggle}
+      role={tall ? "button" : undefined}
+      tabIndex={tall ? 0 : undefined}
       onKeyDown={(e) => {
+        if (!tall) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          setOpen((prev) => !prev);
+          toggle();
         }
       }}
     >
-      <div className="entry-content">{children}</div>
-      <div className="entry-toggle-hint">
-        <span>{open ? "▲ collapse" : "▼ click to expand"}</span>
-      </div>
+      <div className="entry-content" ref={contentRef}>{children}</div>
+      {tall ? (
+        <div className="entry-toggle-hint">
+          <span>{open ? "▲ collapse" : "▼ click to expand"}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -144,9 +190,10 @@ function Line({ entry, working }: { entry: Entry; working: boolean }) {
   }
   if (entry.kind === "agent") {
     return (
-      <ExpandableEntry defaultOpen={false}>
+      <ExpandableEntry defaultOpen={Boolean(entry.result)}>
         <div className="msg msg-agent">
           <div className="msg-meta">
+            <b>{entry.result ? "result" : "output"}</b>
             <time>{clock(entry.at)}</time>
           </div>
           <Markdown content={entry.text} />
@@ -224,20 +271,41 @@ function Line({ entry, working }: { entry: Entry; working: boolean }) {
 // Chat is one session as a conversation: what started each run, what the agent
 // said and did, and a box to send it a follow-up. The follow-up continues the
 // same DSH session through control, so the agent keeps its context.
-export interface StreamDeltas {
-  thought: string;
-  text: string;
-  toolName?: string;
-  toolArgs: string;
+type LiveSeg =
+  | { id: number; kind: "thought"; text: string }
+  | { id: number; kind: "tool"; name: string; args: string }
+  | { id: number; kind: "text"; text: string };
+
+let liveSegID = 0;
+
+function nextLiveSeg(seg: LiveSeg): LiveSeg[] {
+  return [{ ...seg, id: ++liveSegID }];
 }
 
-export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) {
+// continueLive keeps appending to the latest segment when the same kind is
+// still streaming. A different kind settles the previous segment so only the
+// block that is still receiving tokens stays the collapsed live tail.
+function continueLive(prev: LiveSeg[], kind: LiveSeg["kind"], update: (last: LiveSeg) => LiveSeg, create: () => LiveSeg): LiveSeg[] {
+  const last = prev[prev.length - 1];
+  if (last && last.kind === kind) return [...prev.slice(0, -1), update(last)];
+  return [...prev, { ...create(), id: ++liveSegID }];
+}
+
+export function Chat({
+  runId,
+  onBack,
+  onContinued,
+}: {
+  runId: string;
+  onBack?: () => void;
+  onContinued?: (runId: string) => void;
+}) {
   const [session, setSession] = useState<ChatSession | null>(null);
   const [error, setError] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
-  const [liveStream, setLiveStream] = useState<StreamDeltas>({ thought: "", text: "", toolArgs: "" });
+  const [liveSegs, setLiveSegs] = useState<LiveSeg[]>([]);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const streamingActive = useRef(false);
@@ -248,12 +316,14 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
         setSession(next);
         setError("");
         if (!streamingActive.current && next.active_turn) {
-          setLiveStream({
-            thought: next.active_turn.thought || "",
-            text: next.active_turn.text || "",
-            toolName: next.active_turn.tool_name,
-            toolArgs: next.active_turn.tool_args || "",
-          });
+          const turn = next.active_turn;
+          const seeded: LiveSeg[] = [];
+          if (turn.thought) seeded.push(...nextLiveSeg({ id: 0, kind: "thought", text: turn.thought }));
+          if (turn.tool_name || turn.tool_args) {
+            seeded.push(...nextLiveSeg({ id: 0, kind: "tool", name: turn.tool_name || "tool", args: turn.tool_args || "" }));
+          }
+          if (turn.text) seeded.push(...nextLiveSeg({ id: 0, kind: "text", text: turn.text }));
+          setLiveSegs(seeded);
         }
       })
       .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : "Control did not answer."));
@@ -263,7 +333,7 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
     setSession(null);
     setError("");
     setSendError("");
-    setLiveStream({ thought: "", text: "", toolArgs: "" });
+    setLiveSegs([]);
     streamingActive.current = false;
     stick.current = true;
     let stopped = false;
@@ -295,17 +365,37 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
             const chunkType = body.chunk_type || raw.type;
             if (chunkType === "reasoning-delta" && raw.text) {
               streamingActive.current = true;
-              setLiveStream((curr) => ({ ...curr, thought: curr.thought + raw.text }));
+              setLiveSegs((curr) =>
+                continueLive(
+                  curr,
+                  "thought",
+                  (last) => (last.kind === "thought" ? { ...last, text: last.text + raw.text } : last),
+                  () => ({ id: 0, kind: "thought", text: raw.text }),
+                ),
+              );
             } else if (chunkType === "text-delta" && raw.text) {
               streamingActive.current = true;
-              setLiveStream((curr) => ({ ...curr, text: curr.text + raw.text }));
+              setLiveSegs((curr) =>
+                continueLive(
+                  curr,
+                  "text",
+                  (last) => (last.kind === "text" ? { ...last, text: last.text + raw.text } : last),
+                  () => ({ id: 0, kind: "text", text: raw.text }),
+                ),
+              );
             } else if (chunkType === "tool-call-delta") {
               streamingActive.current = true;
-              setLiveStream((curr) => ({
-                ...curr,
-                toolName: raw.name || curr.toolName,
-                toolArgs: curr.toolArgs + (raw.argumentsDelta || ""),
-              }));
+              setLiveSegs((curr) =>
+                continueLive(
+                  curr,
+                  "tool",
+                  (last) =>
+                    last.kind === "tool"
+                      ? { ...last, name: raw.name || last.name, args: last.args + (raw.argumentsDelta || "") }
+                      : last,
+                  () => ({ id: 0, kind: "tool", name: raw.name || "tool", args: raw.argumentsDelta || "" }),
+                ),
+              );
             }
           } else if (
             ev.type === "dev.genesis.run.assistant" ||
@@ -315,7 +405,7 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
           ) {
             // Completed turn arrived; reset in-flight stream delta and refresh session
             streamingActive.current = false;
-            setLiveStream({ thought: "", text: "", toolArgs: "" });
+            setLiveSegs([]);
             refresh();
           }
         }
@@ -338,7 +428,7 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
   useLayoutEffect(() => {
     const node = scroller.current;
     if (node && stick.current) node.scrollTop = node.scrollHeight;
-  }, [thread.length, working, session?.runs.length, liveStream.thought, liveStream.text, liveStream.toolArgs]);
+  }, [thread.length, working, session?.runs.length, liveSegs]);
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -354,6 +444,10 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
     }
     setDraft("");
     stick.current = true;
+    if (result.runId && result.runId !== runId) {
+      onContinued?.(result.runId);
+      return;
+    }
     await refresh();
   }
 
@@ -366,8 +460,6 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
 
   const tokens = session ? sumUsage(session.runs.map((run) => run.run)).total : 0;
   const blocked = session?.continue_blocked ?? "";
-  const canSend = Boolean(session?.continue_run) && !sending;
-
   return (
     <section className="chat" aria-label="Session">
       <header className="chat-head">
@@ -408,47 +500,86 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
           {thread.map((entry) => (
             <Line key={entry.id} entry={entry} working={working} />
           ))}
-          {working && (liveStream.thought || liveStream.text || liveStream.toolArgs) ? (
+          {working && liveSegs.length > 0 ? (
             <div className="stream-live-container">
-              {liveStream.thought ? (
-                <details className="think live-block-semi" open>
-                  <summary>
-                    <span className="think-icon">▸</span>
-                    <span className="think-label">Thinking</span>
-                    <span className="live-typing-indicator">thinking</span>
-                  </summary>
-                  <div className="think-body live-scroll-window">
-                    <Markdown content={liveStream.thought} />
-                    <span className="stream-cursor" />
+              {liveSegs.map((seg, index) => {
+                const live = index === liveSegs.length - 1;
+                if (seg.kind === "thought") {
+                  if (!live) {
+                    return (
+                      <details className="think" key={seg.id}>
+                        <summary>
+                          <span className="think-icon">▸</span>
+                          <span className="think-label">Thinking</span>
+                        </summary>
+                        <div className="think-body">
+                          <Markdown content={seg.text} />
+                        </div>
+                      </details>
+                    );
+                  }
+                  return (
+                    <div className="think" key={seg.id}>
+                      <div className="think-summary">
+                        <span className="think-icon">▸</span>
+                        <span className="think-label">Thinking</span>
+                        <span className="live-typing-indicator">thinking</span>
+                      </div>
+                      <ExpandableLiveBlock>
+                        <div className="think-body">
+                          <Markdown content={seg.text} />
+                          <span className="stream-cursor" />
+                        </div>
+                      </ExpandableLiveBlock>
+                    </div>
+                  );
+                }
+                if (seg.kind === "tool") {
+                  const command = liveToolCommand(seg.args) || "preparing command...";
+                  return (
+                    <div className="tool live-tool" key={seg.id}>
+                      <div className="tool-header-inline">
+                        <span className="tool-badge">{seg.name || "tool"}</span>
+                        <em className={live ? "tool-status running" : "tool-status"}>
+                          {live ? (
+                            <>
+                              <i className="pulse-dot" /> streaming
+                            </>
+                          ) : (
+                            "started"
+                          )}
+                        </em>
+                      </div>
+                      {live ? (
+                        <ExpandableLiveBlock>
+                          <pre className="live-tool-input">
+                            {command}
+                            <span className="stream-cursor" />
+                          </pre>
+                        </ExpandableLiveBlock>
+                      ) : (
+                        <pre className="live-tool-input">{command}</pre>
+                      )}
+                    </div>
+                  );
+                }
+                return (
+                  <div className="msg msg-agent live-msg" key={seg.id}>
+                    <div className="msg-meta">
+                      <b>output</b>
+                      {live ? <span className="live-typing-indicator">typing...</span> : null}
+                    </div>
+                    {live ? (
+                      <ExpandableLiveBlock>
+                        <Markdown content={seg.text} />
+                        <span className="stream-cursor" />
+                      </ExpandableLiveBlock>
+                    ) : (
+                      <Markdown content={seg.text} />
+                    )}
                   </div>
-                </details>
-              ) : null}
-              {liveStream.toolName || liveStream.toolArgs ? (
-                <div className="tool live-tool">
-                  <div className="tool-header-inline">
-                    <span className="tool-badge">{liveStream.toolName || "tool"}</span>
-                    <span className="tool-summary">
-                      {liveToolCommand(liveStream.toolArgs) || "preparing command..."}
-                      <span className="stream-cursor" />
-                    </span>
-                    <em className="tool-status running">
-                      <i className="pulse-dot" /> streaming
-                    </em>
-                  </div>
-                </div>
-              ) : null}
-              {liveStream.text ? (
-                <div className="msg msg-agent live-msg">
-                  <div className="msg-meta">
-                    <b>{session?.agent}</b>
-                    <span className="live-typing-indicator">typing...</span>
-                  </div>
-                  <ExpandableLiveBlock>
-                    <Markdown content={liveStream.text} />
-                    <span className="stream-cursor" />
-                  </ExpandableLiveBlock>
-                </div>
-              ) : null}
+                );
+              })}
             </div>
           ) : null}
         </div>
@@ -464,15 +595,12 @@ export function Chat({ runId, onBack }: { runId: string; onBack?: () => void }) 
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={keys}
           />
-          <div className="composer-actions">
-            <span className={sendError ? "composer-note bad" : "composer-note"}>
-              {sendError || (error && session ? "Control is not answering. Showing the last view." : "")}
-            </span>
-            <button type="submit" disabled={!canSend || draft.trim() === ""}>
-              {sending ? "Sending" : "Send"}
-            </button>
-          </div>
         </div>
+        {sendError || (error && session) ? (
+          <p className={sendError ? "composer-note bad" : "composer-note"}>
+            {sendError || "Control is not answering. Showing the last view."}
+          </p>
+        ) : null}
       </form>
     </section>
   );

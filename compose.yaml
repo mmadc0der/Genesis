@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: genesis:local
+    image: genesis:v2
     init: true
     user: "0:0"
     environment:
@@ -28,7 +28,7 @@ services:
         target: /var/lib/genesis/secrets
 
   control:
-    image: genesis:local
+    image: genesis:v2
     init: true
     user: "65532:65532"
     depends_on:
@@ -40,7 +40,7 @@ services:
           sleep 0.2
         done
         exec /usr/local/bin/genesis control \
-          -listen 0.0.0.0:8790 \
+          -listen 0.0.0.0:8792 \
           -listener http://genesis:8787 \
           -agents /var/lib/genesis/config/agents.d \
           -rules /var/lib/genesis/config/rules.d \
@@ -49,7 +49,7 @@ services:
           -data /var/lib/genesis/data \
           -web /usr/share/genesis/web
     ports:
-      - "127.0.0.1:8790:8790"
+      - "127.0.0.1:8792:8792"
     environment:
       GENESIS_SYNC_TOKEN: ${GENESIS_SYNC_TOKEN:-compose-sync-token}
     volumes:
@@ -67,8 +67,8 @@ services:
 
 volumes:
   config:
-    name: genesis-config
+    name: genesis-v2-config
   data:
-    name: genesis-data
+    name: genesis-v2-data
   credentials:
-    name: genesis-credentials
+    name: genesis-v2-credentials

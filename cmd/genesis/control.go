@@ -142,19 +142,24 @@ type listedRule struct {
 }
 
 type runSummary struct {
-	RunID        string       `json:"run_id"`
-	Agent        string       `json:"agent"`
-	Rule         string       `json:"rule"`
-	State        string       `json:"state"`
-	AcceptedAt   string       `json:"accepted_at,omitempty"`
-	EndedAt      string       `json:"ended_at,omitempty"`
-	LastSeq      string       `json:"last_seq"`
-	SessionID    string       `json:"session_id,omitempty"`
-	CauseID      string       `json:"cause_id,omitempty"`
-	CauseType    string       `json:"cause_type,omitempty"`
-	FinishReason string       `json:"finish_reason,omitempty"`
-	Error        string       `json:"error,omitempty"`
-	Usage        tokenAccount `json:"usage"`
+	RunID      string `json:"run_id"`
+	Agent      string `json:"agent"`
+	Rule       string `json:"rule"`
+	State      string `json:"state"`
+	AcceptedAt string `json:"accepted_at,omitempty"`
+	EndedAt    string `json:"ended_at,omitempty"`
+	LastSeq    string `json:"last_seq"`
+	// Events is how many lifecycle events are stored in the journal.
+	// Sequence numbers also advance for ephemeral chunks, which are not stored.
+	Events    int    `json:"events"`
+	SessionID string `json:"session_id,omitempty"`
+	CauseID   string `json:"cause_id,omitempty"`
+	CauseType string `json:"cause_type,omitempty"`
+	// ContinuedFrom is the gen id a session.continue event cited.
+	ContinuedFrom string       `json:"continued_from,omitempty"`
+	FinishReason  string       `json:"finish_reason,omitempty"`
+	Error         string       `json:"error,omitempty"`
+	Usage         tokenAccount `json:"usage"`
 }
 
 type runDetail struct {
@@ -375,6 +380,11 @@ func (c *controlServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.handleAgents(w, r)
+	case "/api/agent-schema":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"fields": agentFormSchema()})
 	case "/api/rules":
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -413,9 +423,6 @@ func (c *controlServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/api/agents/"):
-			if !requireMethod(w, r, http.MethodGet) {
-				return
-			}
 			c.handleAgent(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/rules/"):
 			if !requireMethod(w, r, http.MethodGet) {
@@ -582,14 +589,65 @@ func (c *controlServer) handleAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid agent id", http.StatusBadRequest)
 		return
 	}
+	switch r.Method {
+	case http.MethodGet:
+		c.handleAgentGet(w, r, id)
+	case http.MethodPut:
+		c.handleAgentPut(w, r, id)
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		http.Error(w, "method must be GET or PUT", http.StatusMethodNotAllowed)
+	}
+}
+
+func (c *controlServer) handleAgentGet(w http.ResponseWriter, r *http.Request, id string) {
 	agents, _ := c.listAgents(r)
 	for _, agent := range agents {
-		if agent.ID == id {
-			writeJSON(w, http.StatusOK, agent)
-			return
+		if agent.ID != id {
+			continue
 		}
+		payload := struct {
+			listedAgent
+			Document map[string]any `json:"document,omitempty"`
+		}{listedAgent: agent}
+		if doc, err := readAgentDocument(c.agentsDir, id); err == nil {
+			payload.Document = doc
+		}
+		writeJSON(w, http.StatusOK, payload)
+		return
 	}
 	http.NotFound(w, r)
+}
+
+func (c *controlServer) handleAgentPut(w http.ResponseWriter, r *http.Request, id string) {
+	if _, err := os.Stat(agentPath(c.agentsDir, id)); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	body, err := readCapped(r.Body, maxControlBody)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	doc, err := agentDocumentFromJSON(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := saveAgentDocument(c.agentsDir, id, doc); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	saved, err := readAgentDocument(c.agentsDir, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       id,
+		"document": saved,
+		"note":     "Saved as desired state. Sync to activate.",
+	})
 }
 
 func (c *controlServer) listAgents(r *http.Request) ([]listedAgent, string) {
@@ -1110,6 +1168,7 @@ func (c *controlServer) loadSummaryLocked(ctx context.Context, runID string) (jo
 	if err != nil {
 		return journalSnap{}, err
 	}
+	summary.Events = count
 	stored := journalSnap{size: info.Size(), offset: next, summary: summary, seen: seen, count: count}
 	if cancelled {
 		stored.size = next
@@ -1253,6 +1312,25 @@ func foldRunSummary(summary runSummary, events []lifecycleEvent) runSummary {
 		summary.AcceptedAt = first.Time
 		summary.CauseID = first.CauseID
 		summary.CauseType = first.CauseType
+	}
+	for _, event := range events {
+		if event.Type != lifecycleTypeAccepted {
+			continue
+		}
+		var accepted struct {
+			EventType    string `json:"event_type"`
+			EventSubject string `json:"event_subject"`
+		}
+		if json.Unmarshal(event.Data, &accepted) != nil {
+			break
+		}
+		if accepted.EventType != "" {
+			summary.CauseType = accepted.EventType
+		}
+		if accepted.EventType == sessionContinueType && accepted.EventSubject != "" {
+			summary.ContinuedFrom = accepted.EventSubject
+		}
+		break
 	}
 	for _, event := range events {
 		if seq, ok := eventSequence(event); ok {

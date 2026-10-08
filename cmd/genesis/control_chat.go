@@ -304,9 +304,16 @@ func (c *controlServer) sessionRuns(runID string) ([]runSummary, error) {
 }
 
 func (c *controlServer) readChatSession(runID string) (chatSession, error) {
-	runs, err := c.sessionRuns(runID)
+	if _, err := c.summarizeCached(runID); err != nil {
+		return chatSession{}, err
+	}
+	all, err := c.listRuns(-1)
 	if err != nil {
 		return chatSession{}, err
+	}
+	runs := chatChain(all, runID)
+	if len(runs) == 0 {
+		return chatSession{}, os.ErrNotExist
 	}
 	session := chatSession{RunID: runID, Runs: make([]chatRun, 0, len(runs))}
 	for _, summary := range runs {
@@ -334,6 +341,58 @@ func (c *controlServer) readChatSession(runID string) (chatSession, error) {
 		}
 	}
 	return session, nil
+}
+
+// chatChain is the runs the center shows together. A session.continue run
+// joins the run its event cited (event_subject, or the previous run in the
+// same session when an older journal did not store the subject). The left
+// rail keeps every run as its own row.
+func chatChain(runs []runSummary, runID string) []runSummary {
+	byID := make(map[string]runSummary, len(runs))
+	for _, run := range runs {
+		byID[run.RunID] = run
+	}
+	if _, ok := byID[runID]; !ok {
+		return nil
+	}
+	ordered := append([]runSummary(nil), runs...)
+	slices.SortFunc(ordered, func(left, right runSummary) int {
+		if left.AcceptedAt != right.AcceptedAt {
+			return strings.Compare(left.AcceptedAt, right.AcceptedAt)
+		}
+		return strings.Compare(left.RunID, right.RunID)
+	})
+	parent := make(map[string]string, len(ordered))
+	latestInSession := map[string]string{}
+	for _, run := range ordered {
+		switch {
+		case run.ContinuedFrom != "":
+			parent[run.RunID] = run.ContinuedFrom
+		case run.CauseType == sessionContinueType && run.SessionID != "":
+			if prev := latestInSession[run.SessionID]; prev != "" {
+				parent[run.RunID] = prev
+			}
+		}
+		if run.SessionID != "" {
+			latestInSession[run.SessionID] = run.RunID
+		}
+	}
+	rootOf := func(id string) string {
+		seen := map[string]bool{}
+		for parent[id] != "" && byID[parent[id]].RunID != "" && !seen[id] {
+			seen[id] = true
+			id = parent[id]
+		}
+		return id
+	}
+	root := rootOf(runID)
+	chain := make([]runSummary, 0, 4)
+	for _, run := range ordered {
+		if rootOf(run.RunID) == root {
+			chain = append(chain, run)
+		}
+	}
+	return chain
 }
 
 // continueTarget picks the run a follow-up should cite: the newest run of the

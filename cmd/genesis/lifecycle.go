@@ -139,10 +139,14 @@ func acceptedData(event cloudEvent) map[string]any {
 	eventID, _ := event.stringAttribute("id")
 	eventSource, _ := event.stringAttribute("source")
 	eventType, _ := event.stringAttribute("type")
+	eventSubject, _ := event.stringAttribute("subject")
 	data := map[string]any{
 		"event_id":     eventID,
 		"event_source": eventSource,
 		"event_type":   eventType,
+	}
+	if eventSubject != "" {
+		data["event_subject"] = eventSubject
 	}
 	// The text that started the run, so a reader of the journal can see what
 	// the agent was asked. It is the same text the agent receives; the journal

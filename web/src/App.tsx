@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { StatusChip, SyncPanel } from "./Chip";
 import { categoryById, type Edition } from "./editions";
 import {
@@ -17,15 +17,55 @@ import { loadSnapshot, loopSpan, shortCause, sumUsage, type RunRow, type Snapsho
 import { driftItems } from "./sync";
 import { DotHint, EventHint, Tip, TokenHint } from "./Tip";
 import { toEdition } from "./publications";
-import { Story } from "./Story";
+import { PublicationPage, Story } from "./Story";
 import { usePublications } from "./usePublications";
 import { createViewStack, navigateToFrame, pushView } from "./view-stack";
 import { Chat } from "./Chat";
 import { EventChat } from "./EventChat";
+import { AgentView } from "./AgentView";
 import { ErrorBoundary } from "./ErrorBoundary";
+
+function preferRun(listed: RunRow, live: RunRow) {
+  const listedSeq = Number(listed.last_seq || 0);
+  const liveSeq = Number(live.last_seq || 0);
+  if (liveSeq !== listedSeq) return liveSeq > listedSeq ? live : listed;
+  if (listed.state === "open" && live.state !== "open") return live;
+  if (live.state === "open" && listed.state !== "open") return listed;
+  return live;
+}
+
+function upsertRun(runs: RunRow[], row: RunRow) {
+  const next = runs.filter((run) => run.run_id !== row.run_id);
+  next.push(row);
+  next.sort((left, right) => (right.accepted_at || "").localeCompare(left.accepted_at || ""));
+  return next;
+}
 
 function formatCount(value: number) {
   return new Intl.NumberFormat("en", { maximumFractionDigits: 0 }).format(value);
+}
+
+const USER_MESSAGE = "dev.genesis.user.message";
+
+function eventGroups<T extends { match: { type?: string } }>(rules: T[]): T[][] {
+  const groups: T[][] = [];
+  const index = new Map<string, number>();
+  for (const rule of rules) {
+    const type = rule.match.type || "";
+    const at = index.get(type);
+    if (at === undefined) {
+      index.set(type, groups.length);
+      groups.push([rule]);
+    } else {
+      groups[at].push(rule);
+    }
+  }
+  const user = groups.findIndex((group) => (group[0]?.match.type || "") === USER_MESSAGE);
+  if (user > 0) {
+    const [pinned] = groups.splice(user, 1);
+    groups.unshift(pinned);
+  }
+  return groups;
 }
 
 // StatusDot is the small coloured mark in front of a row. An empty slot (no
@@ -220,6 +260,8 @@ function RailSection({ title, children }: { title: string; children: ReactNode }
 // A view frame whose id starts with this opens the session of that run.
 const RUN_VIEW = "run:";
 const EVENT_VIEW = "event:";
+const AGENT_VIEW = "agent:";
+const PUB_VIEW = "pub:";
 
 function getInitialFrameId(): string {
   if (typeof window === "undefined") return "wire";
@@ -228,6 +270,10 @@ function getInitialFrameId(): string {
   if (runId) return RUN_VIEW + runId;
   const eventRule = params.get("event");
   if (eventRule) return EVENT_VIEW + eventRule;
+  const agentId = params.get("agent");
+  if (agentId) return AGENT_VIEW + agentId;
+  const publicationId = params.get("pub");
+  if (publicationId) return PUB_VIEW + publicationId;
   return "wire";
 }
 
@@ -255,9 +301,9 @@ function RunList({ runs, current, onOpen }: { runs: RunRow[]; current: string | 
           }}
         >
           <StatusDot dot={runDot(run)} />
-          <span>{shortCause(run.cause_type)}</span>
+          <span>{run.agent}</span>
           <em>
-            {run.agent} · {run.state}
+            {shortCause(run.cause_type)} · {run.state}
           </em>
         </li>
       ))}
@@ -277,6 +323,8 @@ export default function App() {
   const frameId = views.frames[views.index].id;
   const chatRunId = frameId.startsWith(RUN_VIEW) ? frameId.slice(RUN_VIEW.length) : null;
   const eventRuleName = frameId.startsWith(EVENT_VIEW) ? frameId.slice(EVENT_VIEW.length) : null;
+  const agentViewId = frameId.startsWith(AGENT_VIEW) ? frameId.slice(AGENT_VIEW.length) : null;
+  const publicationId = frameId.startsWith(PUB_VIEW) ? frameId.slice(PUB_VIEW.length) : null;
 
   useEffect(() => {
     const initialId = getInitialFrameId();
@@ -290,9 +338,19 @@ export default function App() {
       const params = new URLSearchParams(window.location.search);
       const runId = params.get("run");
       const eventRule = params.get("event");
+      const agentId = params.get("agent");
+      const publicationId = params.get("pub");
       const targetId: string =
         event.state?.frameId ??
-        (runId ? RUN_VIEW + runId : eventRule ? EVENT_VIEW + eventRule : "wire");
+        (runId
+          ? RUN_VIEW + runId
+          : eventRule
+            ? EVENT_VIEW + eventRule
+            : agentId
+              ? AGENT_VIEW + agentId
+              : publicationId
+                ? PUB_VIEW + publicationId
+                : "wire");
       setViews((current) => navigateToFrame(current, targetId));
     };
 
@@ -306,6 +364,8 @@ export default function App() {
       if (current.frames[current.index].id === targetId) return current;
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.delete("event");
+      nextUrl.searchParams.delete("agent");
+      nextUrl.searchParams.delete("pub");
       nextUrl.searchParams.set("run", runId);
       window.history.pushState({ frameId: targetId }, "", nextUrl.toString());
       return pushView(current, { id: targetId });
@@ -318,7 +378,37 @@ export default function App() {
       if (current.frames[current.index].id === targetId) return current;
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.delete("run");
+      nextUrl.searchParams.delete("agent");
+      nextUrl.searchParams.delete("pub");
       nextUrl.searchParams.set("event", ruleName);
+      window.history.pushState({ frameId: targetId }, "", nextUrl.toString());
+      return pushView(current, { id: targetId });
+    });
+  }, []);
+
+  const openAgent = useCallback((id: string) => {
+    const targetId = AGENT_VIEW + id;
+    setViews((current) => {
+      if (current.frames[current.index].id === targetId) return current;
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("run");
+      nextUrl.searchParams.delete("event");
+      nextUrl.searchParams.delete("pub");
+      nextUrl.searchParams.set("agent", id);
+      window.history.pushState({ frameId: targetId }, "", nextUrl.toString());
+      return pushView(current, { id: targetId });
+    });
+  }, []);
+
+  const openPublication = useCallback((id: string) => {
+    const targetId = PUB_VIEW + id;
+    setViews((current) => {
+      if (current.frames[current.index].id === targetId) return current;
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("run");
+      nextUrl.searchParams.delete("event");
+      nextUrl.searchParams.delete("agent");
+      nextUrl.searchParams.set("pub", id);
       window.history.pushState({ frameId: targetId }, "", nextUrl.toString());
       return pushView(current, { id: targetId });
     });
@@ -330,6 +420,8 @@ export default function App() {
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.delete("run");
       nextUrl.searchParams.delete("event");
+      nextUrl.searchParams.delete("agent");
+      nextUrl.searchParams.delete("pub");
       window.history.pushState({ frameId: "wire" }, "", nextUrl.toString());
       return pushView(current, { id: "wire" });
     });
@@ -338,43 +430,90 @@ export default function App() {
   const closeSync = useCallback(() => setSyncOpen(false), []);
   const [now, setNow] = useState(() => Date.now());
   const refreshRef = useRef<() => void>(() => {});
+  const snapGen = useRef(0);
   const publications = usePublications();
   const refreshPublications = publications.refresh;
 
   useEffect(() => {
     let stopped = false;
     const refresh = () => {
+      const gen = ++snapGen.current;
       loadSnapshot()
         .then((next) => {
-          if (!stopped) setSnapshot(next);
+          if (stopped || gen !== snapGen.current) return;
+          setSnapshot((current) => {
+            let runs = next.runs.slice();
+            if (current) {
+              for (const run of current.runs) {
+                const index = runs.findIndex((item) => item.run_id === run.run_id);
+                if (index < 0) runs.push(run);
+                else runs[index] = preferRun(runs[index], run);
+              }
+            }
+            for (const run of pendingRuns.values()) runs = upsertRun(runs, run);
+            pendingRuns.clear();
+            return { ...next, runs };
+          });
         })
         .catch(() => {
-          if (!stopped) setSnapshot(null);
+          if (!stopped && gen === snapGen.current) setSnapshot(null);
         });
     };
+    const pendingRuns = new Map<string, RunRow>();
     refreshRef.current = refresh;
     refresh();
     const clock = window.setInterval(() => setNow(Date.now()), 15000);
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${proto}://${location.host}/api/live`);
-    socket.onopen = () => {
-      setLive(true);
-      setConnecting(false);
-      socket.send(JSON.stringify({ op: "subscribe", topic: "runs" }));
-      socket.send(JSON.stringify({ op: "subscribe", topic: "state" }));
+    let socket: WebSocket | null = null;
+    let reconnect = 0;
+    const applyRun = (row: RunRow) => {
+      if (!row.run_id) return;
+      snapGen.current += 1;
+      setSnapshot((current) => {
+        if (!current) {
+          pendingRuns.set(row.run_id, row);
+          return current;
+        }
+        return { ...current, runs: upsertRun(current.runs, row) };
+      });
     };
-    socket.onmessage = () => {
-      refresh();
-      refreshPublications();
+    const connect = () => {
+      if (stopped) return;
+      socket = new WebSocket(`${proto}://${location.host}/api/live`);
+      socket.onopen = () => {
+        setLive(true);
+        setConnecting(false);
+        socket?.send(JSON.stringify({ op: "subscribe", topic: "runs" }));
+        socket?.send(JSON.stringify({ op: "subscribe", topic: "state" }));
+      };
+      socket.onmessage = (event) => {
+        let frame: { op?: string; run?: RunRow };
+        try {
+          frame = JSON.parse(String(event.data));
+        } catch {
+          return;
+        }
+        if (frame.op === "run" && frame.run) {
+          applyRun(frame.run);
+          return;
+        }
+        if (frame.op === "state") {
+          refresh();
+          refreshPublications();
+        }
+      };
+      socket.onclose = () => {
+        setLive(false);
+        setConnecting(false);
+        if (!stopped) reconnect = window.setTimeout(connect, 1000);
+      };
     };
-    socket.onclose = () => {
-      setLive(false);
-      setConnecting(false);
-    };
+    connect();
     return () => {
       stopped = true;
+      window.clearTimeout(reconnect);
       window.clearInterval(clock);
-      socket.close();
+      socket?.close();
     };
   }, [refreshPublications]);
 
@@ -502,7 +641,7 @@ export default function App() {
         <div className="center">
           <main
             className="column"
-            hidden={chatRunId !== null || eventRuleName !== null}
+            hidden={chatRunId !== null || eventRuleName !== null || agentViewId !== null || publicationId !== null}
             onScroll={(event) => setAtTop(event.currentTarget.scrollTop < 48)}
           >
             <div
@@ -523,7 +662,7 @@ export default function App() {
                 ) : editions.length === 0 ? (
                   <p className="empty">No publications yet.</p>
                 ) : (
-                  editions.map((edition) => <Story key={edition.id} edition={edition} />)
+                  editions.map((edition) => <Story key={edition.id} edition={edition} onRead={openPublication} />)
                 )}
                 <FeedEnd
                   hasOlder={publications.hasOlder}
@@ -540,7 +679,7 @@ export default function App() {
               className={views.direction < 0 ? "view view-back view-chat" : "view view-forward view-chat"}
             >
               <ErrorBoundary onReset={openWire}>
-                <Chat runId={chatRunId} onBack={openWire} />
+                <Chat runId={chatRunId} onBack={openWire} onContinued={openRun} />
               </ErrorBoundary>
             </div>
           ) : null}
@@ -570,6 +709,33 @@ export default function App() {
               </ErrorBoundary>
             </div>
           ) : null}
+          {agentViewId ? (
+            <div
+              key={`${frameId}-${views.index}`}
+              className={views.direction < 0 ? "view view-back view-chat" : "view view-forward view-chat"}
+            >
+              <ErrorBoundary onReset={openWire}>
+                <AgentView agentId={agentViewId} onBack={openWire} />
+              </ErrorBoundary>
+            </div>
+          ) : null}
+          {publicationId ? (
+            <div
+              key={`${frameId}-${views.index}`}
+              className={views.direction < 0 ? "view view-back view-chat" : "view view-forward view-chat"}
+            >
+              <ErrorBoundary onReset={openWire}>
+                {(() => {
+                  const edition = editions.find((item) => item.id === publicationId);
+                  return edition ? (
+                    <PublicationPage edition={edition} onBack={openWire} />
+                  ) : (
+                    <p className="empty">{publications.loaded ? "Publication not found." : "Loading story"}</p>
+                  );
+                })()}
+              </ErrorBoundary>
+            </div>
+          ) : null}
           <Tip as="div" className="edge" content={<TokenHint breakdown={tokenBreakdown(usage)} />}>
             <span>
               <b>{formatCount(usage.total)}</b> tokens
@@ -589,7 +755,20 @@ export default function App() {
                     const active = busy.has(agent.id);
                     const drifting = isDrifted(agent.presence);
                     return (
-                      <li key={agent.id}>
+                      <li
+                        key={agent.id}
+                        className={agentViewId === agent.id ? "openable current" : "openable"}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Open agent ${agent.id}`}
+                        onClick={() => openAgent(agent.id)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            openAgent(agent.id);
+                          }
+                        }}
+                      >
                         <StatusDot dot={agentDot(agent.presence, agentRuns.get(agent.id) ?? 0, invalid)} />
                         <span>{agent.id}</span>
                         <em>{active ? "running" : drifting ? "not synced" : "idle"}</em>
@@ -604,7 +783,9 @@ export default function App() {
             <RailSection title="Events">
               {snapshot ? (
                 <ul>
-                  {rules.map((rule) => (
+                  {eventGroups(rules).map((group, index, groups) => (
+                    <Fragment key={group[0]?.match.type || index}>
+                  {group.map((rule) => (
                     <li
                       key={rule.name}
                       className={eventRuleName === rule.name ? "openable current" : "openable"}
@@ -624,6 +805,9 @@ export default function App() {
                       <em>{rule.match.subject || rule.agent}</em>
                     </li>
                   ))}
+                  {index < groups.length - 1 ? <li className="rail-sep" role="separator" /> : null}
+                    </Fragment>
+                  ))}
                 </ul>
               ) : (
                 <p className="rail-note">Waiting for control</p>
@@ -641,7 +825,7 @@ export default function App() {
       <button
         className="return"
         type="button"
-        hidden={atTop || chatRunId !== null || eventRuleName !== null}
+        hidden={atTop || chatRunId !== null || eventRuleName !== null || agentViewId !== null || publicationId !== null}
         onClick={() => {
           document.querySelector(".column")?.scrollTo({ top: 0, behavior: "smooth" });
         }}

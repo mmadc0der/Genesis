@@ -131,15 +131,8 @@ export function EventChat({ rule, agent, onBack, onRunStarted }: EventChatProps)
             onKeyDown={keys}
             autoFocus
           />
-          <div className="composer-actions">
-            <span className={sendError ? "composer-note bad" : "composer-note"}>
-              {sendError}
-            </span>
-            <button type="submit" disabled={sending || draft.trim() === ""}>
-              {sending ? "Emitting..." : "Send"}
-            </button>
-          </div>
         </div>
+        {sendError ? <p className="composer-note bad">{sendError}</p> : null}
       </form>
     </section>
   );

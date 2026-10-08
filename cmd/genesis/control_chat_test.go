@@ -108,9 +108,16 @@ func chatJournal(t *testing.T, dataDir, runID, sessionID, message string, ended 
 		}}}},
 	}}}}
 	events := []lifecycleEvent{
-		sampleLifecycle(runID, "1", lifecycleTypeAccepted, map[string]any{
-			"event_id": "evt_1", "event_source": controlSource, "event_type": "dev.genesis.user.message", "message": message,
-		}),
+		sampleLifecycle(runID, "1", lifecycleTypeAccepted, func() map[string]any {
+			data := map[string]any{
+				"event_id": "evt_1", "event_source": controlSource, "event_type": "dev.genesis.user.message", "message": message,
+			}
+			if message == "follow up" {
+				data["event_type"] = sessionContinueType
+				data["event_subject"] = "gen_chat_a"
+			}
+			return data
+		}()),
 		sampleLifecycle(runID, "2", lifecycleTypeSessionCreated, map[string]any{"session_id": sessionID}),
 		sampleLifecycle(runID, "3", "dev.genesis.run.chunk", map[string]any{"frame": "chunk"}),
 		sampleLifecycle(runID, "4", "dev.genesis.run.retry", map[string]any{"code": "TRANSPORT"}),

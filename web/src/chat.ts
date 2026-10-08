@@ -47,7 +47,7 @@ export interface ChatSession {
 
 export type Entry =
   | { kind: "user"; id: string; at: string; who: string; mine: boolean; text: string; note: string }
-  | { kind: "agent"; id: string; at: string; text: string; truncated: boolean }
+  | { kind: "agent"; id: string; at: string; text: string; truncated: boolean; result?: boolean }
   | { kind: "thought"; id: string; at: string; text: string }
   | {
       kind: "tool";
@@ -202,6 +202,13 @@ export function buildThread(session: ChatSession): Entry[] {
         text: statusText(run),
         failed: run.run.state !== "completed",
       });
+    }
+  }
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.kind === "agent") {
+      entry.result = true;
+      break;
     }
   }
   return entries;

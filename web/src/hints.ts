@@ -162,8 +162,8 @@ export interface EventSummary {
   completed: number;
   failed: number;
   byCause: { cause: string; count: number }[];
-  // journalLines is the sum of run journal lengths: the lifecycle events the
-  // runs themselves logged.
+  // journalLines is the sum of stored journal events. It does not count
+  // ephemeral chunks, which advance the sequence number without being written.
   journalLines: number;
   rules: { total: number; active: number; unsynced: number; fired: number };
   // capped is true when the run list may be shorter than the full history.
@@ -182,7 +182,7 @@ export function eventSummary(runs: RunRow[], rules: RuleRow[]): EventSummary {
     if (run.state === "open") running += 1;
     else if (run.state === "failed") failed += 1;
     else if (run.state === "completed") completed += 1;
-    const lines = Number(run.last_seq);
+    const lines = Number(run.events);
     if (Number.isFinite(lines) && lines > 0) journalLines += lines;
   }
   const fired = runsByRule(runs);
