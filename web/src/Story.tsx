@@ -30,17 +30,15 @@ export function PublicationPage({ edition, onBack }: { edition: Edition; onBack:
   return (
     <section className={`chat publication tone-${category.tone}`} aria-label="Publication">
       <header className="chat-head">
-        <button type="button" className="chat-back" onClick={onBack}>
+        <button type="button" className="chat-back" onClick={onBack} title="Back to Wire" aria-label="Back to wire">
           ← Wire
         </button>
-        <h2>{edition.headline}</h2>
+        <h2>{category.label}</h2>
+        <span className="chat-meta">{edition.time}</span>
       </header>
       <div className="chat-scroll">
         <article className="chat-thread publication-body">
-          <div className="kicker">
-            <b>{category.label}</b>
-            <time>{edition.time}</time>
-          </div>
+          <h2>{edition.headline}</h2>
           <p className="lede">{edition.lede}</p>
           {edition.body ? <Markdown content={edition.body} /> : null}
           <p className="byline">

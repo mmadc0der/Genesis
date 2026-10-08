@@ -547,7 +547,9 @@ export default function App() {
         <button type="button" className="nameplate-link" onClick={openWire} title="Genesis wire">
           Genesis
         </button>
-        <span className="edition">The Wire</span>
+        <button type="button" className="edition" onClick={openWire} title="The Wire">
+          The Wire
+        </button>
         <div className="mast-status">
           <div className="chip-pop">
           <Tip

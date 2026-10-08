@@ -50,6 +50,8 @@ type chatItem struct {
 	Text      string `json:"text,omitempty"`
 	Failed    bool   `json:"failed,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
+	// Final is set when this assistant text is the run result event's final_response.
+	Final bool `json:"final,omitempty"`
 }
 
 // chatTrigger is what started a run: the event type and source, and the
@@ -474,6 +476,27 @@ func (s *chatState) absorb(event lifecycleEvent) {
 		s.items = append(s.items, toolResultItems(event)...)
 	case "dev.genesis.run.retry":
 		s.retries++
+	case lifecycleTypeResult:
+		var data struct {
+			FinalResponse string `json:"final_response"`
+		}
+		if json.Unmarshal(event.Data, &data) != nil {
+			return
+		}
+		final := strings.TrimSpace(data.FinalResponse)
+		if final == "" {
+			return
+		}
+		for i := len(s.items) - 1; i >= 0; i-- {
+			item := &s.items[i]
+			if item.Kind != chatKindText {
+				continue
+			}
+			if item.Text == data.FinalResponse || (item.Truncated && strings.HasPrefix(data.FinalResponse, item.Text)) {
+				item.Final = true
+			}
+			return
+		}
 	case lifecycleTypeError:
 		var data struct {
 			ErrorType string `json:"error_type"`

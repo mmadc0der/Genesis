@@ -13,6 +13,7 @@ export interface ChatItem {
   text?: string;
   failed?: boolean;
   truncated?: boolean;
+  final?: boolean;
 }
 
 export interface ChatTrigger {
@@ -155,7 +156,14 @@ export function buildThread(session: ChatSession): Entry[] {
     (run.items ?? []).forEach((item, index) => {
       const id = `${runId}:${item.seq}:${index}`;
       if (item.kind === "text") {
-        entries.push({ kind: "agent", id, at: item.at, text: item.text ?? "", truncated: Boolean(item.truncated) });
+        entries.push({
+          kind: "agent",
+          id,
+          at: item.at,
+          text: item.text ?? "",
+          truncated: Boolean(item.truncated),
+          result: Boolean(item.final),
+        });
       } else if (item.kind === "reasoning") {
         entries.push({ kind: "thought", id, at: item.at, text: item.text ?? "" });
       } else if (item.kind === "call") {
@@ -202,13 +210,6 @@ export function buildThread(session: ChatSession): Entry[] {
         text: statusText(run),
         failed: run.run.state !== "completed",
       });
-    }
-  }
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (entry.kind === "agent") {
-      entry.result = true;
-      break;
     }
   }
   return entries;
