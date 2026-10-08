@@ -9,12 +9,20 @@ package eventer
 import "C"
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"unsafe"
 )
+
+// DefaultCloudEventsSchema is the embedded default Eventer schema for Genesis CloudEvents.
+//
+//go:embed default_schema.json
+var DefaultCloudEventsSchema []byte
 
 // Store wraps an open Eventer database instance.
 type Store struct {
@@ -34,6 +42,21 @@ func Open(dir, schemaPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open eventer store at %s with schema %s", dir, schemaPath)
 	}
 	return &Store{handle: handle}, nil
+}
+
+// OpenDefault opens or creates an Eventer data directory using the embedded Genesis CloudEvents schema.
+// If schema.json does not exist in dir, it is written automatically.
+func OpenDefault(dir string) (*Store, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create eventer dir: %w", err)
+	}
+	schemaFile := filepath.Join(dir, "schema.json")
+	if _, err := os.Stat(schemaFile); os.IsNotExist(err) {
+		if err := os.WriteFile(schemaFile, DefaultCloudEventsSchema, 0o644); err != nil {
+			return nil, fmt.Errorf("write default schema: %w", err)
+		}
+	}
+	return Open(dir, schemaFile)
 }
 
 // Append writes one raw JSON event into the ingest pipeline.
@@ -118,6 +141,48 @@ func (s *Store) Query(fromMs, toMs int64) ([]byte, error) {
 	return buf[:reqLen], nil
 }
 
+// QueryFiltered returns events within [fromMs, toMs] inclusive whose string/text column filterCol equals filterVal.
+func (s *Store) QueryFiltered(fromMs, toMs int64, filterCol, filterVal string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle == nil {
+		return nil, errors.New("eventer store is closed")
+	}
+
+	cCol := C.CString(filterCol)
+	cVal := C.CString(filterVal)
+	defer C.free(unsafe.Pointer(cCol))
+	defer C.free(unsafe.Pointer(cVal))
+
+	var reqLen C.size_t
+	rc := C.eventer_query_filtered(s.handle, C.int64_t(fromMs), C.int64_t(toMs), cCol, cVal, nil, 0, &reqLen)
+	if rc == 0 {
+		return []byte("[]"), nil
+	}
+	if rc != -4 {
+		return nil, s.lastErrorLocked(fmt.Sprintf("query_filtered probe failed with code %d", rc))
+	}
+	if reqLen == 0 {
+		return []byte("[]"), nil
+	}
+
+	buf := make([]byte, reqLen)
+	rc = C.eventer_query_filtered(
+		s.handle,
+		C.int64_t(fromMs),
+		C.int64_t(toMs),
+		cCol,
+		cVal,
+		(*C.uint8_t)(unsafe.Pointer(&buf[0])),
+		reqLen,
+		&reqLen,
+	)
+	if rc != 0 {
+		return nil, s.lastErrorLocked(fmt.Sprintf("query_filtered failed with code %d", rc))
+	}
+	return buf[:reqLen], nil
+}
+
 // QueryEvents returns matching events deserialized into individual raw JSON messages.
 func (s *Store) QueryEvents(fromMs, toMs int64) ([]json.RawMessage, error) {
 	raw, err := s.Query(fromMs, toMs)
@@ -131,11 +196,51 @@ func (s *Store) QueryEvents(fromMs, toMs int64) ([]json.RawMessage, error) {
 	return events, nil
 }
 
+// QueryEventsFiltered returns matching events filtered by filterCol==filterVal deserialized into individual raw JSON messages.
+func (s *Store) QueryEventsFiltered(fromMs, toMs int64, filterCol, filterVal string) ([]json.RawMessage, error) {
+	raw, err := s.QueryFiltered(fromMs, toMs, filterCol, filterVal)
+	if err != nil {
+		return nil, err
+	}
+	var events []json.RawMessage
+	if err := json.Unmarshal(raw, &events); err != nil {
+		return nil, fmt.Errorf("unmarshal filtered events query: %w", err)
+	}
+	return events, nil
+}
+
+// QueryRun returns all events for a given runID within [fromMs, toMs].
+func (s *Store) QueryRun(runID string, fromMs, toMs int64) ([]json.RawMessage, error) {
+	return s.QueryEventsFiltered(fromMs, toMs, "runid", runID)
+}
+
+// QueryType returns all events of a given CloudEvent type within [fromMs, toMs].
+func (s *Store) QueryType(eventType string, fromMs, toMs int64) ([]json.RawMessage, error) {
+	return s.QueryEventsFiltered(fromMs, toMs, "type", eventType)
+}
+
+// QueryAgent returns all events for a given agentID within [fromMs, toMs].
+func (s *Store) QueryAgent(agentID string, fromMs, toMs int64) ([]json.RawMessage, error) {
+	return s.QueryEventsFiltered(fromMs, toMs, "agentid", agentID)
+}
+
+// NewRunFollower creates a follower dedicated to following events of a specific runID.
+func (s *Store) NewRunFollower(startMs int64, runID string) *Follower {
+	return s.NewFilteredFollower(startMs, "runid", runID)
+}
+
+// NewTypeFollower creates a follower dedicated to following events of a specific CloudEvent type.
+func (s *Store) NewTypeFollower(startMs int64, eventType string) *Follower {
+	return s.NewFilteredFollower(startMs, "type", eventType)
+}
+
 // Follower allows continuous following (tailing) of newly committed events
-// from a specific timestamp forward.
+// from a specific timestamp forward, with optional column equality filtering.
 type Follower struct {
-	store    *Store
-	cursorMs int64
+	store     *Store
+	cursorMs  int64
+	filterCol string
+	filterVal string
 }
 
 // NewFollower creates a follower starting at the given timestamp (in unix milliseconds).
@@ -143,19 +248,36 @@ func (s *Store) NewFollower(startMs int64) *Follower {
 	return &Follower{store: s, cursorMs: startMs}
 }
 
+// NewFilteredFollower creates a follower starting at startMs that filters by filterCol == filterVal.
+func (s *Store) NewFilteredFollower(startMs int64, filterCol, filterVal string) *Follower {
+	return &Follower{store: s, cursorMs: startMs, filterCol: filterCol, filterVal: filterVal}
+}
+
+// WithFilter sets a column equality filter on the follower and returns itself.
+func (f *Follower) WithFilter(filterCol, filterVal string) *Follower {
+	f.filterCol = filterCol
+	f.filterVal = filterVal
+	return f
+}
+
 // Next polls for any new events committed since the last cursor position.
 // The toMs parameter caps the upper time bound (e.g. time.Now().UnixMilli()).
-// The follower advances its internal cursor to the latest event's timestamp + 1.
+// The follower advances its internal cursor to toMs + 1 when events are found.
 func (f *Follower) Next(toMs int64) ([]json.RawMessage, error) {
 	if f.cursorMs > toMs {
 		return nil, nil
 	}
-	events, err := f.store.QueryEvents(f.cursorMs, toMs)
+	var events []json.RawMessage
+	var err error
+	if f.filterCol != "" {
+		events, err = f.store.QueryEventsFiltered(f.cursorMs, toMs, f.filterCol, f.filterVal)
+	} else {
+		events, err = f.store.QueryEvents(f.cursorMs, toMs)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if len(events) > 0 {
-		// Advance cursor to toMs + 1
 		f.cursorMs = toMs + 1
 	}
 	return events, nil

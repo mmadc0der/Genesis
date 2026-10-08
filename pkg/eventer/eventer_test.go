@@ -227,3 +227,162 @@ func TestEventerFollower(t *testing.T) {
 		t.Fatalf("expected 3 events in batch 2, got %d", len(events2))
 	}
 }
+
+func TestEventerQueryFiltered(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "eventer-filter-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	schemaPath, err := filepath.Abs("../../schema/cloudevents-eventer.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(tempDir, schemaPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	base := time.Now().UTC()
+	startMs := base.UnixMilli()
+
+	// Append mix of events: some 'dev.genesis.run.assistant', some 'dev.genesis.run.tool'
+	types := []string{
+		"dev.genesis.run.assistant",
+		"dev.genesis.run.tool",
+		"dev.genesis.run.assistant",
+		"dev.genesis.run.tool",
+		"dev.genesis.run.tool",
+	}
+
+	for i, typ := range types {
+		ev := map[string]any{
+			"time":        base.Add(time.Duration(i*10) * time.Millisecond).Format(time.RFC3339Nano),
+			"specversion": "1.0",
+			"id":          "evt_filt",
+			"type":        typ,
+			"runid":       "gen_filter",
+			"agentid":     "oracle",
+		}
+		if err := store.AppendEvent(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	endMs := startMs + 100
+
+	// 1. Query filtered by type == dev.genesis.run.assistant
+	assistantEvents, err := store.QueryEventsFiltered(startMs, endMs, "type", "dev.genesis.run.assistant")
+	if err != nil {
+		t.Fatalf("QueryEventsFiltered failed: %v", err)
+	}
+	if len(assistantEvents) != 2 {
+		t.Fatalf("expected 2 assistant events, got %d", len(assistantEvents))
+	}
+	for _, raw := range assistantEvents {
+		var parsed map[string]any
+		_ = json.Unmarshal(raw, &parsed)
+		if parsed["type"] != "dev.genesis.run.assistant" {
+			t.Fatalf("unexpected type in filtered results: %v", parsed["type"])
+		}
+	}
+
+	// 2. Query filtered by type == dev.genesis.run.tool
+	toolEvents, err := store.QueryEventsFiltered(startMs, endMs, "type", "dev.genesis.run.tool")
+	if err != nil {
+		t.Fatalf("QueryEventsFiltered for tool failed: %v", err)
+	}
+	if len(toolEvents) != 3 {
+		t.Fatalf("expected 3 tool events, got %d", len(toolEvents))
+	}
+
+	// 3. Query filtered by non-existent type
+	none, err := store.QueryEventsFiltered(startMs, endMs, "type", "dev.genesis.run.nonexistent")
+	if err != nil {
+		t.Fatalf("QueryEventsFiltered none failed: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("expected 0 events, got %d", len(none))
+	}
+
+	// 4. Test NewFilteredFollower
+	filteredFollower := store.NewFilteredFollower(startMs, "type", "dev.genesis.run.assistant")
+	followed, err := filteredFollower.Next(endMs)
+	if err != nil {
+		t.Fatalf("FilteredFollower Next failed: %v", err)
+	}
+	if len(followed) != 2 {
+		t.Fatalf("expected 2 followed assistant events, got %d", len(followed))
+	}
+
+	// 5. Test QueryRun and QueryAgent typed helpers
+	runEvents, err := store.QueryRun("gen_filter", startMs, endMs)
+	if err != nil || len(runEvents) != 5 {
+		t.Fatalf("QueryRun failed: %v, count=%d", err, len(runEvents))
+	}
+
+	agentEvents, err := store.QueryAgent("oracle", startMs, endMs)
+	if err != nil || len(agentEvents) != 5 {
+		t.Fatalf("QueryAgent failed: %v, count=%d", err, len(agentEvents))
+	}
+
+	otherRun, err := store.QueryRun("gen_other", startMs, endMs)
+	if err != nil || len(otherRun) != 0 {
+		t.Fatalf("QueryRun other failed: %v, count=%d", err, len(otherRun))
+	}
+
+	// 6. Test NewRunFollower
+	runFollower := store.NewRunFollower(startMs, "gen_filter")
+	followedRun, err := runFollower.Next(endMs)
+	if err != nil || len(followedRun) != 5 {
+		t.Fatalf("NewRunFollower Next failed: %v, count=%d", err, len(followedRun))
+	}
+}
+
+func TestEventerOpenDefault(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "eventer-default-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	store, err := OpenDefault(tempDir)
+	if err != nil {
+		t.Fatalf("OpenDefault failed: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	ev := map[string]any{
+		"time":        now.Format(time.RFC3339Nano),
+		"specversion": "1.0",
+		"id":          "evt_default",
+		"type":        "dev.genesis.run.start",
+		"source":      "urn:genesis:default",
+		"runid":       "gen_default",
+		"agentid":     "cpu-bench",
+		"data": map[string]any{
+			"status": "ok",
+		},
+	}
+	if err := store.AppendEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := store.QueryRun("gen_default", now.UnixMilli()-1000, now.UnixMilli()+1000)
+	if err != nil {
+		t.Fatalf("QueryRun failed: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+}

@@ -1,0 +1,24 @@
+{
+  "timestamp_field": "time",
+  "fields": [
+    {"name": "time", "type": "timestamp"},
+    {"name": "specversion", "type": "string"},
+    {"name": "id", "type": "string"},
+    {"name": "type", "type": "string"},
+    {"name": "source", "type": "string"},
+    {"name": "subject", "type": "string"},
+    {"name": "datacontenttype", "type": "string"},
+    {"name": "sequence", "type": "string"},
+    {"name": "sequencetype", "type": "string"},
+    {"name": "runid", "type": "string"},
+    {"name": "agentid", "type": "string"},
+    {"name": "rulefile", "type": "string"},
+    {"name": "sessionid", "type": "string"},
+    {"name": "correlationid", "type": "string"},
+    {"name": "causeid", "type": "string"},
+    {"name": "causesource", "type": "string"},
+    {"name": "causetype", "type": "string"},
+    {"name": "origin", "type": "string"},
+    {"name": "data", "type": "json"}
+  ]
+}
