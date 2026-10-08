@@ -659,7 +659,7 @@ if (calls.includes("create")) {
   process.exit(1);
 }
 const followups = calls.filter((call) => Array.isArray(call) && call[0] === "followup");
-if (followups.length !== 1 || followups[0][1] !== "genesis-transport-prompt-ack") {
+if (followups.length !== 1 || followups[0][1] !== "user-1") {
   console.error(JSON.stringify({ followups, calls }));
   process.exit(1);
 }
@@ -698,7 +698,8 @@ if (!calls.includes("wake")) {
         log = home / "sessions" / "proj" / session_id / "session.v3.jsonl"
         log.parent.mkdir(parents=True)
         log.write_text(
-            '{"type":"turn/end","seq":9,"data":{"reason":{"kind":"completed"}}}\n',
+            '{"type":"turn/end","seq":9,"data":{"reason":{"kind":"completed"}}}\n'
+            '{"type":"agent/inbox/spliced","seq":10,"data":{"inserted":[]}}\n',
             encoding="utf-8",
         )
         script = r"""
@@ -735,7 +736,7 @@ apply({ agents });
 const handle = await agents.create({ sessionId: process.env.SESSION_ID });
 handle.agent.followup({ id: "user-1", role: "user", content: [{ type: "text", text: " " }] });
 const followups = calls.filter((call) => Array.isArray(call) && call[0] === "followup");
-if (followups.length !== 1 || followups[0][1] !== "genesis-transport-prompt-ack") {
+if (followups.length !== 1 || followups[0][1] !== "user-1") {
   console.error(JSON.stringify({ followups, calls }));
   process.exit(1);
 }

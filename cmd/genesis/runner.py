@@ -77,8 +77,10 @@ RESUME_PLUGIN = r"""/**
  * Session.run). After wakeDriver, the runtime normally issues a second followup
  * when the turn ends; if the persisted log already ends on turn/end (parent run
  * finished the turn before exit), only one followup arrives and session.run
- * hangs unless we ack the prompt immediately. Mid-turn restarts ack on turn/end
- * append instead.
+ * hangs unless we ack the prompt immediately. The ack keeps the prompt message
+ * id: Session.run waits for agent/inbox/spliced of that id, then status idle.
+ * A new id is spliced and the restart waits forever. Mid-turn restarts ack on
+ * turn/end append instead, with the same id.
  *
  * A log is session.jsonl or session.vN.jsonl under
  * $DSH_HOME/sessions/<project>/<encoded session id>/. The current pin writes
@@ -160,9 +162,32 @@ export function readLastSessionLogEvent(dshHome, sessionId) {
   }
 }
 
+// Events the runtime appends after a finished turn. They are not a turn still
+// in flight. agent/inbox/spliced is the prompt receipt itself.
+const TRAILING_IDLE_TYPES = new Set(['agent/inbox/spliced'])
+
 export function resumeEndsOnTurnEnd(dshHome, sessionId) {
-  const last = readLastSessionLogEvent(dshHome, sessionId)
-  return Boolean(last && last.type === 'turn/end')
+  const logPath = sessionLogPath(dshHome, sessionId)
+  if (!logPath) return false
+  let lines
+  try {
+    const text = fs.readFileSync(logPath, 'utf8').trimEnd()
+    if (!text) return false
+    lines = text.split('\n')
+  } catch {
+    return false
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let event
+    try {
+      event = JSON.parse(lines[i])
+    } catch {
+      return false
+    }
+    if (!event || TRAILING_IDLE_TYPES.has(event.type)) continue
+    return event.type === 'turn/end'
+  }
+  return false
 }
 
 export function hasSessionLog(dshHome, sessionId) {
@@ -189,9 +214,12 @@ function restartStepMessage() {
   }
 }
 
-function promptAckMessage() {
+function promptAckMessage(source) {
+  const id = source && typeof source.id === 'string' && source.id.length > 0
+    ? source.id
+    : PROMPT_ACK_MESSAGE_ID
   return {
-    id: PROMPT_ACK_MESSAGE_ID,
+    id,
     role: 'user',
     content: [],
     source: { kind: 'plugin', plugin: 'genesis-session-resume' },
@@ -216,9 +244,10 @@ function armTransportRestart(agent, sessionId) {
   const originalPreStep = agent.preStep
   const originalAppend = agent.session.append
   let pendingTurnAck = false
+  let promptMessage = null
 
   const ackPrompt = () => {
-    originalFollowup.call(agent, promptAckMessage())
+    originalFollowup.call(agent, promptAckMessage(promptMessage))
   }
 
   agent.session.append = function genesisTransportRestartAppend(type, data, intent) {
@@ -248,8 +277,9 @@ function armTransportRestart(agent, sessionId) {
     }
     if (!droppedTransportPrompt) {
       droppedTransportPrompt = true
+      promptMessage = message
       if (resumeWithIdleTurn) {
-        return originalFollowup.call(this, promptAckMessage())
+        return originalFollowup.call(this, promptAckMessage(message))
       }
       pendingTurnAck = true
       agent.wakeDriver()
