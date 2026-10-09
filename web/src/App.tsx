@@ -20,7 +20,7 @@ import { toEdition } from "./publications";
 import { Story } from "./Story";
 import { usePublications } from "./usePublications";
 import { createViewStack, navigateToFrame, pushView } from "./view-stack";
-import { Chat } from "./Chat";
+import { Chat } from "./Chat.tsx";
 import { EventChat } from "./EventChat";
 import { ErrorBoundary } from "./ErrorBoundary";
 
