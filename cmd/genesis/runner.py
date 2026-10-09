@@ -444,7 +444,35 @@ def replace_text(path: Path, text: str) -> None:
     os.replace(temporary, path)
 
 
-def write_runtime_patch(home: Path) -> Path:
+def make_session_patch(invocation: dict[str, Any] | None = None) -> str:
+    inv = invocation or {}
+    max_retries = inv.get("max_retries") or HARNESS_MAX_RETRIES
+    max_backoff_ms = inv.get("max_backoff_ms") or HARNESS_MAX_BACKOFF_MS
+    context_window = inv.get("context_window") or 1000000
+    stream_timeout = inv.get("stream_idle_timeout_ms") or 172800000
+    initial_delay = inv.get("initial_delay_ms") or 500
+    return f"""\
+- id: session-log-deepseek
+  name: '@deepseek-ai/dsh-session-log-deepseek'
+  config:
+    enabled: false
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    defaultContextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? {context_window})
+    streamIdleTimeoutMs: {stream_timeout}
+    retryPolicy:
+      mode: normal
+      maxRetries: {max_retries}
+      backoff:
+        initialDelayMs: {initial_delay}
+        maxDelayMs: {max_backoff_ms}
+        jitterRatio: 0.1
+"""
+
+
+def write_runtime_patch(home: Path, invocation: dict[str, Any] | None = None) -> Path:
     plugin_path = home / ASSISTANT_STREAM_PLUGIN_NAME
     replace_text(plugin_path, ASSISTANT_STREAM_PLUGIN)
     emit_path = home / EMIT_PLUGIN_NAME
@@ -455,9 +483,10 @@ def write_runtime_patch(home: Path) -> Path:
     plugin_name = json.dumps(str(plugin_path))
     emit_name = json.dumps(str(emit_path))
     resume_name = json.dumps(str(resume_path))
+    patch_body = make_session_patch(invocation) if invocation else SESSION_LOG_OFF_PATCH
     replace_text(
         patch_path,
-        SESSION_LOG_OFF_PATCH
+        patch_body
         + "- insert:\n"
         + "    - id: genesis-assistant-stream\n"
         + f"      name: {plugin_name}\n"
@@ -579,6 +608,8 @@ def execute(
     environment["HOME"] = invocation["home"]
     environment["DSH_SYSTEM_PROMPT"] = invocation["instructions"]
     environment.update(delivered)
+    if invocation.get("api_key") and not environment.get("DEEPSEEK_API_KEY"):
+        environment["DEEPSEEK_API_KEY"] = invocation["api_key"]
     if invocation.get("transport_restart") is True:
         environment["GENESIS_TRANSPORT_RESTART"] = "1"
 
@@ -615,10 +646,10 @@ def execute(
     else:
         message = user_message
 
-    patch_path = write_runtime_patch(home_path)
+    patch_path = write_runtime_patch(home_path, invocation)
     harness_options = {
-        "provider": "deepseek-official",
-        "model": "deepseek-flash",
+        "provider": invocation.get("provider") or "deepseek-official",
+        "model": invocation.get("model") or "deepseek-flash",
         "cwd": invocation["cwd"],
         "runtime_cwd": dsh_home,
         "dsh_home": dsh_home,

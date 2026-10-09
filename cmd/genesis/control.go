@@ -410,6 +410,16 @@ func (c *controlServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.handlePostSync(w, r)
+	case "/api/settings/model":
+		if r.Method == http.MethodGet {
+			c.handleGetModelSettings(w, r)
+			return
+		}
+		if r.Method == http.MethodPost {
+			c.handlePostModelSettings(w, r)
+			return
+		}
+		requireMethod(w, r, http.MethodGet)
 	default:
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/api/agents/"):
@@ -1575,9 +1585,17 @@ func (c *controlServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, filepath.Join(c.webDir, "index.html"))
 		return
 	}
+	if r.URL.Path == "/settings" || r.URL.Path == "/settings/" {
+		http.ServeFile(w, r, filepath.Join(c.webDir, "settings.html"))
+		return
+	}
 	rel := strings.TrimPrefix(pathClean(r.URL.Path), "/")
 	if rel == "" || rel == "." {
 		http.ServeFile(w, r, filepath.Join(c.webDir, "index.html"))
+		return
+	}
+	if rel == "settings" || rel == "settings.html" {
+		http.ServeFile(w, r, filepath.Join(c.webDir, "settings.html"))
 		return
 	}
 	full := filepath.Join(c.webDir, rel)
@@ -1654,3 +1672,223 @@ func newControlEventID() (string, error) {
 	}
 	return "ctl_" + hex.EncodeToString(random[:]), nil
 }
+
+type modelConfig struct {
+	Provider            string `json:"provider"`
+	Model               string `json:"model"`
+	ReasoningEffort     string `json:"reasoning_effort"`
+	ContextWindow       int    `json:"context_window"`
+	MaxRetries          int    `json:"max_retries"`
+	MaxBackoffMs        int    `json:"max_backoff_ms"`
+	InitialDelayMs      int    `json:"initial_delay_ms"`
+	StreamIdleTimeoutMs int    `json:"stream_idle_timeout_ms"`
+	APIKeyConfigured    bool   `json:"api_key_configured"`
+	APIKeyMasked        string `json:"api_key_masked,omitempty"`
+	APIKey              string `json:"api_key,omitempty"`
+}
+
+type modelConfigUpdateRequest struct {
+	Provider            string `json:"provider"`
+	Model               string `json:"model"`
+	ReasoningEffort     string `json:"reasoning_effort"`
+	ContextWindow       int    `json:"context_window"`
+	MaxRetries          int    `json:"max_retries"`
+	MaxBackoffMs        int    `json:"max_backoff_ms"`
+	InitialDelayMs      int    `json:"initial_delay_ms"`
+	StreamIdleTimeoutMs int    `json:"stream_idle_timeout_ms"`
+	APIKey              string `json:"api_key,omitempty"`
+}
+
+func (c *controlServer) modelConfigPath() string {
+	if c.agentsDir != "" {
+		return filepath.Join(filepath.Dir(c.agentsDir), "model.json")
+	}
+	return "model.json"
+}
+
+func defaultModelConfig() modelConfig {
+	key := os.Getenv("DEEPSEEK_API_KEY")
+	masked := ""
+	if key != "" {
+		if len(key) > 6 {
+			masked = key[:3] + "••••••" + key[len(key)-3:]
+		} else {
+			masked = "••••••"
+		}
+	}
+	return modelConfig{
+		Provider:            "deepseek-official",
+		Model:               "deepseek-flash",
+		ReasoningEffort:     "high",
+		ContextWindow:       1000000,
+		MaxRetries:          10,
+		MaxBackoffMs:        60000,
+		InitialDelayMs:      500,
+		StreamIdleTimeoutMs: 172800000,
+		APIKeyConfigured:    key != "",
+		APIKeyMasked:        masked,
+	}
+}
+
+func loadModelConfigFile(path string) (modelConfig, error) {
+	cfg := defaultModelConfig()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, err
+	}
+	var stored struct {
+		Provider            *string `json:"provider"`
+		Model               *string `json:"model"`
+		ReasoningEffort     *string `json:"reasoning_effort"`
+		ContextWindow       *int    `json:"context_window"`
+		MaxRetries          *int    `json:"max_retries"`
+		MaxBackoffMs        *int    `json:"max_backoff_ms"`
+		InitialDelayMs      *int    `json:"initial_delay_ms"`
+		StreamIdleTimeoutMs *int    `json:"stream_idle_timeout_ms"`
+		APIKey              *string `json:"api_key"`
+	}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return cfg, err
+	}
+	if stored.Provider != nil && *stored.Provider != "" {
+		cfg.Provider = *stored.Provider
+	}
+	if stored.Model != nil && *stored.Model != "" {
+		cfg.Model = *stored.Model
+	}
+	if stored.ReasoningEffort != nil && *stored.ReasoningEffort != "" {
+		cfg.ReasoningEffort = *stored.ReasoningEffort
+	}
+	if stored.ContextWindow != nil && *stored.ContextWindow > 0 {
+		cfg.ContextWindow = *stored.ContextWindow
+	}
+	if stored.MaxRetries != nil && *stored.MaxRetries >= 0 {
+		cfg.MaxRetries = *stored.MaxRetries
+	}
+	if stored.MaxBackoffMs != nil && *stored.MaxBackoffMs > 0 {
+		cfg.MaxBackoffMs = *stored.MaxBackoffMs
+	}
+	if stored.InitialDelayMs != nil && *stored.InitialDelayMs > 0 {
+		cfg.InitialDelayMs = *stored.InitialDelayMs
+	}
+	if stored.StreamIdleTimeoutMs != nil && *stored.StreamIdleTimeoutMs > 0 {
+		cfg.StreamIdleTimeoutMs = *stored.StreamIdleTimeoutMs
+	}
+	if stored.APIKey != nil && *stored.APIKey != "" {
+		cfg.APIKey = *stored.APIKey
+		cfg.APIKeyConfigured = true
+		k := *stored.APIKey
+		if len(k) > 6 {
+			cfg.APIKeyMasked = k[:3] + "••••••" + k[len(k)-3:]
+		} else {
+			cfg.APIKeyMasked = "••••••"
+		}
+	}
+	return cfg, nil
+}
+
+func (c *controlServer) loadModelConfig() (modelConfig, error) {
+	return loadModelConfigFile(c.modelConfigPath())
+}
+
+func (c *controlServer) handleGetModelSettings(w http.ResponseWriter, r *http.Request) {
+	cfg, err := c.loadModelConfig()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load model config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (c *controlServer) handlePostModelSettings(w http.ResponseWriter, r *http.Request) {
+	var req modelConfigUpdateRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxControlBody))
+	if err := decoder.Decode(&req); err != nil {
+		http.Error(w, "invalid json body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Provider = strings.TrimSpace(req.Provider)
+	req.Model = strings.TrimSpace(req.Model)
+	req.ReasoningEffort = strings.TrimSpace(req.ReasoningEffort)
+	if req.Model == "" {
+		http.Error(w, "model cannot be empty", http.StatusBadRequest)
+		return
+	}
+	if req.ReasoningEffort != "" {
+		switch req.ReasoningEffort {
+		case "off", "low", "high", "max":
+		default:
+			http.Error(w, "reasoning_effort must be off, low, high, or max", http.StatusBadRequest)
+			return
+		}
+	}
+	if req.ContextWindow <= 0 {
+		req.ContextWindow = 1000000
+	}
+	if req.MaxRetries < 0 {
+		req.MaxRetries = 10
+	}
+	if req.MaxBackoffMs <= 0 {
+		req.MaxBackoffMs = 60000
+	}
+	if req.InitialDelayMs <= 0 {
+		req.InitialDelayMs = 500
+	}
+	if req.StreamIdleTimeoutMs <= 0 {
+		req.StreamIdleTimeoutMs = 172800000
+	}
+	if req.Provider == "" {
+		req.Provider = "deepseek-official"
+	}
+
+	var apiKeyToSave string
+	if strings.TrimSpace(req.APIKey) != "" {
+		apiKeyToSave = strings.TrimSpace(req.APIKey)
+		_ = os.Setenv("DEEPSEEK_API_KEY", apiKeyToSave)
+	} else {
+		data, err := os.ReadFile(c.modelConfigPath())
+		if err == nil {
+			var prev struct {
+				APIKey string `json:"api_key"`
+			}
+			if json.Unmarshal(data, &prev) == nil && prev.APIKey != "" {
+				apiKeyToSave = prev.APIKey
+			}
+		}
+	}
+
+	savePayload := map[string]any{
+		"provider":               req.Provider,
+		"model":                  req.Model,
+		"reasoning_effort":       req.ReasoningEffort,
+		"context_window":         req.ContextWindow,
+		"max_retries":            req.MaxRetries,
+		"max_backoff_ms":         req.MaxBackoffMs,
+		"initial_delay_ms":       req.InitialDelayMs,
+		"stream_idle_timeout_ms": req.StreamIdleTimeoutMs,
+	}
+	if apiKeyToSave != "" {
+		savePayload["api_key"] = apiKeyToSave
+	}
+
+	targetPath := c.modelConfigPath()
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		http.Error(w, "create directory: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := writeJSONFile(targetPath, savePayload); err != nil {
+		http.Error(w, "save model config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	updated, err := c.loadModelConfig()
+	if err != nil {
+		http.Error(w, "load updated config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+

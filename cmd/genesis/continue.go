@@ -110,7 +110,7 @@ func (s *eventServer) dispatchSessionContinue(w http.ResponseWriter, event cloud
 		http.Error(w, "failed to create run ID", http.StatusInternalServerError)
 		return
 	}
-	document := snapshotInvocation(event, rule{name: continuationRuleName, Agent: definition.id}, definition, runID, s.secrets, s.eventsURL)
+	document := snapshotInvocation(event, rule{name: continuationRuleName, Agent: definition.id}, definition, runID, s.secrets, s.eventsURL, s.agentsDir)
 	document.SessionID = record.SessionID
 	document.DshHome = record.DshHome
 	document.CorrelationID = record.CorrelationID

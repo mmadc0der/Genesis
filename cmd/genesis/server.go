@@ -93,7 +93,14 @@ type invocation struct {
 	Credential       string `json:"-"`
 	// ReasoningEffort is copied from the agent at accept time. Empty omits
 	// the harness argument so DSH keeps its default.
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
+	Provider            string `json:"provider,omitempty"`
+	Model               string `json:"model,omitempty"`
+	ContextWindow       int    `json:"context_window,omitempty"`
+	MaxRetries          int    `json:"max_retries,omitempty"`
+	MaxBackoffMs        int    `json:"max_backoff_ms,omitempty"`
+	StreamIdleTimeoutMs int    `json:"stream_idle_timeout_ms,omitempty"`
+	APIKey              string `json:"api_key,omitempty"`
 }
 
 type acceptedRun struct {
@@ -258,7 +265,7 @@ func (s *eventServer) dispatchCloudEvent(w http.ResponseWriter, event cloudEvent
 			http.Error(w, "failed to create run ID", http.StatusInternalServerError)
 			return
 		}
-		document := snapshotInvocation(event, matched, definition, runID, s.secrets, s.eventsURL)
+		document := snapshotInvocation(event, matched, definition, runID, s.secrets, s.eventsURL, s.agentsDir)
 		if err := s.store.Accept(&document, secretValues(s.secrets, definition.Secrets, document.Env)); err != nil {
 			s.log().Error("create run storage", "rule", matched.name, "agent", definition.id, "run_id", runID, "error", err)
 			for _, previous := range invocations {
@@ -295,6 +302,20 @@ func (s *eventServer) log() *slog.Logger {
 	return slog.Default()
 }
 
+func findModelConfigFile(agentsDir string) string {
+	candidates := []string{}
+	if agentsDir != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(agentsDir), "model.json"))
+	}
+	candidates = append(candidates, "/var/lib/genesis/config/model.json", "model.json")
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
 func snapshotInvocation(
 	event cloudEvent,
 	matched rule,
@@ -302,7 +323,24 @@ func snapshotInvocation(
 	runID string,
 	secrets map[string]string,
 	eventsURL string,
+	agentsDir string,
 ) invocation {
+	modelPath := findModelConfigFile(agentsDir)
+	var modelCfg modelConfig
+	var hasModelCfg bool
+	if modelPath != "" {
+		if cfg, err := loadModelConfigFile(modelPath); err == nil {
+			modelCfg = cfg
+			hasModelCfg = true
+			if modelCfg.APIKey != "" {
+				if secrets != nil {
+					secrets[deepSeekAPIKey] = modelCfg.APIKey
+				}
+				_ = os.Setenv(deepSeekAPIKey, modelCfg.APIKey)
+			}
+		}
+	}
+
 	gitAccess := ""
 	credential := ""
 	if definition.GitHub != nil {
@@ -312,7 +350,7 @@ func snapshotInvocation(
 			credential = credentialPending
 		}
 	}
-	return invocation{
+	doc := invocation{
 		Event:           event,
 		Rule:            matched.name,
 		Agent:           definition.id,
@@ -326,6 +364,37 @@ func snapshotInvocation(
 		Credential:      credential,
 		ReasoningEffort: definition.ReasoningEffort,
 	}
+	if hasModelCfg {
+		if doc.ReasoningEffort == "" && modelCfg.ReasoningEffort != "" {
+			doc.ReasoningEffort = modelCfg.ReasoningEffort
+		}
+		if modelCfg.Provider != "" {
+			doc.Provider = modelCfg.Provider
+		}
+		if modelCfg.Model != "" {
+			doc.Model = modelCfg.Model
+		}
+		if modelCfg.ContextWindow > 0 {
+			doc.ContextWindow = modelCfg.ContextWindow
+		}
+		if modelCfg.MaxRetries >= 0 {
+			doc.MaxRetries = modelCfg.MaxRetries
+		}
+		if modelCfg.MaxBackoffMs > 0 {
+			doc.MaxBackoffMs = modelCfg.MaxBackoffMs
+		}
+		if modelCfg.StreamIdleTimeoutMs > 0 {
+			doc.StreamIdleTimeoutMs = modelCfg.StreamIdleTimeoutMs
+		}
+		if modelCfg.APIKey != "" {
+			doc.APIKey = modelCfg.APIKey
+			if doc.Env == nil {
+				doc.Env = map[string]string{}
+			}
+			doc.Env[deepSeekAPIKey] = modelCfg.APIKey
+		}
+	}
+	return doc
 }
 
 func newGenesisRunID() (string, error) {

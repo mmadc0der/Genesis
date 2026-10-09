@@ -847,3 +847,148 @@ func mustFrame(frame liveFrame) []byte {
 	payload, _ := json.Marshal(frame)
 	return payload
 }
+
+func TestModelSettingsEndpointAndStaticSettings(t *testing.T) {
+	control, _ := newPanelFixture(t)
+	web := t.TempDir()
+	if err := os.WriteFile(filepath.Join(web, "index.html"), []byte("<html>Genesis Wire</html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(web, "settings.html"), []byte("<html>Genesis Settings</html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	control.webDir = web
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	// 1. Static serving of settings page
+	settingsBody := mustGET(t, panel.URL+"/settings")
+	if !strings.Contains(settingsBody, "Genesis Settings") {
+		t.Fatalf("expected settings.html, got %s", settingsBody)
+	}
+	settingsSlashBody := mustGET(t, panel.URL+"/settings/")
+	if !strings.Contains(settingsSlashBody, "Genesis Settings") {
+		t.Fatalf("expected settings.html for /settings/, got %s", settingsSlashBody)
+	}
+
+	// 2. Initial model settings defaults
+	cfg := getJSON[modelConfig](t, panel.URL+"/api/settings/model")
+	if cfg.Provider != "deepseek-official" || cfg.Model != "deepseek-flash" || cfg.ReasoningEffort != "high" {
+		t.Fatalf("unexpected default config: %#v", cfg)
+	}
+	if cfg.ContextWindow != 1000000 || cfg.MaxRetries != 10 {
+		t.Fatalf("unexpected defaults: %#v", cfg)
+	}
+
+	// 3. Update model settings
+	updateReq := modelConfigUpdateRequest{
+		Provider:            "deepseek-official",
+		Model:               "deepseek-chat",
+		ReasoningEffort:     "low",
+		ContextWindow:       2000000,
+		MaxRetries:          5,
+		MaxBackoffMs:        30000,
+		InitialDelayMs:      250,
+		StreamIdleTimeoutMs: 60000,
+		APIKey:              "sk-test-secret-key-12345",
+	}
+	payload, err := json.Marshal(updateReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(panel.URL+"/api/settings/model", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(body))
+	}
+	var updated modelConfig
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Model != "deepseek-chat" || updated.ReasoningEffort != "low" || updated.ContextWindow != 2000000 {
+		t.Fatalf("updated config mismatch: %#v", updated)
+	}
+	if !updated.APIKeyConfigured || !strings.Contains(updated.APIKeyMasked, "••••••") {
+		t.Fatalf("expected masked API key, got %#v", updated)
+	}
+
+	// 4. GET reflects persisted updates
+	saved := getJSON[modelConfig](t, panel.URL+"/api/settings/model")
+	if saved.Model != "deepseek-chat" || saved.ReasoningEffort != "low" || saved.MaxRetries != 5 {
+		t.Fatalf("persisted config mismatch: %#v", saved)
+	}
+
+	// 5. Validation error on invalid effort
+	badReq := updateReq
+	badReq.ReasoningEffort = "turbo"
+	badPayload, _ := json.Marshal(badReq)
+	badResp, err := http.Post(panel.URL+"/api/settings/model", "application/json", bytes.NewReader(badPayload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer badResp.Body.Close()
+	if badResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid reasoning_effort, got %d", badResp.StatusCode)
+	}
+}
+
+func TestSnapshotInvocationLoadsModelJSON(t *testing.T) {
+	tempConfigDir := t.TempDir()
+	agentsDir := filepath.Join(tempConfigDir, "agents.d")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	modelJSONPath := filepath.Join(tempConfigDir, "model.json")
+	modelContent := `{
+		"provider": "deepseek-official",
+		"model": "deepseek-reasoner",
+		"reasoning_effort": "max",
+		"context_window": 1500000,
+		"max_retries": 8,
+		"max_backoff_ms": 45000,
+		"stream_idle_timeout_ms": 120000,
+		"api_key": "sk-from-model-json-12345"
+	}`
+	if err := os.WriteFile(modelJSONPath, []byte(modelContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	def := agentDefinition{
+		id:           "oracle",
+		Instructions: "oracle instructions",
+		Home:         "/home/oracle",
+		Cwd:          "/home/oracle/workspace",
+		Secrets:      []string{deepSeekAPIKey},
+	}
+	evt := cloudEvent{"specversion": "1.0", "id": "test-evt", "type": "test", "source": "test"}
+	matched := rule{name: "oracle.yaml", Agent: "oracle"}
+	secrets := map[string]string{}
+
+	doc := snapshotInvocation(evt, matched, def, "gen_test1", secrets, "http://127.0.0.1:8787", agentsDir)
+
+	if doc.Model != "deepseek-reasoner" {
+		t.Fatalf("expected model deepseek-reasoner, got %s", doc.Model)
+	}
+	if doc.ReasoningEffort != "max" {
+		t.Fatalf("expected reasoning_effort max, got %s", doc.ReasoningEffort)
+	}
+	if doc.ContextWindow != 1500000 || doc.MaxRetries != 8 {
+		t.Fatalf("expected limits from model.json, got context %d retries %d", doc.ContextWindow, doc.MaxRetries)
+	}
+	if doc.APIKey != "sk-from-model-json-12345" {
+		t.Fatalf("expected doc.APIKey from model.json, got %s", doc.APIKey)
+	}
+	if doc.Env[deepSeekAPIKey] != "sk-from-model-json-12345" {
+		t.Fatalf("expected doc.Env[deepSeekAPIKey] from model.json, got %s", doc.Env[deepSeekAPIKey])
+	}
+	if secrets[deepSeekAPIKey] != "sk-from-model-json-12345" {
+		t.Fatalf("expected secrets map to be updated with api_key, got %s", secrets[deepSeekAPIKey])
+	}
+}
+
+

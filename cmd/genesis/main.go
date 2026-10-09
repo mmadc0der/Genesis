@@ -91,13 +91,23 @@ func runListen(logger *slog.Logger, args []string) {
 		fail(logger, "recover run journals", err)
 	}
 
+	startupSecrets := inheritedEnvironment()
+	if modelPath := findModelConfigFile(absoluteAgentsDir); modelPath != "" {
+		if cfg, err := loadModelConfigFile(modelPath); err == nil && cfg.APIKey != "" {
+			if startupSecrets[deepSeekAPIKey] == "" {
+				startupSecrets[deepSeekAPIKey] = cfg.APIKey
+			}
+			_ = os.Setenv(deepSeekAPIKey, cfg.APIKey)
+		}
+	}
+
 	handler := &eventServer{
 		agentsDir:    absoluteAgentsDir,
 		rulesDir:     absoluteRulesDir,
 		reposDir:     absoluteReposDir,
 		providersDir: absoluteProvidersDir,
 		newRunID:     newGenesisRunID,
-		secrets:      inheritedEnvironment(),
+		secrets:      startupSecrets,
 		logger:       logger,
 		syncToken:    syncToken,
 		eventsURL:    eventsURLFromListen(listen),

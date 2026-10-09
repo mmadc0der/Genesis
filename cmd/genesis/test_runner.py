@@ -305,6 +305,15 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(harness.environment["DEEPSEEK_API_KEY"], "genesis-key")
         self.assertNotIn("AMBIENT_ONLY", harness.environment)
 
+    def test_execute_uses_custom_provider_and_model_when_present(self):
+        runner.execute(
+            self.invocation(provider="custom-provider", model="deepseek-reasoner"),
+            harness_factory=FakeHarness,
+        )
+        harness = FakeHarness.instances[-1]
+        self.assertEqual(harness.kwargs["provider"], "custom-provider")
+        self.assertEqual(harness.kwargs["model"], "deepseek-reasoner")
+
     def test_execute_keeps_root_delivered_socket_and_token_only(self):
         invocation = self.invocation(
             env={
