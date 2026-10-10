@@ -36,11 +36,12 @@ type usageRecord struct {
 }
 
 type usageParts struct {
-	attemptID string
-	cacheHit  int64
-	cacheMiss int64
-	output    int64
-	reasoning int64
+	attemptID       string
+	cacheHit        int64
+	cacheMiss       int64
+	output          int64
+	reasoning       int64
+	totalTokensOnly bool
 }
 
 func (account tokenAccount) stamp() string {
@@ -77,7 +78,9 @@ func (j *runJournal) noteUsage(data json.RawMessage) {
 	}
 	j.usage = account
 	j.usageSeen = seen
-	_ = writeUsageRecord(j.runDir, account, seen)
+	if err := writeUsageRecord(j.runDir, account, seen); err != nil {
+		return
+	}
 }
 
 func (j *runJournal) ensureUsage() {
@@ -134,6 +137,20 @@ func foldUsage(account tokenAccount, seen map[string]struct{}, events []lifecycl
 		if !ok {
 			continue
 		}
+		if frame.totalTokensOnly {
+			continue
+		}
+		hasCounts := frame.cacheHit != 0 || frame.cacheMiss != 0 || frame.output != 0 || frame.reasoning != 0
+		if !hasCounts {
+			if frame.attemptID != "" {
+				if _, exists := nextSeen[frame.attemptID]; exists {
+					continue
+				}
+				nextSeen[frame.attemptID] = struct{}{}
+			}
+			account.Attempts++
+			continue
+		}
 		if frame.attemptID != "" {
 			if _, exists := nextSeen[frame.attemptID]; exists {
 				continue
@@ -170,14 +187,37 @@ func parseUsageFrame(data json.RawMessage) (usageParts, bool) {
 	if body.ChunkType != usageChunkType {
 		return usageParts{}, false
 	}
-	hit, miss, output, reasoning := usageInts(body.Raw.Payload.Chunk.Usage)
+	rawUsage := body.Raw.Payload.Chunk.Usage
+	hit, miss, output, reasoning := usageInts(rawUsage)
 	return usageParts{
-		attemptID: body.AttemptID,
-		cacheHit:  hit,
-		cacheMiss: miss,
-		output:    output,
-		reasoning: reasoning,
+		attemptID:       body.AttemptID,
+		cacheHit:        hit,
+		cacheMiss:       miss,
+		output:          output,
+		reasoning:       reasoning,
+		totalTokensOnly: usageIsTotalTokensOnly(rawUsage),
 	}, true
+}
+
+// usageIsTotalTokensOnly is true when the usage object cites totalTokens but
+// no component fields, so the frame must not lock an attempt id.
+func usageIsTotalTokensOnly(raw json.RawMessage) bool {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) == 0 {
+		return false
+	}
+	if fields["totalTokens"] == nil {
+		return false
+	}
+	for key := range fields {
+		if key != "totalTokens" {
+			return false
+		}
+	}
+	return true
 }
 
 func usageInts(raw json.RawMessage) (hit, miss, output, reasoning int64) {

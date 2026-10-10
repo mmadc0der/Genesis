@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -94,8 +95,11 @@ func dispatchEvents(args []string, stdout, stderr io.Writer) error {
 		return usageError{msg: "invalid --format: must be json, short, or pretty\n" + eventsCommandUsage}
 	}
 
-	// 1. Direct offline mode if dataDir is provided
-	if strings.TrimSpace(dataDir) != "" {
+	// Journals on disk are used only when this data directory has no Eventer
+	// store. schema.lock means the listener owns the store; opening it here
+	// would start a second writer, so history is read through that listener.
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir != "" && !eventerSchemaPresent(dataDir) {
 		if follow {
 			return errors.New("--follow is not supported when reading directly from --data without a server")
 		}
@@ -111,7 +115,7 @@ func dispatchEvents(args []string, stdout, stderr io.Writer) error {
 		return printEvents(events, format, stdout)
 	}
 
-	// 2. HTTP mode querying the listener
+	// HTTP mode querying the listener that has Eventer open.
 	targetURL := strings.TrimSpace(eventsURL)
 	if targetURL == "" {
 		targetURL = listenerEventsURL()
@@ -218,6 +222,11 @@ func dispatchEvents(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("read events: %w", err)
 	}
 	return nil
+}
+
+func eventerSchemaPresent(dataDir string) bool {
+	info, err := os.Stat(filepath.Join(dataDir, "eventer", "schema.lock"))
+	return err == nil && !info.IsDir()
 }
 
 func printEvents(events []lifecycleEvent, format string, stdout io.Writer) error {

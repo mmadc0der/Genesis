@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PAGE_SIZE, fetchPublications, mergeNewer, mergeOlder, newestSeq, type Publication } from "./publications";
+import { onLive } from "./liveSocket";
+import { PAGE_SIZE, fetchPublications, mergeNewer, mergeOlder, type Publication } from "./publications";
 
 export interface PublicationFeed {
   items: Publication[];
@@ -12,10 +13,8 @@ export interface PublicationFeed {
   refresh: () => void;
 }
 
-const POLL_MS = 15000;
-
 // usePublications keeps the front page in step with the register: the newest
-// page first, older pages on demand, and newer stories by polling with after.
+// page first, older pages on demand, and newer stories pushed on /api/live.
 export function usePublications(): PublicationFeed {
   const [items, setItems] = useState<Publication[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -33,30 +32,23 @@ export function usePublications(): PublicationFeed {
     setItems(next);
   }, []);
 
+  const applyPage = useCallback((page: { publications: Publication[]; next_before?: number }, replace: boolean) => {
+    setError(false);
+    commit(replace ? page.publications : mergeNewer(itemsRef.current, page.publications));
+    if (replace) {
+      nextBeforeRef.current = page.next_before;
+      setNextBefore(page.next_before);
+    }
+    setLoaded(true);
+  }, [commit]);
+
   const refresh = useCallback(() => {
     if (busyNewer.current) return;
     busyNewer.current = true;
-    const after = newestSeq(itemsRef.current);
-    let restart = after === 0;
-    fetchPublications(after > 0 ? { after } : {})
-      // A full page of newer stories may have a gap behind it, so start over
-      // from the newest page instead of merging.
-      .then((page) => {
-        if (after > 0 && page.publications.length >= PAGE_SIZE) {
-          restart = true;
-          return fetchPublications({});
-        }
-        return page;
-      })
+    fetchPublications({})
       .then((page) => {
         if (!alive.current) return;
-        setError(false);
-        commit(restart ? page.publications : mergeNewer(itemsRef.current, page.publications));
-        if (restart) {
-          nextBeforeRef.current = page.next_before;
-          setNextBefore(page.next_before);
-        }
-        setLoaded(true);
+        applyPage(page, true);
       })
       .catch(() => {
         if (alive.current) setError(true);
@@ -64,7 +56,7 @@ export function usePublications(): PublicationFeed {
       .finally(() => {
         busyNewer.current = false;
       });
-  }, [commit]);
+  }, [applyPage]);
 
   const loadOlder = useCallback(() => {
     const before = nextBeforeRef.current;
@@ -91,12 +83,20 @@ export function usePublications(): PublicationFeed {
   useEffect(() => {
     alive.current = true;
     refresh();
-    const timer = window.setInterval(refresh, POLL_MS);
+    const unlisten = onLive((frame) => {
+      if (frame.op !== "publications" || !frame.publications) return;
+      const page = frame.publications;
+      if (page.publications.length >= PAGE_SIZE && !frame.snapshot && !frame.restart) {
+        refresh();
+        return;
+      }
+      applyPage(page, Boolean(frame.snapshot || frame.restart));
+    });
     return () => {
       alive.current = false;
-      window.clearInterval(timer);
+      unlisten();
     };
-  }, [refresh]);
+  }, [applyPage, refresh]);
 
   return { items, loaded, error, hasOlder: nextBefore !== undefined, loadingOlder, loadOlder, refresh };
 }

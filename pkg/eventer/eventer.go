@@ -262,7 +262,9 @@ func (f *Follower) WithFilter(filterCol, filterVal string) *Follower {
 
 // Next polls for any new events committed since the last cursor position.
 // The toMs parameter caps the upper time bound (e.g. time.Now().UnixMilli()).
-// The follower advances its internal cursor to toMs + 1 when events are found.
+// After a successful read the cursor advances to toMs+1, including when the
+// window was empty. Leaving it behind makes the next poll reread every event
+// since the follower was created.
 func (f *Follower) Next(toMs int64) ([]json.RawMessage, error) {
 	if f.cursorMs > toMs {
 		return nil, nil
@@ -277,9 +279,7 @@ func (f *Follower) Next(toMs int64) ([]json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(events) > 0 {
-		f.cursorMs = toMs + 1
-	}
+	f.cursorMs = toMs + 1
 	return events, nil
 }
 

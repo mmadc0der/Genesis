@@ -123,6 +123,35 @@ agent: worker
 	}
 }
 
+func TestContinuationRefusesWhileSessionIsOpen(t *testing.T) {
+	agentsDir := t.TempDir()
+	rulesDir := t.TempDir()
+	cwd, home := writeNamedAgent(t, agentsDir, "worker.yaml", nil)
+	server, fake := newMatchServer(t, agentsDir, rulesDir, "gen_next", "gen_extra")
+	root := sampleRunInvocation("gen_root")
+	root.Agent = "worker"
+	root.Cwd = cwd
+	root.Home = home
+	acceptFinishedRun(t, server.store, root, "session-root")
+
+	first := sendEvent(server, continuationEvent("evt_continue_open", "urn:genesis:agent:worker", "gen_root", "follow up"))
+	if first.Code != 202 {
+		t.Fatalf("status = %d body = %s", first.Code, first.Body.String())
+	}
+	second := sendEvent(server, continuationEvent("evt_continue_again", "urn:genesis:agent:worker", "gen_root", "follow up"))
+	if second.Code != 204 {
+		t.Fatalf("second status = %d body = %s", second.Code, second.Body.String())
+	}
+	got := takeInvocations(t, fake.invocations, 1)
+	expectNoInvocation(t, fake.invocations)
+	if got[0].RunID != "gen_next" {
+		t.Fatalf("run = %s", got[0].RunID)
+	}
+	if _, err := os.Stat(filepath.Join(server.store.dataDir, runsDirName, "gen_extra")); !os.IsNotExist(err) {
+		t.Fatalf("second continuation created a run: %v", err)
+	}
+}
+
 func TestContinuationDoesNotRuleMatch(t *testing.T) {
 	agentsDir := t.TempDir()
 	rulesDir := t.TempDir()

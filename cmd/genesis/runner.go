@@ -290,26 +290,28 @@ func (r processRunner) handleNotification(journal *runJournal, document invocati
 		r.handleAgentEmit(journal, document, frame.Payload)
 		return
 	}
-	eventType, origin, data, ok := mapSDKNotification(journal.session(), frame.Method, frame.Payload)
-	if !ok {
+	notice := mapSDKNotification(journal.session(), frame.Method, frame.Payload)
+	if !notice.OK {
 		return
 	}
-	if eventType == lifecycleTypeTurn {
-		if message, failed := mappedTurnFailure(data); failed {
-			state.turnEndFailure = true
-			if message != "" {
-				state.turnFailureMessage = message
-			}
-			if code, _ := data["error_code"].(string); code != "" {
-				state.turnFailureCode = code
-			}
-		}
-	}
-	if err := journal.Publish(eventType, origin, data); err != nil {
+	if err := journal.Publish(notice.Type, notice.Origin, notice.Data); err != nil {
 		r.recordStorageFailure(journal, state, r.logger, document.RunID, err)
 		state.failed = true
 		state.errorType = diskErrorType
 		state.errorMsg = err.Error()
+		return
+	}
+	if !notice.Apply || notice.Type != lifecycleTypeTurn {
+		return
+	}
+	if message, failed := mappedTurnFailure(notice.Data); failed {
+		state.turnEndFailure = true
+		if message != "" {
+			state.turnFailureMessage = message
+		}
+		if code, _ := notice.Data["error_code"].(string); code != "" {
+			state.turnFailureCode = code
+		}
 	}
 }
 
@@ -445,7 +447,7 @@ func (r processRunner) publishAgentFinished(journal *runJournal, document invoca
 		return
 	}
 	transcript, err := r.store.writeTranscript(document.RunID)
-	if err != nil {
+	if transcriptWriteIsLifecycleError(r.store, err) {
 		_ = journal.Publish(lifecycleTypeError, originGenesis, errorPayload(diskErrorType, err.Error()))
 		return
 	}

@@ -80,6 +80,28 @@ func (m *memoryHost) CreateUser(spec agentUserSpec) error {
 	return nil
 }
 
+func (m *memoryHost) AppendGroups(name string, groups []string) error {
+	m.commands = append(m.commands, append([]string{"usermod", "-aG"}, name))
+	if _, ok := m.users[name]; !ok {
+		return user.UnknownUserError(name)
+	}
+	if m.userGroups == nil {
+		m.userGroups = map[string][]string{}
+	}
+	seen := map[string]struct{}{}
+	for _, existing := range m.userGroups[name] {
+		seen[existing] = struct{}{}
+	}
+	for _, group := range groups {
+		if _, ok := seen[group]; ok {
+			continue
+		}
+		seen[group] = struct{}{}
+		m.userGroups[name] = append(m.userGroups[name], group)
+	}
+	return nil
+}
+
 func (m *memoryHost) UpdateUser(spec agentUserSpec) error {
 	m.commands = append(m.commands, append([]string{"usermod"}, spec.Name))
 	if m.userGroups == nil {
@@ -461,6 +483,44 @@ func TestDeclaredGroupCreatesSharedWorkspace(t *testing.T) {
 	}
 	if _, err := state.apply(privilegedPlan{Agents: true, Intents: []privilegedIntent{rejected}}); err == nil || !strings.Contains(err.Error(), "reserved") {
 		t.Fatalf("yaml genesis group error = %v", err)
+	}
+}
+
+func TestListenerGroupsWithoutDedicatedUser(t *testing.T) {
+	host := newMemoryHost()
+	host.users["genesis"] = &unixAccount{Name: "genesis", UID: 65532, GID: 65532, Home: "/home/genesis"}
+	host.groups[sharedGroupName] = 1000
+	state := &privilegedState{host: host, mutate: true, listenerUser: "genesis"}
+	plan := buildPlan(map[string]agentDefinition{
+		"designer": {
+			id:   "designer",
+			Cwd:  "/work",
+			Home: "/home/genesis",
+			Setup: &agentSetup{
+				Groups: []string{sharedGroupName},
+			},
+		},
+	}, true)
+	if plan.Intents[0].Kind != intentEnsureAgentPaths || plan.Intents[0].User != "" || len(plan.Intents[0].Groups) != 1 || plan.Intents[0].Groups[0] != sharedGroupName {
+		t.Fatalf("designer intent = %#v", plan.Intents[0])
+	}
+	result, err := state.apply(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.HostMutation != hostMutationApplied {
+		t.Fatalf("mutation = %s", result.HostMutation)
+	}
+	got := host.userGroups["genesis"]
+	if len(got) != 1 || got[0] != sharedGroupName {
+		t.Fatalf("listener groups = %#v", got)
+	}
+	if host.users["genesis"].Home != "/home/genesis" {
+		t.Fatalf("listener home changed to %s", host.users["genesis"].Home)
+	}
+	shared := host.dirs[sharedWorkspacePath]
+	if shared.uid != 0 || shared.gid != 1000 || shared.mode != os.FileMode(0o770)|os.ModeSetgid {
+		t.Fatalf("shared workspace = %#v", shared)
 	}
 }
 

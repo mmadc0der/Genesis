@@ -13,7 +13,7 @@ import {
   tokenBreakdown,
   type Dot,
 } from "./hints";
-import { loadSnapshot, loopSpan, shortCause, sumUsage, type RunRow, type Snapshot, type Usage } from "./live";
+import { loadSnapshot, loopSpan, shortCause, type RunRow, type Snapshot, type Usage } from "./live";
 import { driftItems } from "./sync";
 import { DotHint, EventHint, Tip, TokenHint } from "./Tip";
 import { toEdition } from "./publications";
@@ -22,6 +22,7 @@ import { usePublications } from "./usePublications";
 import { createViewStack, navigateToFrame, pushView } from "./view-stack";
 import { Chat } from "./Chat";
 import { onLive, retainLive } from "./liveSocket";
+import { useUsageLive } from "./usageLive";
 import { EventChat } from "./EventChat";
 import { AgentView } from "./AgentView";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -433,7 +434,6 @@ export default function App() {
   const refreshRef = useRef<() => void>(() => {});
   const snapGen = useRef(0);
   const publications = usePublications();
-  const refreshPublications = publications.refresh;
 
   useEffect(() => {
     let stopped = false;
@@ -482,7 +482,6 @@ export default function App() {
       }
       if (frame.op === "state") {
         refresh();
-        refreshPublications();
       }
     });
     return () => {
@@ -491,7 +490,7 @@ export default function App() {
       unlisten();
       release();
     };
-  }, [refreshPublications]);
+  }, []);
 
   const editions = useMemo(() => publications.items.map((item) => toEdition(item, now)), [publications.items, now]);
   const runs = snapshot?.runs ?? [];
@@ -502,7 +501,7 @@ export default function App() {
   const historyShown = HISTORY_PREVIEW + historyExtra;
   const historyVisible = history.slice(0, historyShown);
   const historyHasMore = history.length > historyShown;
-  const usage = sumUsage(runs);
+  const usage = useUsageLive().global;
   const busy = new Set(running.map((run) => run.agent));
   const span = loopSpan(runs, now);
   const loopLive = busy.size > 0;

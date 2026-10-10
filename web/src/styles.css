@@ -966,6 +966,9 @@ button.chip { cursor: pointer; }
   border-color: #3e3a33;
   border-left-color: var(--violet);
 }
+.tool.live-tool:hover {
+  border-left-color: #4a443a;
+}
 .tool.failed {
   border-left-color: var(--red);
 }
@@ -1036,6 +1039,9 @@ button.chip { cursor: pointer; }
   border-radius: 6px;
   background: #13120f;
   overflow: hidden;
+}
+.tool-card.streaming {
+  border-left: 3px solid var(--blue);
 }
 .tool-card-head {
   display: flex;
@@ -1212,19 +1218,7 @@ button.chip { cursor: pointer; }
   0%, 100% { opacity: 0.78; }
   50% { opacity: 1; }
 }
-.live-tool {
-  border-left-color: var(--blue);
-}
 .live-tool .tool-status { margin-left: auto; }
-.live-tool-input {
-  margin: 0.45rem 0 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  font-size: 0.78rem;
-  line-height: 1.48;
-  color: #ddd6c9;
-}
 .tool-header-inline {
   display: flex;
   align-items: center;

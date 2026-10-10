@@ -19,6 +19,10 @@ const (
 	lifecycleTypeTurn           = "dev.genesis.run.turn"
 	lifecycleTypeTool           = "dev.genesis.run.tool"
 	lifecycleTypeAssistant      = "dev.genesis.run.assistant"
+	lifecycleTypeUser           = "dev.genesis.run.user"
+	lifecycleTypeStatus         = "dev.genesis.run.status"
+	lifecycleTypeSessionEvent   = "dev.genesis.run.session.event"
+	lifecycleTypeSDK            = "dev.genesis.run.sdk"
 	lifecycleTypeRetry          = "dev.genesis.run.retry"
 	lifecycleTypeRestart        = "dev.genesis.run.restart"
 	lifecycleTypeChunk          = "dev.genesis.run.chunk"
@@ -89,6 +93,14 @@ type sdkSessionEvent struct {
 	Type string          `json:"type"`
 	Seq  json.RawMessage `json:"seq"`
 	Data json.RawMessage `json:"data"`
+}
+
+type sdkNotice struct {
+	Type   string
+	Origin string
+	Data   map[string]any
+	OK     bool
+	Apply  bool
 }
 
 // isEphemeralEvent returns true for events that should stream live but not be stored on disk.
@@ -180,42 +192,53 @@ func causeFromEvent(event cloudEvent) (id, source, eventType string) {
 	return id, source, eventType
 }
 
-func mapSDKNotification(sessionID, method string, payload json.RawMessage) (eventType, origin string, data map[string]any, ok bool) {
+// mapSDKNotification classifies an SDK notification. ok is false only for the
+// skip list: non-usage chunk frames. Every other notification is durable.
+// apply is true when the event belongs to this run and existing handlers
+// should run after it has been appended.
+func mapSDKNotification(sessionID, method string, payload json.RawMessage) sdkNotice {
 	switch method {
 	case "session.event":
-		origin = originSDKEvent
+		return mapSessionEvent(sessionID, method, payload)
 	case "on_chunk":
 		return mapOnChunk(sessionID, payload)
 	case "session.status":
-		return "", originSDKStatus, nil, false
+		return sdkNotice{
+			Type:   lifecycleTypeStatus,
+			Origin: originSDKStatus,
+			Data:   statusPayload(method, payload),
+			OK:     true,
+			Apply:  false,
+		}
 	default:
-		return "", originSDKOther, nil, false
+		return sdkNotice{
+			Type:   lifecycleTypeSDK,
+			Origin: originSDKOther,
+			Data:   sdkMethodPayload(method, payload),
+			OK:     true,
+			Apply:  false,
+		}
 	}
+}
 
+func mapSessionEvent(sessionID, method string, payload json.RawMessage) sdkNotice {
+	origin := originSDKEvent
+	raw := sdkEnvelope(method, payload)
 	var envelope sdkNotificationPayload
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return "", origin, nil, false
+		return sdkNotice{Type: lifecycleTypeSessionEvent, Origin: origin, Data: raw, OK: true, Apply: false}
 	}
-	if sessionID == "" || envelope.SessionID != sessionID {
-		return "", originSDKOther, nil, false
-	}
+	bound := sessionID != "" && envelope.SessionID == sessionID
+	noteForeignSession(raw, sessionID, envelope.SessionID)
 
 	var sessionEvent sdkSessionEvent
 	if err := json.Unmarshal(envelope.Event, &sessionEvent); err != nil {
-		return "", origin, nil, false
+		return sdkNotice{Type: lifecycleTypeSessionEvent, Origin: origin, Data: raw, OK: true, Apply: false}
 	}
 
-	var decodedPayload any
-	if err := json.Unmarshal(payload, &decodedPayload); err != nil {
-		decodedPayload = json.RawMessage(payload)
-	}
-	raw := map[string]any{
-		"method":  method,
-		"payload": decodedPayload,
-	}
 	switch sessionEvent.Type {
 	case "turn/start":
-		return lifecycleTypeTurn, origin, turnPayload("start", sessionEvent, raw), true
+		return sdkNotice{Type: lifecycleTypeTurn, Origin: origin, Data: turnPayload("start", sessionEvent, raw), OK: true, Apply: bound}
 	case "turn/end":
 		body := turnPayload("end", sessionEvent, raw)
 		if kind, failure, failed := reasonFailure(sessionEvent.Data); kind != "" {
@@ -233,59 +256,124 @@ func mapSDKNotification(sessionID, method string, payload json.RawMessage) (even
 				}
 			}
 		}
-		return lifecycleTypeTurn, origin, body, true
+		return sdkNotice{Type: lifecycleTypeTurn, Origin: origin, Data: body, OK: true, Apply: bound}
 	case "tool/call":
-		return lifecycleTypeTool, origin, toolPayload("call", sessionEvent, raw), true
+		return sdkNotice{Type: lifecycleTypeTool, Origin: origin, Data: toolPayload("call", sessionEvent, raw), OK: true, Apply: bound}
 	case "tool/result":
-		return lifecycleTypeTool, origin, toolPayload("result", sessionEvent, raw), true
+		return sdkNotice{Type: lifecycleTypeTool, Origin: origin, Data: toolPayload("result", sessionEvent, raw), OK: true, Apply: bound}
 	case "assistant/message":
-		return lifecycleTypeAssistant, origin, assistantPayload("message", sessionEvent, raw), true
+		return sdkNotice{Type: lifecycleTypeAssistant, Origin: origin, Data: assistantPayload("message", sessionEvent, raw), OK: true, Apply: bound}
 	case "assistant/attempt":
-		return lifecycleTypeAssistant, origin, assistantPayload("attempt", sessionEvent, raw), true
+		return sdkNotice{Type: lifecycleTypeAssistant, Origin: origin, Data: assistantPayload("attempt", sessionEvent, raw), OK: true, Apply: bound}
+	case "user/message":
+		return sdkNotice{Type: lifecycleTypeUser, Origin: origin, Data: userPayload(sessionEvent, raw), OK: true, Apply: bound}
 	case "llm/retry":
-		return lifecycleTypeRetry, origin, retryPayload(sessionEvent, raw), true
+		return sdkNotice{Type: lifecycleTypeRetry, Origin: origin, Data: retryPayload(sessionEvent, raw), OK: true, Apply: bound}
 	default:
-		return "", origin, nil, false
+		return sdkNotice{Type: lifecycleTypeSessionEvent, Origin: origin, Data: sessionEventPayload(sessionEvent, raw), OK: true, Apply: false}
 	}
 }
 
-func mapOnChunk(sessionID string, payload json.RawMessage) (eventType, origin string, data map[string]any, ok bool) {
+func sdkEnvelope(method string, payload json.RawMessage) map[string]any {
+	return map[string]any{
+		"method":  method,
+		"payload": decodeJSONValue(payload),
+	}
+}
+
+func decodeJSONValue(payload json.RawMessage) any {
+	var decoded any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return string(payload)
+	}
+	return decoded
+}
+
+func sdkMethodPayload(method string, payload json.RawMessage) map[string]any {
+	decoded := decodeJSONValue(payload)
+	body := map[string]any{
+		"method":   method,
+		"sdk_type": method,
+	}
+	if fields, ok := decoded.(map[string]any); ok {
+		for key, value := range fields {
+			body[key] = value
+		}
+		if sid, ok := fields["sessionId"].(string); ok && sid != "" {
+			body["sdk_session_id"] = sid
+		}
+	} else {
+		body["payload"] = decoded
+	}
+	return body
+}
+
+func statusPayload(method string, payload json.RawMessage) map[string]any {
+	body := sdkMethodPayload(method, payload)
+	if status, ok := body["status"].(string); ok && status != "" {
+		body["status"] = status
+	}
+	return body
+}
+
+// noteForeignSession records the session id the payload actually carries when
+// it is not this run's session. It does not copy that id onto the run.
+func noteForeignSession(raw map[string]any, runSession, payloadSession string) {
+	if payloadSession == "" || payloadSession == runSession {
+		return
+	}
+	raw["sdk_session_id"] = payloadSession
+}
+
+func mapOnChunk(sessionID string, payload json.RawMessage) sdkNotice {
 	var frame map[string]any
 	if err := json.Unmarshal(payload, &frame); err != nil {
-		return "", originSDKChunk, nil, false
+		return sdkNotice{
+			Type:   lifecycleTypeSDK,
+			Origin: originSDKChunk,
+			Data:   sdkMethodPayload("on_chunk", payload),
+			OK:     true,
+			Apply:  false,
+		}
 	}
 	sid, _ := frame["sessionId"].(string)
-	if sessionID == "" || sid != sessionID {
-		return "", originSDKOther, nil, false
-	}
+	bound := sessionID != "" && sid == sessionID
 	frameType, _ := frame["type"].(string)
 	switch frameType {
 	case "start", "chunk", "end":
 	default:
-		return "", originSDKChunk, nil, false
+		body := sdkMethodPayload("on_chunk", payload)
+		noteForeignSession(body, sessionID, sid)
+		return sdkNotice{Type: lifecycleTypeSDK, Origin: originSDKChunk, Data: body, OK: true, Apply: false}
 	}
-	var decoded any
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		decoded = json.RawMessage(payload)
+	decoded := decodeJSONValue(payload)
+	rawBody, _ := decoded.(map[string]any)
+	if rawBody == nil {
+		rawBody = map[string]any{"value": decoded}
 	}
 	body := map[string]any{
 		"frame": frameType,
 		"raw": map[string]any{
-			"method":  "on_chunk",
-			"payload": decoded,
+			"payload": rawBody,
 		},
 	}
 	if attempt, ok := frame["attemptId"].(string); ok && attempt != "" {
 		body["attempt_id"] = attempt
 	}
+	chunkType := ""
 	if frameType == "chunk" {
 		if chunk, ok := frame["chunk"].(map[string]any); ok {
 			if kind, ok := chunk["type"].(string); ok && kind != "" {
+				chunkType = kind
 				body["chunk_type"] = kind
 			}
 		}
 	}
-	return lifecycleTypeChunk, originSDKChunk, body, true
+	noteForeignSession(body, sessionID, sid)
+	if !bound && chunkType != "usage" {
+		return sdkNotice{Origin: originSDKChunk, OK: false, Apply: false}
+	}
+	return sdkNotice{Type: lifecycleTypeChunk, Origin: originSDKChunk, Data: body, OK: true, Apply: bound}
 }
 
 func turnPayload(phase string, event sdkSessionEvent, raw map[string]any) map[string]any {
@@ -296,6 +384,7 @@ func turnPayload(phase string, event sdkSessionEvent, raw map[string]any) map[st
 	if seq := decodeSDKSeq(event.Seq); seq != nil {
 		payload["sdk_seq"] = seq
 	}
+	liftSession(payload, raw)
 	return payload
 }
 
@@ -318,8 +407,47 @@ func toolPayload(phase string, event sdkSessionEvent, raw map[string]any) map[st
 				break
 			}
 		}
+		if phase == "call" {
+			if args, ok := data["arguments"].(string); ok {
+				payload["arguments"] = args
+			}
+		}
+		if phase == "result" {
+			payload["output"] = toolResultOutput(data)
+		}
 	}
+	liftSession(payload, raw)
 	return payload
+}
+
+func toolResultOutput(data map[string]any) string {
+	message, _ := data["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	var output strings.Builder
+	for _, part := range content {
+		block, _ := part.(map[string]any)
+		if block["type"] != "tool-result" {
+			continue
+		}
+		inner, _ := block["content"].([]any)
+		for _, item := range inner {
+			segment, _ := item.(map[string]any)
+			if segment["type"] == "text" {
+				if text, ok := segment["text"].(string); ok {
+					output.WriteString(text)
+				}
+			}
+		}
+	}
+	return output.String()
+}
+
+func liftSession(payload, raw map[string]any) {
+	sid, _ := raw["sdk_session_id"].(string)
+	if sid == "" {
+		return
+	}
+	payload["sdk_session_id"] = sid
 }
 
 func decodeSDKSeq(raw json.RawMessage) any {
@@ -350,6 +478,32 @@ func assistantPayload(phase string, event sdkSessionEvent, raw map[string]any) m
 	if seq := decodeSDKSeq(event.Seq); seq != nil {
 		payload["sdk_seq"] = seq
 	}
+	liftSession(payload, raw)
+	return payload
+}
+
+func userPayload(event sdkSessionEvent, raw map[string]any) map[string]any {
+	payload := map[string]any{
+		"phase":    "message",
+		"sdk_type": "user/message",
+		"raw":      raw,
+	}
+	if seq := decodeSDKSeq(event.Seq); seq != nil {
+		payload["sdk_seq"] = seq
+	}
+	liftSession(payload, raw)
+	return payload
+}
+
+func sessionEventPayload(event sdkSessionEvent, raw map[string]any) map[string]any {
+	payload := map[string]any{
+		"sdk_type": event.Type,
+		"raw":      raw,
+	}
+	if seq := decodeSDKSeq(event.Seq); seq != nil {
+		payload["sdk_seq"] = seq
+	}
+	liftSession(payload, raw)
 	return payload
 }
 
@@ -358,6 +512,7 @@ func retryPayload(event sdkSessionEvent, raw map[string]any) map[string]any {
 	if seq := decodeSDKSeq(event.Seq); seq != nil {
 		payload["sdk_seq"] = seq
 	}
+	liftSession(payload, raw)
 	var data map[string]any
 	if len(event.Data) == 0 || json.Unmarshal(event.Data, &data) != nil {
 		return payload

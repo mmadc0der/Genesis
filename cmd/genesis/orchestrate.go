@@ -147,6 +147,15 @@ func runLaunch(logger *slog.Logger, listen, agentsDir, rulesDir, reposDir, provi
 		parent.Close()
 		fail(logger, "reconcile dedicated agent users", err)
 	}
+	if identity != nil {
+		refreshed, err := lookupListenerIdentity(identity.Username)
+		if err != nil {
+			child.Close()
+			parent.Close()
+			fail(logger, "refresh listener groups", err)
+		}
+		identity = refreshed
+	}
 
 	command := exec.Command(executable, listenerArgs(listen, absoluteAgentsDir, absoluteRulesDir, absoluteReposDir, absoluteProvidersDir, absoluteDataDir)...)
 	command.Env = launchChildEnv(syncToken, identity)

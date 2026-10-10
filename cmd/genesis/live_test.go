@@ -282,3 +282,108 @@ func awaitLiveOp(t *testing.T, conn *websocket.Conn, op string) {
 	}
 	t.Fatalf("timed out waiting for %s", op)
 }
+
+func TestSubscribeNowSkipsListenerReplay(t *testing.T) {
+	control, listener := newPanelFixture(t)
+	control.dataDir = t.TempDir()
+	if _, err := prepareDataDir(control.dataDir); err != nil {
+		t.Fatal(err)
+	}
+	control.pollEvery = 20 * time.Millisecond
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	control.ensureListenerFeed()
+	select {
+	case <-control.feedReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener subscription was not ready")
+	}
+
+	const runID = "gen_now"
+	document := sampleRunInvocation(runID)
+	if err := listener.store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	journal := listener.store.journal(runID)
+	if journal == nil {
+		t.Fatal("run journal is closed")
+	}
+
+	conn := dialLive(t, panel.URL)
+	writeLiveOp(t, conn, liveClientOp{Op: "subscribe", Topic: "run", RunID: runID, After: "now"})
+	writeLiveOp(t, conn, liveClientOp{Op: "ping"})
+	awaitLiveOp(t, conn, "pong")
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = journal.Publish(lifecycleTypeChunk, originSDKChunk, map[string]any{"text": "token"})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+		_, payload, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var frame liveFrame
+		if err := json.Unmarshal(payload, &frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame.Op != "event" {
+			continue
+		}
+		if frame.Cursor == "1" {
+			t.Fatalf("subscribe now replayed history: %#v", frame)
+		}
+		if frame.Cursor == "2" && frame.Event != nil && frame.Event.Type == lifecycleTypeChunk {
+			return
+		}
+	}
+	t.Fatal("timed out waiting for the live chunk")
+}
+
+func TestLivePublicationsPush(t *testing.T) {
+	control, _ := newPanelFixture(t)
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+
+	conn := dialLive(t, panel.URL)
+	writeLiveOp(t, conn, liveClientOp{Op: "subscribe", Topic: "publications"})
+
+	dir := filepath.Join(control.dataDir, publicationsDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := "{\"seq\":1,\"id\":\"pub_0123456789abcdef0123456789abcdef\",\"time\":\"2026-01-01T00:00:00Z\",\"kind\":\"note\",\"headline\":\"Pushed story\",\"lede\":\"lede\",\"from\":\"oracle\"}\n"
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(dir, publicationRegisterName), []byte(line), 0o644)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+		_, payload, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var frame liveFrame
+		if err := json.Unmarshal(payload, &frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame.Op != "publications" || frame.Publications == nil {
+			continue
+		}
+		if len(frame.Publications.Publications) == 1 && frame.Publications.Publications[0].Headline == "Pushed story" {
+			if !frame.Snapshot {
+				t.Fatal("first page should replace the front page")
+			}
+			return
+		}
+	}
+	t.Fatal("timed out waiting for the publication push")
+}

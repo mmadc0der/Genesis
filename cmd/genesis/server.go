@@ -132,6 +132,9 @@ type eventServer struct {
 }
 
 func (s *eventServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.handleEventerRoutes(w, r) {
+		return
+	}
 	switch r.URL.Path {
 	case "/events":
 		s.handleEvents(w, r)
@@ -739,9 +742,12 @@ func (a agentDefinition) setupContract() agentSetup {
 }
 
 func (s agentSetup) validate(dedicated bool) error {
+	if err := s.validateGroups(); err != nil {
+		return err
+	}
 	if !dedicated {
-		if len(s.Groups) > 0 || s.Workspace != "" {
-			return errors.New("setup requires user")
+		if s.Workspace != "" {
+			return errors.New("setup.workspace requires user")
 		}
 		return nil
 	}
@@ -750,8 +756,15 @@ func (s agentSetup) validate(dedicated bool) error {
 	default:
 		return fmt.Errorf("setup.workspace must be %s, %s, or %s", workspacePrivate, workspaceSharedRead, workspaceSharedWrite)
 	}
+	return nil
+}
+
+func (s agentSetup) validateGroups() error {
 	seen := make(map[string]struct{}, len(s.Groups))
 	for _, name := range s.Groups {
+		if name == "" {
+			continue
+		}
 		if err := validateOSGroupName(name); err != nil {
 			return fmt.Errorf("setup.groups: %w", err)
 		}

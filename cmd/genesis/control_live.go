@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,14 +30,20 @@ type liveClientOp struct {
 }
 
 type liveFrame struct {
-	Op     string           `json:"op"`
-	Topic  string           `json:"topic,omitempty"`
-	RunID  string           `json:"run_id,omitempty"`
-	Cursor string           `json:"cursor,omitempty"`
-	Event  *lifecycleEvent  `json:"event,omitempty"`
-	Run    *runSummary      `json:"run,omitempty"`
-	State  *liveStateNotice `json:"state,omitempty"`
-	Error  string           `json:"error,omitempty"`
+	Op           string           `json:"op"`
+	Topic        string           `json:"topic,omitempty"`
+	RunID        string           `json:"run_id,omitempty"`
+	Cursor       string           `json:"cursor,omitempty"`
+	Event        *lifecycleEvent  `json:"event,omitempty"`
+	Run          *runSummary      `json:"run,omitempty"`
+	State        *liveStateNotice `json:"state,omitempty"`
+	Publications *publicationPage `json:"publications,omitempty"`
+	Usage        *usageWire       `json:"usage,omitempty"`
+	// Snapshot replaces the front page. Restart does the same after a gap
+	// that a delta merge cannot close. A delta has both false.
+	Snapshot bool   `json:"snapshot,omitempty"`
+	Restart  bool   `json:"restart,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 type liveStateNotice struct {
@@ -50,9 +57,10 @@ type liveStateNotice struct {
 }
 
 type runWatch struct {
-	after  uint64
-	gen    uint64
-	offset int64
+	after    uint64
+	gen      uint64
+	offset   int64
+	liveOnly bool
 }
 
 type liveNote struct {
@@ -61,16 +69,19 @@ type liveNote struct {
 }
 
 type liveSubs struct {
-	mu         sync.Mutex
-	runs       map[string]runWatch
-	runGen     uint64
-	wantRuns   bool
-	wantState  bool
-	seenRuns   map[string]string
-	stateStamp string
-	notes      []liveNote
-	wake       chan struct{}
-	out        chan liveFrame
+	mu               sync.Mutex
+	runs             map[string]runWatch
+	runGen           uint64
+	wantRuns         bool
+	wantState        bool
+	wantPublications bool
+	pubSeq           uint64
+	pubStamp         string
+	seenRuns         map[string]string
+	stateStamp       string
+	notes            []liveNote
+	wake             chan struct{}
+	out              chan liveFrame
 }
 
 func newLiveSubs() *liveSubs {
@@ -114,6 +125,7 @@ func (c *controlServer) handleLive(w http.ResponseWriter, r *http.Request) {
 	subs := newLiveSubs()
 	subs.out = make(chan liveFrame, 4096)
 	c.addLive(subs)
+	c.offerUsageSnapshot(subs)
 	c.ensureListenerFeed()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer func() {
@@ -191,7 +203,13 @@ func (c *controlServer) applySubscribe(subs *liveSubs, op liveClientOp) {
 		}
 		if op.After == "now" {
 			subs.runGen++
-			idx, _ := c.ensureIndexLocked(context.Background(), op.RunID)
+			idx, err := c.ensureIndexLocked(context.Background(), op.RunID)
+			if err != nil {
+				// No local journal. New events, including ephemeral chunks,
+				// arrive on the listener /live feed. Do not page history.
+				subs.runs[op.RunID] = runWatch{gen: subs.runGen, liveOnly: true}
+				break
+			}
 			lastSeq := uint64(0)
 			if len(idx.seqs) > 0 {
 				lastSeq = idx.seqs[len(idx.seqs)-1]
@@ -212,6 +230,10 @@ func (c *controlServer) applySubscribe(subs *liveSubs, op liveClientOp) {
 	case "state":
 		subs.wantState = true
 		subs.stateStamp = ""
+	case "publications":
+		subs.wantPublications = true
+		subs.pubSeq = 0
+		subs.pubStamp = ""
 	default:
 		subs.notes = append(subs.notes, liveNote{op: "error", message: "unknown live topic"})
 	}
@@ -228,6 +250,8 @@ func (c *controlServer) applyUnsubscribe(subs *liveSubs, op liveClientOp) {
 		subs.wantRuns = false
 	case "state":
 		subs.wantState = false
+	case "publications":
+		subs.wantPublications = false
 	default:
 		subs.notes = append(subs.notes, liveNote{op: "error", message: "unknown live topic"})
 	}
@@ -241,6 +265,9 @@ func (c *controlServer) flushLive(ctx context.Context, subs *liveSubs) {
 	watches := cloneWatches(subs.runs)
 	wantRuns := subs.wantRuns
 	wantState := subs.wantState
+	wantPublications := subs.wantPublications
+	pubSeq := subs.pubSeq
+	pubStamp := subs.pubStamp
 	seenRuns := cloneStrings(subs.seenRuns)
 	stateStamp := subs.stateStamp
 	subs.mu.Unlock()
@@ -250,13 +277,20 @@ func (c *controlServer) flushLive(ctx context.Context, subs *liveSubs) {
 	}
 
 	for runID, watch := range watches {
+		if watch.liveOnly {
+			continue
+		}
 		path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
 		if _, err := os.Stat(path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				subs.emit(liveFrame{Op: "error", RunID: runID, Error: "run not found"})
+				advanced, tailErr := c.tailListenerRun(subs, runID, watch)
+				if tailErr != nil {
+					continue
+				}
 				subs.mu.Lock()
-				if current, ok := subs.runs[runID]; ok && current.gen == watch.gen {
-					delete(subs.runs, runID)
+				if current, ok := subs.runs[runID]; ok && current.gen == watch.gen && current.after == watch.after {
+					current.after = advanced
+					subs.runs[runID] = current
 				}
 				subs.mu.Unlock()
 			}
@@ -321,6 +355,110 @@ func (c *controlServer) flushLive(ctx context.Context, subs *liveSubs) {
 			subs.mu.Unlock()
 		}
 	}
+
+	if wantPublications {
+		c.pushPublications(subs, pubSeq, pubStamp)
+	}
+}
+
+// pushPublications tails the local register and sends one live frame when it
+// changes. The listener writes the file; this socket is how the panel hears
+// about it. The first frame is the newest page. Later frames are stories
+// newer than the sequence already sent.
+func (c *controlServer) pushPublications(subs *liveSubs, sentSeq uint64, stamp string) {
+	path := filepath.Join(c.dataDir, publicationsDirName, publicationRegisterName)
+	info, err := os.Stat(path)
+	nextStamp := "absent"
+	if err == nil {
+		nextStamp = strconv.FormatInt(info.ModTime().UnixNano(), 10) + ":" + strconv.FormatInt(info.Size(), 10)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if nextStamp == stamp {
+		return
+	}
+
+	page := publicationPage{Publications: []publicationView{}}
+	snapshot := true
+	restart := false
+	if err == nil {
+		items, readErr := readPublications(c.dataDir)
+		if readErr != nil {
+			return
+		}
+		if sentSeq > 0 {
+			delta := pagePublications(items, publicationQuery{Limit: defaultPublicationLimit, After: sentSeq})
+			if len(delta.Publications) == 0 {
+				c.rememberPublicationStamp(subs, sentSeq, stamp, nextStamp, sentSeq)
+				return
+			}
+			if len(delta.Publications) >= defaultPublicationLimit {
+				restart = true
+				page = pagePublications(items, publicationQuery{Limit: defaultPublicationLimit})
+			} else {
+				snapshot = false
+				page = delta
+			}
+		} else {
+			page = pagePublications(items, publicationQuery{Limit: defaultPublicationLimit})
+		}
+	}
+	if page.Publications == nil {
+		page.Publications = []publicationView{}
+	}
+	if !subs.emit(liveFrame{
+		Op:           "publications",
+		Topic:        "publications",
+		Publications: &page,
+		Snapshot:     snapshot,
+		Restart:      restart,
+	}) {
+		return
+	}
+	nextSeq := page.LastSeq
+	if nextSeq < sentSeq {
+		nextSeq = sentSeq
+	}
+	c.rememberPublicationStamp(subs, sentSeq, stamp, nextStamp, nextSeq)
+}
+
+func (c *controlServer) rememberPublicationStamp(subs *liveSubs, sentSeq uint64, stamp, nextStamp string, nextSeq uint64) {
+	subs.mu.Lock()
+	if subs.wantPublications && subs.pubSeq == sentSeq && subs.pubStamp == stamp {
+		subs.pubStamp = nextStamp
+		subs.pubSeq = nextSeq
+	}
+	subs.mu.Unlock()
+}
+
+func (c *controlServer) tailListenerRun(subs *liveSubs, runID string, watch runWatch) (uint64, error) {
+	page, ok, err := c.eventsPageFromListener(runID, watch.after, defaultEventLimit)
+	if err != nil || !ok {
+		return watch.after, err
+	}
+	advanced := watch.after
+	for _, event := range page.Events {
+		seq, seqOK := eventSequence(event)
+		if !seqOK || seq <= advanced {
+			continue
+		}
+		if isEphemeralEvent(event.Type, event.Data) {
+			advanced = seq
+			continue
+		}
+		copied := event
+		if !subs.emit(liveFrame{
+			Op:     "event",
+			Topic:  "run",
+			RunID:  runID,
+			Cursor: event.Sequence,
+			Event:  &copied,
+		}) {
+			return advanced, nil
+		}
+		advanced = seq
+	}
+	return advanced, nil
 }
 
 func (c *controlServer) tailRun(ctx context.Context, subs *liveSubs, runID string, watch runWatch) (uint64, int64, error) {
@@ -486,6 +624,9 @@ func (c *controlServer) removeLive(subs *liveSubs) {
 func (c *controlServer) deliverListenerEvent(event lifecycleEvent) {
 	if event.Type == lifecycleTypeChunk {
 		absorbChunkToStream(event)
+		if _, ok := parseUsageFrame(event.Data); ok && event.RunID != "" {
+			c.noteUsageFile(event.RunID)
+		}
 	} else if event.Type == lifecycleTypeAssistant || event.Type == lifecycleTypeTurn || event.Type == lifecycleTypeTool || event.Type == lifecycleTypeEnd || event.Type == lifecycleTypeResult {
 		discardStream(event.RunID)
 	}

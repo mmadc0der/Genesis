@@ -82,11 +82,13 @@ func buildPlan(agents map[string]agentDefinition, includeAgents bool) privileged
 				Workspace: setup.workspaceMode(),
 			})
 		} else {
+			setup := definition.setupContract()
 			intents = append(intents, privilegedIntent{
-				Kind:  intentEnsureAgentPaths,
-				Agent: id,
-				Cwd:   definition.Cwd,
-				Home:  definition.Home,
+				Kind:   intentEnsureAgentPaths,
+				Agent:  id,
+				Cwd:    definition.Cwd,
+				Home:   definition.Home,
+				Groups: append([]string(nil), setup.Groups...),
 			})
 		}
 		if len(definition.Env) > 0 {

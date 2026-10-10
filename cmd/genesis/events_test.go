@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -286,4 +288,247 @@ func TestDispatchEventsCLI(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on invalid format")
 	}
+}
+
+type eventerQueryCall struct {
+	kind string
+	from int64
+	to   int64
+}
+
+// scriptedEventer is an in-memory eventerQuery. maxEvents is how many rows
+// one response may carry; a wider hit returns Eventer's size-limit error.
+type scriptedEventer struct {
+	events    []lifecycleEvent
+	at        []int64
+	calls     []eventerQueryCall
+	maxEvents int
+}
+
+func (s *scriptedEventer) query(kind string, from, to int64, keep func(lifecycleEvent) bool) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, 0)
+	for i, event := range s.events {
+		if s.at[i] < from || s.at[i] > to {
+			continue
+		}
+		if keep != nil && !keep(event) {
+			continue
+		}
+		raw, err := json.Marshal(event)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, raw)
+	}
+	limited := s.maxEvents > 0 && len(out) > s.maxEvents
+	s.calls = append(s.calls, eventerQueryCall{kind: kind, from: from, to: to})
+	if limited {
+		return nil, errors.New("query response size limit exceeded")
+	}
+	return out, nil
+}
+
+func (s *scriptedEventer) QueryEvents(from, to int64) ([]json.RawMessage, error) {
+	return s.query("events", from, to, nil)
+}
+
+func (s *scriptedEventer) QueryType(eventType string, from, to int64) ([]json.RawMessage, error) {
+	return s.query("type", from, to, func(event lifecycleEvent) bool {
+		return event.Type == eventType
+	})
+}
+
+func (s *scriptedEventer) QueryAgent(agentID string, from, to int64) ([]json.RawMessage, error) {
+	return s.query("agent", from, to, func(event lifecycleEvent) bool {
+		return event.AgentID == agentID
+	})
+}
+
+func (s *scriptedEventer) QueryRun(runID string, from, to int64) ([]json.RawMessage, error) {
+	return s.query("run", from, to, func(event lifecycleEvent) bool {
+		return event.RunID == runID
+	})
+}
+
+func TestSortLifecycleByEventTime(t *testing.T) {
+	events := []lifecycleEvent{
+		{ID: "c", RunID: "gen_c", Sequence: "6932", Time: "2026-10-09T12:54:00Z"},
+		{ID: "a", RunID: "gen_a", Sequence: "2729", Time: "2026-10-09T13:29:00Z"},
+		{ID: "b", RunID: "gen_b", Sequence: "2836", Time: "2026-10-09T13:14:00Z"},
+	}
+	sortEventsByTime(events)
+	got := []string{events[0].ID, events[1].ID, events[2].ID}
+	want := []string{"c", "b", "a"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestCollectEventerGrepTailWalksBackward(t *testing.T) {
+	now := time.Date(2026, 10, 9, 13, 30, 0, 0, time.UTC)
+	store := &scriptedEventer{}
+	for _, spec := range []struct {
+		id   string
+		seq  string
+		ago  time.Duration
+		body string
+	}{
+		{"old", "9000", 48 * time.Hour, "run.end ancient"},
+		{"mid", "8000", 3 * time.Hour, "run.end mid"},
+		{"newish", "100", 20 * time.Minute, "other"},
+		{"recent", "2836", 16 * time.Minute, "run.end recent"},
+		{"newest", "2729", 1 * time.Minute, "run.end newest"},
+	} {
+		at := now.Add(-spec.ago)
+		store.at = append(store.at, at.UnixMilli())
+		store.events = append(store.events, lifecycleEvent{
+			ID:       spec.id,
+			RunID:    "gen_" + spec.id,
+			Sequence: spec.seq,
+			Type:     "dev.genesis.note",
+			Time:     at.UTC().Format(time.RFC3339Nano),
+			Data:     json.RawMessage(`{"message":"` + spec.body + `"}`),
+		})
+	}
+	filter, err := buildEventFilter("", "", "", "run.end", false, "", 2, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectEventerEvents(store, filter, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != "recent" || got[1].ID != "newest" {
+		t.Fatalf("events = %+v", got)
+	}
+	if len(store.calls) == 0 {
+		t.Fatal("expected window queries")
+	}
+	for _, call := range store.calls {
+		if call.kind != "events" {
+			t.Fatalf("grep used %s query", call.kind)
+		}
+		if call.from == 0 {
+			t.Fatalf("grep tail started at timestamp 0: %+v", store.calls)
+		}
+		if call.from < now.Add(-time.Hour).UnixMilli() {
+			t.Fatalf("tail walked an hour back after two recent matches: %+v", store.calls)
+		}
+	}
+}
+
+func TestCollectEventerAllHistoryUsesWindows(t *testing.T) {
+	now := time.Date(2026, 10, 9, 13, 30, 0, 0, time.UTC)
+	store := &scriptedEventer{maxEvents: 1}
+	for i := 0; i < 4; i++ {
+		at := now.Add(-time.Duration(i) * 30 * time.Minute)
+		store.at = append(store.at, at.UnixMilli())
+		store.events = append(store.events, lifecycleEvent{
+			ID:       strconv.Itoa(i),
+			RunID:    "gen_all",
+			Sequence: strconv.Itoa(1000 - i),
+			Type:     "dev.genesis.note",
+			Time:     at.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	filter, err := buildEventFilter("", "", "", "", false, "", 0, true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectEventerEvents(store, filter, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d events", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1].Time > got[i].Time {
+			t.Fatalf("not chronological: %s then %s", got[i-1].Time, got[i].Time)
+		}
+	}
+	if got[0].ID != "3" || got[3].ID != "0" {
+		t.Fatalf("order = %s %s %s %s", got[0].ID, got[1].ID, got[2].ID, got[3].ID)
+	}
+	if len(store.calls) < 2 {
+		t.Fatalf("expected several windows, got %+v", store.calls)
+	}
+	if len(store.calls) > 80 {
+		t.Fatalf("walked too many windows from timestamp 0: %d", len(store.calls))
+	}
+	covered := map[string]bool{}
+	for _, call := range store.calls {
+		if call.kind != "events" {
+			t.Fatalf("unfiltered scan used %s", call.kind)
+		}
+		n := 0
+		for i, at := range store.at {
+			if at >= call.from && at <= call.to {
+				n++
+				covered[store.events[i].ID] = true
+			}
+		}
+		if store.maxEvents > 0 && n > store.maxEvents {
+			// Oversized windows are refused. A refused window must not be the
+			// only read of the range; a later smaller window covers the rows.
+			continue
+		}
+	}
+	for _, event := range store.events {
+		if !covered[event.ID] {
+			t.Fatalf("event %s was never queried", event.ID)
+		}
+	}
+}
+
+func TestCollectEventerPushedTypeStaysIndexed(t *testing.T) {
+	now := time.Date(2026, 10, 9, 13, 30, 0, 0, time.UTC)
+	store := &scriptedEventer{}
+	specs := []struct {
+		id  string
+		seq string
+		ago time.Duration
+	}{
+		{"old", "6932", 36 * time.Minute},
+		{"mid", "2836", 16 * time.Minute},
+		{"new", "2729", time.Minute},
+	}
+	for _, spec := range specs {
+		at := now.Add(-spec.ago)
+		store.at = append(store.at, at.UnixMilli())
+		store.events = append(store.events, lifecycleEvent{
+			ID:       spec.id,
+			RunID:    "gen_" + spec.id,
+			Sequence: spec.seq,
+			Type:     "dev.genesis.run.end",
+			Time:     at.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	filter, err := buildEventFilter("", "", "dev.genesis.run.end", "", false, "", 3, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectEventerEvents(store, filter, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].ID != "old" || got[1].ID != "mid" || got[2].ID != "new" {
+		t.Fatalf("events = %+v", idsOf(got))
+	}
+	if len(store.calls) == 0 {
+		t.Fatal("expected a type query")
+	}
+	for _, call := range store.calls {
+		if call.kind != "type" {
+			t.Fatalf("type filter used %s: %+v", call.kind, store.calls)
+		}
+	}
+}
+
+func idsOf(events []lifecycleEvent) []string {
+	out := make([]string, len(events))
+	for i, event := range events {
+		out[i] = event.ID
+	}
+	return out
 }

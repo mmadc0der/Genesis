@@ -9,6 +9,7 @@ import {
   type Entry,
 } from "./chat";
 import { sumUsage } from "./live";
+import { sessionTokens, useUsageLive } from "./usageLive";
 import { Markdown } from "./Markdown";
 import { onLive, watchRun } from "./liveSocket";
 
@@ -276,9 +277,73 @@ function Line({ entry, working }: { entry: Entry; working: boolean }) {
 // said and did, and a box to send it a follow-up. The follow-up continues the
 // same DSH session through control, so the agent keeps its context.
 type LiveSeg =
-  | { id: number; kind: "thought"; text: string }
-  | { id: number; kind: "tool"; name: string; args: string }
-  | { id: number; kind: "text"; text: string };
+  | { id: number; kind: "thought"; text: string; settled?: boolean }
+  | { id: number; kind: "tool"; name: string; args: string; output?: string; settled?: boolean; since: string }
+  | { id: number; kind: "text"; text: string; settled?: boolean };
+
+type StreamChunk = {
+  type?: string;
+  text?: string;
+  name?: string;
+  argumentsDelta?: string;
+  outputDelta?: string;
+  block?: { type?: string; name?: string; arguments?: string };
+};
+
+// settleTools marks bash/tool cards whose token stream has closed. Execution
+// can still be running; the card should leave the streaming accent then.
+function settleTools(prev: LiveSeg[], patch?: { name?: string; args?: string; output?: string }): LiveSeg[] {
+  let index = -1;
+  for (let i = prev.length - 1; i >= 0; i--) {
+    if (prev[i].kind === "tool") {
+      index = i;
+      break;
+    }
+  }
+  if (index < 0) return prev;
+  const seg = prev[index];
+  if (seg.kind !== "tool") return prev;
+  const next = prev.slice();
+  next[index] = {
+    ...seg,
+    name: patch?.name || seg.name,
+    args: patch?.args ? patch.args : seg.args,
+    output: patch?.output !== undefined ? (seg.output || "") + patch.output : seg.output,
+    settled: true,
+  };
+  return next;
+}
+
+function toolEventText(data: {
+  arguments?: string;
+  output?: string;
+  raw?: {
+    payload?: {
+      event?: {
+        data?: {
+          arguments?: string;
+          message?: { content?: { type?: string; text?: string; content?: { type?: string; text?: string }[] }[] };
+        };
+      };
+    };
+  };
+}) {
+  let args = typeof data.arguments === "string" ? data.arguments : "";
+  let output = typeof data.output === "string" ? data.output : "";
+  if (args === "" || output === "") {
+    const eventData = data.raw?.payload?.event?.data;
+    if (args === "" && typeof eventData?.arguments === "string") args = eventData.arguments;
+    if (output === "") {
+      for (const part of eventData?.message?.content ?? []) {
+        if (part.type !== "tool-result") continue;
+        for (const inner of part.content ?? []) {
+          if (inner.type === "text" && inner.text) output += inner.text;
+        }
+      }
+    }
+  }
+  return { args, output };
+}
 
 let liveSegID = 0;
 
@@ -289,10 +354,15 @@ function nextLiveSeg(seg: LiveSeg): LiveSeg[] {
 // continueLive keeps appending to the latest segment when the same kind is
 // still streaming. A different kind settles the previous segment so only the
 // block that is still receiving tokens stays the collapsed live tail.
+function settleAll(prev: LiveSeg[]): LiveSeg[] {
+  if (prev.every((seg) => seg.settled)) return prev;
+  return prev.map((seg) => (seg.settled ? seg : { ...seg, settled: true }));
+}
+
 function continueLive(prev: LiveSeg[], kind: LiveSeg["kind"], update: (last: LiveSeg) => LiveSeg, create: () => LiveSeg): LiveSeg[] {
   const last = prev[prev.length - 1];
   if (last && last.kind === kind) return [...prev.slice(0, -1), update(last)];
-  return [...prev, { ...create(), id: ++liveSegID }];
+  return [...settleAll(prev), { ...create(), id: ++liveSegID }];
 }
 
 export function Chat({
@@ -324,7 +394,7 @@ export function Chat({
           const seeded: LiveSeg[] = [];
           if (turn.thought) seeded.push(...nextLiveSeg({ id: 0, kind: "thought", text: turn.thought }));
           if (turn.tool_name || turn.tool_args) {
-            seeded.push(...nextLiveSeg({ id: 0, kind: "tool", name: turn.tool_name || "tool", args: turn.tool_args || "" }));
+            seeded.push(...nextLiveSeg({ id: 0, kind: "tool", name: turn.tool_name || "tool", args: turn.tool_args || "", since: new Date().toISOString() }));
           }
           if (turn.text) seeded.push(...nextLiveSeg({ id: 0, kind: "text", text: turn.text }));
           setLiveSegs(seeded);
@@ -358,10 +428,13 @@ export function Chat({
           const ev = frame.event;
           if (ev.type === "dev.genesis.run.chunk") {
             const body = (ev.data || {}) as {
-              raw?: { payload?: { chunk?: { type?: string; text?: string; name?: string; argumentsDelta?: string } } };
+              frame?: string;
               chunk_type?: string;
+              phase?: string;
+              name?: string;
+              raw?: { payload?: { chunk?: StreamChunk } };
             };
-            const raw = body.raw?.payload?.chunk || {};
+            const raw: StreamChunk = body.raw?.payload?.chunk || {};
             const text = raw.text ?? "";
             const chunkType = body.chunk_type || raw.type;
             if (chunkType === "reasoning-delta" && text) {
@@ -392,19 +465,51 @@ export function Chat({
                   "tool",
                   (last) =>
                     last.kind === "tool"
-                      ? { ...last, name: raw.name || last.name, args: last.args + (raw.argumentsDelta || "") }
+                      ? { ...last, settled: false, name: raw.name || last.name, args: last.args + (raw.argumentsDelta || "") }
                       : last,
-                  () => ({ id: 0, kind: "tool", name: raw.name || "tool", args: raw.argumentsDelta || "" }),
+                  () => ({ id: 0, kind: "tool", name: raw.name || "tool", args: raw.argumentsDelta || "", since: new Date().toISOString() }),
                 ),
               );
+            } else if (chunkType === "block-end" && raw.block?.type === "tool-call") {
+              // The command stream closed. Do not keep the blue streaming accent
+              // until the shell process itself exits.
+              streamingActive.current = true;
+              setLiveSegs((curr) => settleTools(curr, { name: raw.block?.name, args: raw.block?.arguments }));
+            } else if (chunkType === "block-end" && (raw.block?.type === "reasoning" || raw.block?.type === "text")) {
+              const kind = raw.block.type === "reasoning" ? "thought" : "text";
+              streamingActive.current = true;
+              setLiveSegs((curr) => {
+                const last = curr[curr.length - 1];
+                if (!last || last.kind !== kind || last.settled) return curr;
+                return [...curr.slice(0, -1), { ...last, settled: true }];
+              });
+            } else if ((chunkType === "tool-output-delta" || chunkType === "output-delta") && (text || raw.outputDelta)) {
+              streamingActive.current = true;
+              const piece = text || raw.outputDelta || "";
+              setLiveSegs((curr) => settleTools(curr, { output: piece }));
+            } else if (body.frame === "end" || chunkType === "finish") {
+              streamingActive.current = true;
+              setLiveSegs((curr) => settleAll(curr));
             }
-          } else if (
-            ev.type === "dev.genesis.run.assistant" ||
-            ev.type === "dev.genesis.run.turn" ||
-            ev.type === "dev.genesis.run.tool" ||
-            ev.type === "dev.genesis.run.end"
-          ) {
-            // Completed turn arrived; reset in-flight stream delta and refresh session
+          } else if (ev.type === "dev.genesis.run.tool") {
+            const toolBody = (ev.data || {}) as Parameters<typeof toolEventText>[0] & {
+              phase?: string;
+              name?: string;
+              arguments?: string;
+              output?: string;
+            };
+            const parsed = toolEventText(toolBody);
+            const args = toolBody.arguments ?? parsed.args;
+            const output = toolBody.output ?? parsed.output;
+            if (toolBody.phase === "call") {
+              streamingActive.current = true;
+              setLiveSegs((curr) => settleTools(curr, { name: toolBody.name, args }));
+            } else if (toolBody.phase === "result") {
+              streamingActive.current = true;
+              setLiveSegs((curr) => settleTools(curr, { output }));
+            }
+          } else if (ev.type === "dev.genesis.run.end") {
+            // One refetch when the run settles. Chunks already updated the live tail.
             streamingActive.current = false;
             setLiveSegs([]);
             refresh();
@@ -459,7 +564,14 @@ export function Chat({
     }
   }
 
-  const tokens = session ? sumUsage(session.runs.map((run) => run.run)).total : 0;
+  const usageLive = useUsageLive();
+  const tokens = session
+    ? sessionTokens(
+        usageLive.runs,
+        session.runs.map((run) => run.run.run_id),
+        sumUsage(session.runs.map((run) => run.run)).total,
+      )
+    : 0;
   const blocked = session?.continue_blocked ?? "";
   return (
     <section className="chat" aria-label="Session">
@@ -506,7 +618,8 @@ export function Chat({
               {liveSegs.map((seg, index) => {
                 const live = index === liveSegs.length - 1;
                 if (seg.kind === "thought") {
-                  if (!live) {
+                  const streaming = live && !seg.settled;
+                  if (!streaming) {
                     return (
                       <details className="think" key={seg.id}>
                         <summary>
@@ -537,47 +650,79 @@ export function Chat({
                 }
                 if (seg.kind === "tool") {
                   const command = liveToolCommand(seg.args) || "preparing command...";
+                  const streaming = live && !seg.settled;
+                  const executing = !streaming && seg.output === undefined;
                   return (
-                    <div className="tool live-tool" key={seg.id}>
-                      <div className="tool-header-inline">
+                    <details className="tool live-tool" key={seg.id} open={streaming || undefined}>
+                      <summary>
                         <span className="tool-badge">{seg.name || "tool"}</span>
-                        <em className={live ? "tool-status running" : "tool-status"}>
-                          {live ? (
+                        <span className="tool-summary" title={command}>{command}</span>
+                        <em className={streaming || executing ? "tool-status running" : "tool-status"}>
+                          {streaming ? (
                             <>
                               <i className="pulse-dot" /> streaming
                             </>
+                          ) : executing ? (
+                            <RunningTimer since={seg.since} />
                           ) : (
-                            "started"
+                            "done"
                           )}
                         </em>
+                      </summary>
+                      <div className="tool-body">
+                        <div className={streaming ? "tool-card streaming" : "tool-card"}>
+                          <div className="tool-card-head">
+                            <span>Input / Command</span>
+                            <CopyButton text={seg.args || command} />
+                          </div>
+                          {streaming ? (
+                            <ExpandableLiveBlock>
+                              <pre className="tool-args">
+                                {command}
+                                <span className="stream-cursor" />
+                              </pre>
+                            </ExpandableLiveBlock>
+                          ) : (
+                            <pre className="tool-args">{command}</pre>
+                          )}
+                        </div>
+                        {streaming ? null : (
+                          <div className="tool-card">
+                            <div className="tool-card-head">
+                              <span>Output</span>
+                              <CopyButton text={seg.output || ""} />
+                            </div>
+                            <pre className="tool-result">{seg.output !== undefined ? seg.output || "(no output)" : ""}</pre>
+                          </div>
+                        )}
                       </div>
-                      {live ? (
-                        <ExpandableLiveBlock>
-                          <pre className="live-tool-input">
-                            {command}
-                            <span className="stream-cursor" />
-                          </pre>
-                        </ExpandableLiveBlock>
-                      ) : (
-                        <pre className="live-tool-input">{command}</pre>
-                      )}
-                    </div>
+                    </details>
+                  );
+                }
+                const streamingText = live && !seg.settled;
+                if (!streamingText) {
+                  return (
+                    <details className="think" key={seg.id}>
+                      <summary>
+                        <span className="think-icon">▸</span>
+                        <span className="think-label">Output</span>
+                      </summary>
+                      <div className="think-body">
+                        <Markdown content={seg.text} />
+                      </div>
+                    </details>
                   );
                 }
                 return (
                   <div className="msg msg-agent live-msg" key={seg.id}>
                     <div className="msg-meta">
                       <b>output</b>
-                      {live ? <span className="live-typing-indicator">typing...</span> : null}
+                      <span className="live-typing-indicator">typing...</span>
                     </div>
-                    {live ? (
-                      <ExpandableLiveBlock>
-                        <Markdown content={seg.text} />
-                        <span className="stream-cursor" />
-                      </ExpandableLiveBlock>
-                    ) : (
+                    <ExpandableLiveBlock>
                       <Markdown content={seg.text} />
-                    )}
+                      <span className="stream-cursor" />
+                    </ExpandableLiveBlock>
                   </div>
                 );
               })}

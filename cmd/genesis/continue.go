@@ -49,6 +49,11 @@ func (s *eventServer) dispatchSessionContinue(w http.ResponseWriter, event cloud
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if s.store.sessionBusy(cited.Record.SessionID) {
+		s.refuseContinuation(subject, errors.New("continuation session is already running"))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	// The operator speaks through the control panel. That source may continue
 	// any ended run, and the hop limit below, which stops agents from chaining
 	// each other forever, does not apply to a person.

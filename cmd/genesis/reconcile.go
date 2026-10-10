@@ -81,6 +81,7 @@ type hostAPI interface {
 	CreateGroup(name string) error
 	CreateUser(spec agentUserSpec) error
 	UpdateUser(spec agentUserSpec) error
+	AppendGroups(name string, groups []string) error
 	EnsureDir(path string, uid, gid int, mode os.FileMode) error
 	Chown(path string, uid, gid int) error
 	Chmod(path string, mode os.FileMode) error
@@ -173,6 +174,13 @@ func (s *privilegedState) apply(plan privilegedPlan) (coordinateResult, error) {
 				Agent:  intent.Agent,
 				Reason: "agent has no OS user; Genesis does not create, chown, or mkdir cwd/home as root",
 			})
+			if len(intent.Groups) > 0 {
+				if err := s.applyListenerGroups(intent.Agent, intent.Groups); err != nil {
+					return coordinateResult{}, err
+				}
+				result.Applied = append(result.Applied, "listener_groups:"+intent.Agent)
+				result.HostMutation = hostMutationApplied
+			}
 		case intentProvisionDeclaredEnv:
 			sawAgentLayer = true
 			result.Unsupported = append(result.Unsupported, unsupportedChange{
@@ -699,6 +707,28 @@ func (unixHost) CreateUser(spec agentUserSpec) error {
 	return runHostCommand(hostBin("useradd"), args...)
 }
 
+// applyListenerGroups adds setup.groups from an agent that has no dedicated
+// user to the listener account. The listener name stays reserved, so this
+// does not create or rename that account.
+func (s *privilegedState) applyListenerGroups(agent string, groups []string) error {
+	if s.listenerUser == "" {
+		return fmt.Errorf("agent %s: setup.groups requires the listener account when the agent has no dedicated user", agent)
+	}
+	if err := ensureDeclaredGroups(s.host, groups); err != nil {
+		return fmt.Errorf("agent %s: %w", agent, err)
+	}
+	if err := validateSupplementaryGroups(s.host, agentUserSpec{Groups: groups}); err != nil {
+		return fmt.Errorf("agent %s: %w", agent, err)
+	}
+	if err := ensureSharedWorkspace(s.host, groups); err != nil {
+		return fmt.Errorf("agent %s: %w", agent, err)
+	}
+	if err := s.host.AppendGroups(s.listenerUser, groups); err != nil {
+		return fmt.Errorf("agent %s: add listener %q to groups: %w", agent, s.listenerUser, err)
+	}
+	return nil
+}
+
 func (unixHost) UpdateUser(spec agentUserSpec) error {
 	args := []string{"--shell", agentShell, "--home", spec.Home}
 	if len(spec.Groups) > 0 {
@@ -706,6 +736,13 @@ func (unixHost) UpdateUser(spec agentUserSpec) error {
 	}
 	args = append(args, spec.Name)
 	return runHostCommand(hostBin("usermod"), args...)
+}
+
+func (unixHost) AppendGroups(name string, groups []string) error {
+	if len(groups) == 0 {
+		return nil
+	}
+	return runHostCommand(hostBin("usermod"), "-aG", strings.Join(groups, ","), name)
 }
 
 func (unixHost) EnsureDir(path string, uid, gid int, mode os.FileMode) error {

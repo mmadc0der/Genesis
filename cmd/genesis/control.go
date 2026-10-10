@@ -93,6 +93,9 @@ type controlServer struct {
 	feedOnce        sync.Once
 	feedReadyOnce   sync.Once
 	feedReady       chan struct{}
+	usageMu         sync.Mutex
+	usage           *usageRollup
+	usageScanEvery  time.Duration
 }
 
 type journalSnap struct {
@@ -198,6 +201,7 @@ func runControl(logger *slog.Logger, args []string) {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	go handler.loopUsageReports()
 	logger.Info("genesis control listening",
 		"address", cfg.listen,
 		"listener", cfg.listenerURL,
@@ -944,6 +948,9 @@ func safeYAMLName(name string) error {
 
 func (c *controlServer) handleRuns(w http.ResponseWriter, r *http.Request) {
 	limit := queryLimit(r, "limit", defaultRunLimit, maxRunLimit)
+	if c.proxyListener(w, "/runs?limit="+strconv.Itoa(limit)) {
+		return
+	}
 	runs, err := c.listRuns(limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -960,6 +967,9 @@ func (c *controlServer) handleRunRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tail == "" {
+		if c.proxyListener(w, "/runs/"+id) {
+			return
+		}
 		detail, err := c.readRunDetail(id)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -974,6 +984,9 @@ func (c *controlServer) handleRunRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	if tail != "events" {
 		http.NotFound(w, r)
+		return
+	}
+	if c.proxyListener(w, "/runs/"+id+"/events?"+r.URL.RawQuery) {
 		return
 	}
 	after, err := parseCursor(r.URL.Query().Get("after"))
@@ -995,6 +1008,9 @@ func (c *controlServer) handleRunRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *controlServer) listRuns(limit int) ([]runSummary, error) {
+	if runs, ok, err := c.runsFromListener(limit); ok || err != nil {
+		return runs, err
+	}
 	dir := filepath.Join(c.dataDir, runsDirName)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1058,6 +1074,13 @@ func (c *controlServer) readEvents(ctx context.Context, runID string, after uint
 	if limit < 1 {
 		limit = defaultEventLimit
 	}
+	journalPath := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
+	if _, statErr := os.Stat(journalPath); errors.Is(statErr, os.ErrNotExist) {
+		if page, ok, err := c.eventsPageFromListener(runID, after, limit); ok || err != nil {
+			return page, err
+		}
+		return eventsPage{}, os.ErrNotExist
+	}
 	gate := c.runGate(runID)
 	gate.Lock()
 	defer gate.Unlock()
@@ -1102,6 +1125,177 @@ func (c *controlServer) readEvents(ctx context.Context, runID string, after uint
 	return page, nil
 }
 
+func (c *controlServer) summaryFromEventer(runID string) (journalSnap, error) {
+	snap, ok, err := c.summaryFromListener(runID)
+	if err != nil {
+		return journalSnap{}, err
+	}
+	if !ok {
+		return journalSnap{}, os.ErrNotExist
+	}
+	usagePath := filepath.Join(c.dataDir, runsDirName, runID, usageFileName)
+	if account, _, found := readUsageAccount(usagePath); found {
+		snap.summary.Usage = account
+	}
+	return snap, nil
+}
+
+func pageEvents(runID string, events []lifecycleEvent, after uint64, limit int) eventsPage {
+	page := eventsPage{
+		RunID:  runID,
+		Cursor: strconv.FormatUint(after, 10),
+		Events: []lifecycleEvent{},
+	}
+	for _, event := range events {
+		seq, ok := eventSequence(event)
+		if ok && seq <= after {
+			continue
+		}
+		if len(page.Events) == limit {
+			page.HasMore = true
+			break
+		}
+		event.Data = redactPrivateKeys(append([]byte(nil), event.Data...))
+		page.Events = append(page.Events, event)
+		if ok {
+			page.Cursor = strconv.FormatUint(seq, 10)
+		}
+	}
+	return page
+}
+
+func (c *controlServer) runsFromListener(limit int) ([]runSummary, bool, error) {
+	if c.listenerURL == "" || c.listenerClient == nil {
+		return nil, false, nil
+	}
+	n := limit
+	if n < 1 {
+		n = maxRunLimit
+	}
+	body, code, err := c.listenerGET("/runs?limit=" + strconv.Itoa(n))
+	if err != nil {
+		return nil, false, err
+	}
+	if code == http.StatusNotFound {
+		return nil, false, nil
+	}
+	if code != http.StatusOK {
+		return nil, false, listenerHTTPError(code, body)
+	}
+	var page struct {
+		Runs []runSummary `json:"runs"`
+	}
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, true, err
+	}
+	if page.Runs == nil {
+		page.Runs = []runSummary{}
+	}
+	return page.Runs, true, nil
+}
+
+func (c *controlServer) summaryFromListener(runID string) (journalSnap, bool, error) {
+	if c.listenerURL == "" || c.listenerClient == nil {
+		return journalSnap{}, false, nil
+	}
+	body, code, err := c.listenerGET("/runs/" + runID)
+	if err != nil {
+		return journalSnap{}, false, err
+	}
+	if code == http.StatusNotFound {
+		return journalSnap{}, false, nil
+	}
+	if code != http.StatusOK {
+		return journalSnap{}, false, listenerHTTPError(code, body)
+	}
+	var detail runDetail
+	if err := json.Unmarshal(body, &detail); err != nil {
+		return journalSnap{}, true, err
+	}
+	if detail.RunID == "" {
+		return journalSnap{}, false, nil
+	}
+	count := detail.EventCount
+	if count == 0 {
+		count = detail.Events
+	}
+	return journalSnap{summary: detail.runSummary, count: count}, true, nil
+}
+
+func (c *controlServer) eventsPageFromListener(runID string, after uint64, limit int) (eventsPage, bool, error) {
+	if c.listenerURL == "" || c.listenerClient == nil {
+		return eventsPage{}, false, nil
+	}
+	if limit < 1 {
+		limit = defaultEventLimit
+	}
+	path := fmt.Sprintf("/runs/%s/events?after=%d&limit=%d", runID, after, limit)
+	body, code, err := c.listenerGET(path)
+	if err != nil {
+		return eventsPage{}, false, err
+	}
+	if code == http.StatusNotFound {
+		return eventsPage{}, false, nil
+	}
+	if code != http.StatusOK {
+		return eventsPage{}, false, listenerHTTPError(code, body)
+	}
+	var page eventsPage
+	if err := json.Unmarshal(body, &page); err != nil {
+		return eventsPage{}, true, err
+	}
+	if page.Events == nil {
+		page.Events = []lifecycleEvent{}
+	}
+	return page, true, nil
+}
+
+func (c *controlServer) listenerGET(path string) ([]byte, int, error) {
+	if c.listenerURL == "" || c.listenerClient == nil {
+		return nil, 0, os.ErrNotExist
+	}
+	response, err := c.listenerClient.Get(c.listenerURL + path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
+	if err != nil {
+		return nil, response.StatusCode, err
+	}
+	return body, response.StatusCode, nil
+}
+
+func listenerHTTPError(code int, body []byte) error {
+	msg := strings.TrimSpace(string(body))
+	if msg == "" {
+		return fmt.Errorf("listener answered %d", code)
+	}
+	return fmt.Errorf("listener answered %d: %s", code, msg)
+}
+
+func (c *controlServer) proxyListener(w http.ResponseWriter, path string) bool {
+	if c.listenerURL == "" || c.listenerClient == nil {
+		return false
+	}
+	body, code, err := c.listenerGET(path)
+	if err != nil {
+		http.Error(w, "failed to reach listener", http.StatusBadGateway)
+		return true
+	}
+	if code == http.StatusNotFound {
+		return false
+	}
+	if code != http.StatusOK {
+		http.Error(w, string(body), code)
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+	return true
+}
+
 func (c *controlServer) summarizeCached(runID string) (runSummary, error) {
 	summary, _, err := c.summarizeCounted(context.Background(), runID)
 	return summary, err
@@ -1122,6 +1316,9 @@ func (c *controlServer) loadSummaryLocked(ctx context.Context, runID string) (jo
 	path := filepath.Join(c.dataDir, runsDirName, runID, eventsFileName)
 	info, err := os.Stat(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return c.summaryFromEventer(runID)
+		}
 		return journalSnap{}, err
 	}
 	usagePath := filepath.Join(c.dataDir, runsDirName, runID, usageFileName)

@@ -56,7 +56,7 @@ export function AgentView({ agentId, onBack }: { agentId: string; onBack: () => 
     const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ document: doc }),
+      body: JSON.stringify({ document: pruneAgentDoc(doc) }),
     });
     const text = await response.text();
     setSaving(false);
@@ -344,6 +344,23 @@ function AgentSelect({
       ) : null}
     </div>
   );
+}
+
+function pruneAgentDoc(doc: Doc): Doc {
+  const next: Doc = { ...doc };
+  if (next.user === "") delete next.user;
+  const setup = next.setup;
+  if (setup && typeof setup === "object" && !Array.isArray(setup)) {
+    const copy: Doc = { ...(setup as Doc) };
+    if (Array.isArray(copy.groups)) {
+      copy.groups = copy.groups.map((item) => String(item)).filter((item) => item !== "");
+      if ((copy.groups as string[]).length === 0) delete copy.groups;
+    }
+    if (copy.workspace === "") delete copy.workspace;
+    if (Object.keys(copy).length === 0) delete next.setup;
+    else next.setup = copy;
+  }
+  return next;
 }
 
 function mapEntries(value: unknown): [string, string][] {

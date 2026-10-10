@@ -124,7 +124,7 @@ var agentFormHints = map[string]formHint{
 	"home": {required: true, format: "path", description: "Absolute home. A dedicated user must use /home/<user>."},
 	"user": {description: "Dedicated OS user. Empty runs as the listener account."},
 	"setup": {
-		description: "Host contract. Requires user.",
+		description: "Host contract. Groups may be set with no dedicated user. A workspace mode requires user.",
 	},
 	"setup.groups": {description: "Extra groups. Repeated names are rejected."},
 	"setup.workspace": {

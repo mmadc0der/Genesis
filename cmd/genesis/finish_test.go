@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -661,6 +663,149 @@ func TestTranscriptFileIsWorldReadableAndRunsAreNot(t *testing.T) {
 	}
 	if err := runAs(uint32(uid), uint32(gid), "/bin/ls", filepath.Join(prepared, runsDirName)); err == nil {
 		t.Fatal("other uid listed runs")
+	}
+}
+
+type stubEventAppender struct {
+	lines [][]byte
+}
+
+func (s *stubEventAppender) Append(payload []byte) error {
+	s.lines = append(s.lines, append([]byte(nil), payload...))
+	return nil
+}
+
+func (s *stubEventAppender) Flush() error { return nil }
+
+func TestWriteTranscriptEventerAppenderWithoutDiskJournal(t *testing.T) {
+	dataDir, err := os.MkdirTemp(os.TempDir(), "genesis-eventer-transcript-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+	prepared, err := prepareDataDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newRunStore(prepared, newEventBus(), slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	appender := &stubEventAppender{}
+	store.events = appender
+	document := sampleRunInvocation("gen_eventer_transcript")
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(document.RunDir, eventsFileName)); !os.IsNotExist(err) {
+		t.Fatalf("events.jsonl present under Eventer: %v", err)
+	}
+	saved := transcriptFromEventer
+	t.Cleanup(func() { transcriptFromEventer = saved })
+	wantBody := []byte(`{"type":"dev.genesis.run.end"}` + "\n")
+	transcriptFromEventer = func(*runStore, string) ([]byte, bool, error) {
+		return wantBody, true, nil
+	}
+	transcript, err := store.writeTranscript(document.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied, err := os.ReadFile(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(copied, wantBody) {
+		t.Fatalf("transcript = %q, want %q", copied, wantBody)
+	}
+}
+
+func TestWriteTranscriptEventerAppenderEmptyWithoutDiskJournal(t *testing.T) {
+	dataDir, err := os.MkdirTemp(os.TempDir(), "genesis-eventer-empty-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+	prepared, err := prepareDataDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newRunStore(prepared, newEventBus(), slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	store.events = &stubEventAppender{}
+	document := sampleRunInvocation("gen_eventer_empty")
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := store.writeTranscript(document.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("transcript size = %d, want 0", info.Size())
+	}
+}
+
+func TestTranscriptWriteIsLifecycleError(t *testing.T) {
+	store := &runStore{events: &stubEventAppender{}}
+	journalErr := fmt.Errorf("read run journal: %w", errJournalAbsent)
+	if transcriptWriteIsLifecycleError(store, journalErr) {
+		t.Fatal("missing journal under Eventer must not be a lifecycle error")
+	}
+	if !transcriptWriteIsLifecycleError(store, errors.New("read run journal: permission denied")) {
+		t.Fatal("real transcript failures must stay lifecycle errors")
+	}
+	fileStore := &runStore{}
+	if !transcriptWriteIsLifecycleError(fileStore, journalErr) {
+		t.Fatal("missing journal on file path must be a lifecycle error")
+	}
+}
+
+func TestPublishAgentFinishedNoTranscriptDiskErrorWithEventer(t *testing.T) {
+	dataDir, err := os.MkdirTemp(os.TempDir(), "genesis-finish-eventer-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+	prepared, err := prepareDataDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newRunStore(prepared, newEventBus(), slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	appender := &stubEventAppender{}
+	store.events = appender
+	document := sampleRunInvocation("gen_finish_eventer")
+	document.Agent = "worker"
+	if err := store.Accept(&document, nil); err != nil {
+		t.Fatal(err)
+	}
+	saved := transcriptFromEventer
+	t.Cleanup(func() { transcriptFromEventer = saved })
+	transcriptFromEventer = func(*runStore, string) ([]byte, bool, error) {
+		return []byte("{\"type\":\"dev.genesis.run.end\"}\n"), true, nil
+	}
+	journal := store.journal(document.RunID)
+	var dispatched bool
+	runner := processRunner{
+		store:     store,
+		logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		agentsDir: t.TempDir(),
+		dispatch: func(cloudEvent) int {
+			dispatched = true
+			return http.StatusOK
+		},
+	}
+	runner.publishAgentFinished(journal, document, endStateCompleted)
+	for _, line := range appender.lines {
+		var event lifecycleEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == lifecycleTypeError {
+			t.Fatalf("unexpected lifecycle error: %s", line)
+		}
+	}
+	if !dispatched {
+		t.Fatal("agent finished event was not dispatched")
 	}
 }
 

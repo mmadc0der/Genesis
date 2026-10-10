@@ -79,10 +79,10 @@ type activeTurnData struct {
 }
 
 type chatSession struct {
-	RunID           string          `json:"run_id"`
-	SessionID       string          `json:"session_id,omitempty"`
-	Agent           string          `json:"agent"`
-	Runs            []chatRun       `json:"runs"`
+	RunID     string    `json:"run_id"`
+	SessionID string    `json:"session_id,omitempty"`
+	Agent     string    `json:"agent"`
+	Runs      []chatRun `json:"runs"`
 	// ContinueRun is the run a follow-up cites. It is empty while a run is
 	// open or when nothing can be continued, and ContinueBlocked then says why.
 	ContinueRun     string          `json:"continue_run,omitempty"`
@@ -291,10 +291,18 @@ func (c *controlServer) sessionRuns(runID string) ([]runSummary, error) {
 		return nil, err
 	}
 	runs := make([]runSummary, 0, 4)
+	found := false
 	for _, candidate := range all {
-		if candidate.SessionID == own.SessionID {
-			runs = append(runs, candidate)
+		if candidate.SessionID != own.SessionID {
+			continue
 		}
+		if candidate.RunID == own.RunID {
+			found = true
+		}
+		runs = append(runs, candidate)
+	}
+	if !found {
+		runs = append(runs, own)
 	}
 	slices.SortFunc(runs, func(left, right runSummary) int {
 		if left.AcceptedAt != right.AcceptedAt {
@@ -306,20 +314,46 @@ func (c *controlServer) sessionRuns(runID string) ([]runSummary, error) {
 }
 
 func (c *controlServer) readChatSession(runID string) (chatSession, error) {
-	if _, err := c.summarizeCached(runID); err != nil {
-		return chatSession{}, err
-	}
+	// The run list is the in-memory summary cache. Resolving the chain from it
+	// avoids a full-journal read whose only job was to prove the run exists.
 	all, err := c.listRuns(-1)
 	if err != nil {
 		return chatSession{}, err
 	}
 	runs := chatChain(all, runID)
 	if len(runs) == 0 {
+		events, evErr := c.eventsFromListener(runID)
+		if evErr != nil && !errors.Is(evErr, os.ErrNotExist) {
+			return chatSession{}, evErr
+		}
+		if evErr == nil && len(events) > 0 {
+			return chatFromEvents(runID, events), nil
+		}
+		if _, sumErr := c.summarizeCached(runID); sumErr != nil {
+			return chatSession{}, sumErr
+		}
 		return chatSession{}, os.ErrNotExist
 	}
 	session := chatSession{RunID: runID, Runs: make([]chatRun, 0, len(runs))}
 	for _, summary := range runs {
 		path := filepath.Join(c.dataDir, runsDirName, summary.RunID, eventsFileName)
+		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+			evs, evErr := c.eventsFromListener(summary.RunID)
+			if evErr != nil {
+				if errors.Is(evErr, os.ErrNotExist) {
+					return chatSession{}, os.ErrNotExist
+				}
+				return chatSession{}, evErr
+			}
+			if len(evs) == 0 {
+				return chatSession{}, os.ErrNotExist
+			}
+			run := chatRunFromEvents(summary, evs)
+			session.Runs = append(session.Runs, run)
+			session.SessionID = summary.SessionID
+			session.Agent = summary.Agent
+			continue
+		}
 		trigger, items, retries, err := readChatRun(path)
 		if err != nil {
 			return chatSession{}, err
@@ -343,6 +377,77 @@ func (c *controlServer) readChatSession(runID string) (chatSession, error) {
 		}
 	}
 	return session, nil
+}
+
+func (c *controlServer) eventsFromListener(runID string) ([]lifecycleEvent, error) {
+	if c.listenerURL == "" || c.listenerClient == nil {
+		return nil, os.ErrNotExist
+	}
+	body, code, err := c.listenerGET("/runs/" + runID + "/transcript?limit=4000")
+	if err != nil {
+		return nil, err
+	}
+	if code == http.StatusNotFound {
+		return nil, os.ErrNotExist
+	}
+	if code != http.StatusOK {
+		return nil, listenerHTTPError(code, body)
+	}
+	var page eventsPage
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, err
+	}
+	return page.Events, nil
+}
+
+func chatRunFromEvents(summary runSummary, events []lifecycleEvent) chatRun {
+	state := &chatState{}
+	for _, event := range events {
+		if isEphemeralEvent(event.Type, event.Data) {
+			continue
+		}
+		state.absorb(event)
+	}
+	if state.items == nil {
+		state.items = []chatItem{}
+	}
+	return chatRun{Run: summary, Trigger: state.trigger, Items: state.items, Retries: state.retries}
+}
+
+func chatFromEvents(runID string, events []lifecycleEvent) chatSession {
+	summary := summarizeRun(events)
+	summary.Events = len(events)
+	state := &chatState{}
+	for _, event := range events {
+		if isEphemeralEvent(event.Type, event.Data) {
+			continue
+		}
+		state.absorb(event)
+	}
+	if state.items == nil {
+		state.items = []chatItem{}
+	}
+	session := chatSession{
+		RunID:     runID,
+		SessionID: summary.SessionID,
+		Agent:     summary.Agent,
+		Runs: []chatRun{{
+			Run:     summary,
+			Trigger: state.trigger,
+			Items:   state.items,
+			Retries: state.retries,
+		}},
+	}
+	session.ContinueRun, session.ContinueBlocked = continueTarget([]runSummary{summary})
+	if summary.State == runStateOpen {
+		activeStreams.Lock()
+		stream := activeStreams.byRun[runID]
+		activeStreams.Unlock()
+		if stream != nil {
+			session.ActiveTurn = stream.snapshot()
+		}
+	}
+	return session
 }
 
 // chatChain is the runs the center shows together. A session.continue run

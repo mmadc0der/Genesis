@@ -1,10 +1,11 @@
 #!/bin/sh
-# Seed /var/lib/genesis/config from image defaults.
-# Missing default YAML files are copied onto an existing named volume so image
-# upgrades can deliver newly shipped agents and rules. repos.d is created when
-# missing; image defaults are copied only if that directory exists in the image.
-# providers.d is not seeded. It stays outside this volume. The secrets
-# directory is not created. When that directory exists, startup locks it.
+# Prepare /var/lib/genesis/config for launch.
+# A normal start creates agents.d, rules.d, and repos.d when missing and does
+# not copy image defaults into them. Deleted default YAML stays deleted across
+# restarts. The seed-config argument still copies missing defaults; that path
+# is not a launch. providers.d is not seeded. It stays outside this volume.
+# The secrets directory is not created. When that directory exists, startup
+# locks it.
 # GITHUB_APP_RECONCILER_PEM, GITHUB_APP_ID, and GITHUB_APP_WEBHOOK_SECRET
 # may be absent. A symlink or other non-file at one of those names exits.
 # When
@@ -120,6 +121,20 @@ own_tree() {
 	find "$root" -xdev -type f -exec chmod "$file_mode" {} +
 }
 
+# data_owned is a completed own_tree plus open_transcripts/open_sessions.
+# The stamp lives on the data volume, so a restart does not walk every
+# session and transcript again. GENESIS_OWN_TREE=1 forces that walk.
+data_owned() {
+	stamp=$data/.genesis-owned
+	if [ "${GENESIS_OWN_TREE:-}" = "1" ]; then
+		return 1
+	fi
+	if [ -L "$stamp" ] || [ ! -f "$stamp" ]; then
+		return 1
+	fi
+	[ "$(stat -c %u:%g "$stamp")" = "$(id -u genesis):$(id -g genesis)" ]
+}
+
 # Transcripts sit beside runs. Another uid must traverse the data root and
 # read the transcript file, and must not read runs. The listener must own
 # transcripts: this mkdir runs after own_tree, so a new directory would
@@ -179,9 +194,17 @@ fi
 mkdir -p "$agents" "$rules" "$repos" "$data/runs"
 require_real_dir "$config" "config root"
 require_real_dir "$data" "data root"
-copy_missing "$defaults/agents.d" "$agents"
-copy_missing "$defaults/rules.d" "$rules"
-copy_missing "$defaults/repos.d" "$repos"
+require_real_dir "$agents" "config directory"
+require_real_dir "$rules" "config directory"
+require_real_dir "$repos" "config directory"
+# Image defaults are copied only for the explicit seed-config command.
+# A restart must not put deleted agents, rules, or repos back.
+if [ "${1:-}" = "seed-config" ]; then
+	copy_missing "$defaults/agents.d" "$agents"
+	copy_missing "$defaults/rules.d" "$rules"
+	copy_missing "$defaults/repos.d" "$repos"
+	exit 0
+fi
 
 lock_providers() {
 	path=${GENESIS_PROVIDERS_DIR:-/etc/genesis/providers.d}
@@ -290,19 +313,35 @@ lock_secrets() {
 	find "$path" -xdev -type f -exec chmod 0600 {} +
 }
 
-if [ "${1:-}" = "seed-config" ]; then
-	exit 0
-fi
-
 own_tree "$config" 0755 0644
-own_tree "$data" 0700 0600
-# own_tree locks the whole data tree. Re-open traversal for transcripts only:
-# the data root is execute-only (0711), runs stays 0700, transcript files are
-# 0644. open_transcripts chowns transcripts to the listener on every start,
-# including a directory this mkdir just created and a root-owned one reused
-# from the volume.
-open_transcripts "$data"
-open_sessions "$data"
+if data_owned; then
+	# Top-level modes only. The stamp says the tree walk already finished.
+	if [ "$(id -u)" = 0 ]; then
+		chown genesis:genesis "$data" "$data/runs"
+	fi
+	chmod 0711 "$data"
+	chmod 0700 "$data/runs"
+	if [ -d "$data/transcripts" ] && [ ! -L "$data/transcripts" ]; then
+		chmod 0755 "$data/transcripts"
+	fi
+	if [ -d "$data/sessions" ] && [ ! -L "$data/sessions" ]; then
+		chmod 0711 "$data/sessions"
+	fi
+else
+	own_tree "$data" 0700 0600
+	# own_tree locks the whole data tree. Re-open traversal for transcripts only:
+	# the data root is execute-only (0711), runs stays 0700, transcript files are
+	# 0644. open_transcripts chowns transcripts to the listener on every start,
+	# including a directory this mkdir just created and a root-owned one reused
+	# from the volume.
+	open_transcripts "$data"
+	open_sessions "$data"
+	touch "$data/.genesis-owned"
+	if [ "$(id -u)" = 0 ]; then
+		chown genesis:genesis "$data/.genesis-owned"
+	fi
+	chmod 0600 "$data/.genesis-owned"
+fi
 lock_providers
 lock_credentials
 lock_secrets

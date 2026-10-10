@@ -245,6 +245,47 @@ func TestControlListenerDownDoesNotInventToken(t *testing.T) {
 	if syncCode != http.StatusBadGateway {
 		t.Fatalf("sync while listener is down = %d", syncCode)
 	}
+
+	runsResponse, err := http.Get(panel.URL + "/api/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runsResponse.Body.Close()
+	runsBody, _ := io.ReadAll(runsResponse.Body)
+	if runsResponse.StatusCode != http.StatusBadGateway {
+		t.Fatalf("runs while listener is down = %d %s", runsResponse.StatusCode, runsBody)
+	}
+	if !strings.Contains(string(runsBody), "failed to reach listener") {
+		t.Fatalf("runs body = %s", runsBody)
+	}
+}
+
+func TestControlRunsProxyFailsWhenListenerUnreachable(t *testing.T) {
+	control := newControlServer(controlConfig{
+		listenerURL: "http://127.0.0.1:1",
+		agentsDir:   t.TempDir(),
+		rulesDir:    t.TempDir(),
+		dataDir:     t.TempDir(),
+	}, discardLogger())
+	runs, ok, err := control.runsFromListener(10)
+	if ok || runs != nil {
+		t.Fatalf("runsFromListener = %#v ok=%v", runs, ok)
+	}
+	if err == nil {
+		t.Fatal("runsFromListener expected connection error")
+	}
+
+	panel := httptest.NewServer(control)
+	t.Cleanup(panel.Close)
+	response, err := http.Get(panel.URL + "/api/runs/gen_missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("run detail proxy = %d %s", response.StatusCode, body)
+	}
 }
 
 func TestControlSyncRequiresJSONObject(t *testing.T) {

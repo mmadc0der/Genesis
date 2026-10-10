@@ -15,7 +15,8 @@ const (
 //	GET /api/publications?limit=&before=&after=&include_superseded=1
 //
 // before pages toward older stories (use next_before from the last page);
-// after returns stories newer than a sequence (use last_seq to poll).
+// after returns stories newer than a sequence. The panel hears new stories
+// on /api/live (topic publications); after is the same cursor that push uses.
 func (c *controlServer) handlePublications(w http.ResponseWriter, r *http.Request) {
 	before, err := parseCursor(r.URL.Query().Get("before"))
 	if err != nil {

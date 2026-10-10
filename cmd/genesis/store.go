@@ -60,6 +60,14 @@ type runStore struct {
 
 	mu       sync.Mutex
 	journals map[string]*runJournal
+	events   eventAppender
+}
+
+// eventAppender is the Eventer store. When it is set, lifecycle events go
+// there and the listener does not create events.jsonl.
+type eventAppender interface {
+	Append(eventJSON []byte) error
+	Flush() error
 }
 
 type runJournal struct {
@@ -76,6 +84,7 @@ type runJournal struct {
 	runDir        string
 	dshHome       string
 	file          *os.File
+	events        eventAppender
 	bus           *eventBus
 	redactor      *redactor
 	now           func() time.Time
@@ -217,6 +226,22 @@ func chmodTranscriptFiles(dir string) error {
 	return nil
 }
 
+// errJournalAbsent marks a missing per-run events.jsonl on the file-journal path.
+var errJournalAbsent = errors.New("run journal file absent")
+
+// transcriptWriteIsLifecycleError reports whether a writeTranscript failure should
+// become a dev.genesis.run.error lifecycle event. A missing events.jsonl is not
+// a run failure when this store journals through Eventer.
+func transcriptWriteIsLifecycleError(store *runStore, err error) bool {
+	if err == nil {
+		return false
+	}
+	if store != nil && store.events != nil && errors.Is(err, errJournalAbsent) {
+		return false
+	}
+	return true
+}
+
 // writeTranscript copies the run journal to a world-readable file the
 // oracle uid can open. The copy is the observation text already stored.
 // runs stays 0700; this does not chmod it.
@@ -230,10 +255,9 @@ func (s *runStore) writeTranscript(runID string) (string, error) {
 	if err := prepareTranscriptTree(s.dataDir, false); err != nil {
 		return "", err
 	}
-	source := filepath.Join(s.dataDir, runsDirName, runID, eventsFileName)
-	payload, err := readNoFollow(source)
+	payload, err := s.readRunJournalPayload(runID)
 	if err != nil {
-		return "", fmt.Errorf("read run journal: %w", err)
+		return "", err
 	}
 	dest := filepath.Join(s.dataDir, transcriptsDirName, runID+".jsonl")
 	temp := dest + ".tmp"
@@ -258,6 +282,28 @@ func (s *runStore) writeTranscript(runID string) (string, error) {
 	return absolute, nil
 }
 
+func (s *runStore) readRunJournalPayload(runID string) ([]byte, error) {
+	body, fromEventer, err := transcriptFromEventer(s, runID)
+	if fromEventer || err != nil {
+		if err != nil {
+			return nil, fmt.Errorf("read run journal: %w", err)
+		}
+		return body, nil
+	}
+	if s.events != nil {
+		return nil, nil
+	}
+	source := filepath.Join(s.dataDir, runsDirName, runID, eventsFileName)
+	payload, err := readNoFollow(source)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("read run journal: %w", errJournalAbsent)
+		}
+		return nil, fmt.Errorf("read run journal: %w", err)
+	}
+	return payload, nil
+}
+
 func readNoFollow(path string) ([]byte, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
@@ -275,7 +321,7 @@ func newRunStore(dataDir string, bus *eventBus, logger *slog.Logger) *runStore {
 	if bus == nil {
 		bus = newEventBus()
 	}
-	return &runStore{
+	store := &runStore{
 		dataDir:  dataDir,
 		bus:      bus,
 		logger:   logger,
@@ -284,6 +330,25 @@ func newRunStore(dataDir string, bus *eventBus, logger *slog.Logger) *runStore {
 		alive:    pidAlive,
 		journals: map[string]*runJournal{},
 	}
+	return store.attachEventer()
+}
+
+func (s *runStore) attachEventer() *runStore {
+	attachEventerStore(s)
+	return s
+}
+
+var attachEventerStore = func(*runStore) {}
+
+// transcriptFromEventer exports one run's events from the open Eventer store.
+// The bool is false when this process is not the store owner.
+var transcriptFromEventer = func(*runStore, string) ([]byte, bool, error) {
+	return nil, false, nil
+}
+
+// citedEventsFromEventer returns one run's events from the open Eventer store.
+var citedEventsFromEventer = func(*runStore, string) ([]lifecycleEvent, bool, error) {
+	return nil, false, nil
 }
 
 func (s *runStore) Accept(inv *invocation, secretValues []string) error {
@@ -337,10 +402,14 @@ func (s *runStore) Accept(inv *invocation, secretValues []string) error {
 		return err
 	}
 
-	eventsPath := filepath.Join(runDir, eventsFileName)
-	file, err := os.OpenFile(eventsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, dataFileMode)
-	if err != nil {
-		return fmt.Errorf("create events journal: %w", err)
+	var file *os.File
+	if s.events == nil {
+		eventsPath := filepath.Join(runDir, eventsFileName)
+		var openErr error
+		file, openErr = os.OpenFile(eventsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, dataFileMode)
+		if openErr != nil {
+			return fmt.Errorf("create events journal: %w", openErr)
+		}
 	}
 	causeID, causeSource, causeType := causeFromEvent(inv.Event)
 	journal := &runJournal{
@@ -351,16 +420,20 @@ func (s *runStore) Accept(inv *invocation, secretValues []string) error {
 		causeSrc:      causeSource,
 		causeType:     causeType,
 		correlationID: correlation,
+		sessionID:     inv.SessionID,
 		runDir:        runDir,
 		dshHome:       dshHome,
 		file:          file,
+		events:        s.events,
 		bus:           s.bus,
 		redactor:      newRedactor(secretValues),
 		now:           s.now,
 		newID:         s.newID,
 	}
 	if err := journal.Publish(lifecycleTypeAccepted, originGenesis, acceptedData(inv.Event)); err != nil {
-		_ = file.Close()
+		if file != nil {
+			_ = file.Close()
+		}
 		return err
 	}
 
@@ -368,6 +441,86 @@ func (s *runStore) Accept(inv *invocation, secretValues []string) error {
 	s.journals[inv.RunID] = journal
 	s.mu.Unlock()
 	return nil
+}
+
+// sessionBusy is true while this process still has an open journal for the
+// DSH session. A follow-up must wait; otherwise a second continue of an
+// ended parent starts a duplicate run beside the one already working.
+func (s *runStore) sessionBusy(sessionID string) bool {
+	if s == nil || sessionID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, journal := range s.journals {
+		if journal == nil || journal.sessionID != sessionID {
+			continue
+		}
+		journal.mu.Lock()
+		ended := journal.ended
+		journal.mu.Unlock()
+		if !ended {
+			return true
+		}
+	}
+	return false
+}
+
+// endInterrupted writes the error and end a crashed run never flushed.
+// events are that run's stored lifecycle, oldest first.
+func (s *runStore) endInterrupted(events []lifecycleEvent) error {
+	if s == nil || len(events) == 0 || journalHasEnd(events) {
+		return nil
+	}
+	first := events[0]
+	runID := first.RunID
+	if err := validateRunID(runID); err != nil {
+		return nil
+	}
+	runDir := filepath.Join(s.dataDir, runsDirName, runID)
+	if !journalHasStart(events) && hasQueuedRun(runDir) {
+		return nil
+	}
+	pid := startPID(events)
+	if pid > 0 && s.alive != nil && s.alive(pid) {
+		if s.logger != nil {
+			s.logger.Info("orphaned Genesis run left untouched", "genesis_run_id", runID, "pid", pid)
+		}
+		return nil
+	}
+	if s.events == nil {
+		return errors.New("eventer journal is not open")
+	}
+	correlationID := first.CorrelationID
+	if correlationID == "" {
+		correlationID = runID
+	}
+	dshHome := stableDshHome(s.dataDir, runID)
+	if record, err := readSessionRecord(filepath.Join(runDir, sessionFileName)); err == nil && record.DshHome != "" {
+		dshHome = record.DshHome
+	}
+	journal := &runJournal{
+		runID:         runID,
+		agent:         first.AgentID,
+		rule:          first.Rulefile,
+		causeID:       first.CauseID,
+		causeSrc:      first.CauseSource,
+		causeType:     first.CauseType,
+		correlationID: correlationID,
+		sessionID:     lastSessionID(events),
+		seq:           lastSequence(events),
+		runDir:        runDir,
+		dshHome:       dshHome,
+		events:        s.events,
+		bus:           s.bus,
+		redactor:      newRedactor(nil),
+		now:           s.now,
+		newID:         s.newID,
+	}
+	if err := journal.Publish(lifecycleTypeError, originGenesis, errorPayload(interruptedType, interruptedMsg)); err != nil {
+		return err
+	}
+	return journal.Publish(lifecycleTypeEnd, originGenesis, endPayload(-1, endStateFailed))
 }
 
 func (s *runStore) journal(runID string) *runJournal {
@@ -396,7 +549,17 @@ func (s *runStore) failAccept(runID, message string) {
 	s.release(runID)
 }
 
+// recoverEventerRuns closes Eventer-backed runs whose process is gone.
+// The file-journal path does not use it. The Eventer build replaces it.
+var recoverEventerRuns = func(*runStore) error { return nil }
+
 func (s *runStore) Recover() error {
+	if s.events != nil {
+		if err := recoverEventerRuns(s); err != nil {
+			return err
+		}
+		return nil
+	}
 	runs := filepath.Join(s.dataDir, runsDirName)
 	entries, err := os.ReadDir(runs)
 	if err != nil {
@@ -504,7 +667,7 @@ func (j *runJournal) Publish(eventType, origin string, data any) error {
 		return errors.New("run journal is not open")
 	}
 	j.mu.Lock()
-	if j.file == nil {
+	if j.file == nil && j.events == nil {
 		j.mu.Unlock()
 		return errors.New("run journal is closed")
 	}
@@ -568,24 +731,50 @@ func (j *runJournal) Publish(eventType, origin string, data any) error {
 			j.noteUsage(published.Data)
 		}
 		j.mu.Unlock()
-		j.bus.publish(published)
+		publishLiveEvent(j.bus, published)
 		return nil
 	}
-	if _, err := j.file.Write(append(payload, '\n')); err != nil {
-		j.seq--
-		j.mu.Unlock()
-		return fmt.Errorf("append lifecycle event: %w", err)
-	}
-	if err := j.file.Sync(); err != nil {
-		j.mu.Unlock()
-		return fmt.Errorf("flush lifecycle event: %w", err)
+	if j.events != nil {
+		if err := j.events.Append(payload); err != nil {
+			j.seq--
+			j.mu.Unlock()
+			return fmt.Errorf("append lifecycle event: %w", err)
+		}
+		if err := j.events.Flush(); err != nil {
+			j.mu.Unlock()
+			return fmt.Errorf("flush lifecycle event: %w", err)
+		}
+	} else {
+		if _, err := j.file.Write(append(payload, '\n')); err != nil {
+			j.seq--
+			j.mu.Unlock()
+			return fmt.Errorf("append lifecycle event: %w", err)
+		}
+		if err := j.file.Sync(); err != nil {
+			j.mu.Unlock()
+			return fmt.Errorf("flush lifecycle event: %w", err)
+		}
 	}
 	if eventType == lifecycleTypeChunk {
 		j.noteUsage(published.Data)
 	}
 	j.mu.Unlock()
-	j.bus.publish(published)
+	publishLiveEvent(j.bus, published)
 	return nil
+}
+
+// notePublishedEvent records a lifecycle event on the listener's in-memory
+// view at the moment it is published. The Eventer follower is not that view.
+var notePublishedEvent func(lifecycleEvent)
+
+func publishLiveEvent(bus *eventBus, event lifecycleEvent) {
+	if notePublishedEvent != nil {
+		notePublishedEvent(event)
+	}
+	if bus == nil {
+		return
+	}
+	bus.publish(event)
 }
 
 func (j *runJournal) Close() error {
@@ -753,9 +942,18 @@ func (s *runStore) loadCitedSession(runID string) (citedSession, error) {
 	if err := validateRunID(runID); err != nil {
 		return citedSession{}, err
 	}
-	events, err := readJournalPrefix(filepath.Join(s.dataDir, runsDirName, runID, eventsFileName))
-	if err != nil {
-		return citedSession{}, err
+	var events []lifecycleEvent
+	if fromEventer, ok, err := citedEventsFromEventer(s, runID); ok || err != nil {
+		if err != nil {
+			return citedSession{}, err
+		}
+		events = fromEventer
+	} else {
+		var err error
+		events, err = readJournalPrefix(filepath.Join(s.dataDir, runsDirName, runID, eventsFileName))
+		if err != nil {
+			return citedSession{}, err
+		}
 	}
 	if len(events) == 0 {
 		return citedSession{}, os.ErrNotExist

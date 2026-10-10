@@ -419,22 +419,22 @@ func publishUsage(t *testing.T, journal *runJournal, attempt string, usage map[s
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, data, ok := mapOnChunk("session-1", raw)
-	if !ok {
+	chunkNotice := mapOnChunk("session-1", raw)
+	if !chunkNotice.OK {
 		t.Fatalf("usage frame not mapped: %s", raw)
 	}
-	if err := journal.Publish(lifecycleTypeChunk, originSDKChunk, data); err != nil {
+	if err := journal.Publish(lifecycleTypeChunk, originSDKChunk, chunkNotice.Data); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func publishRawChunk(t *testing.T, journal *runJournal, payload string) {
 	t.Helper()
-	_, _, data, ok := mapOnChunk("session-1", json.RawMessage(payload))
-	if !ok {
+	chunkNotice := mapOnChunk("session-1", json.RawMessage(payload))
+	if !chunkNotice.OK {
 		t.Fatalf("chunk not mapped: %s", payload)
 	}
-	if err := journal.Publish(lifecycleTypeChunk, originSDKChunk, data); err != nil {
+	if err := journal.Publish(lifecycleTypeChunk, originSDKChunk, chunkNotice.Data); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -453,11 +453,11 @@ func journaledUsage(t *testing.T, attempt string, hit int) map[string]any {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, data, ok := mapOnChunk("session-1", raw)
-	if !ok {
+	chunkNotice := mapOnChunk("session-1", raw)
+	if !chunkNotice.OK {
 		t.Fatal("usage frame not mapped")
 	}
-	return data
+	return chunkNotice.Data
 }
 
 func usageLifecycle(id, attempt, usage string) lifecycleEvent {

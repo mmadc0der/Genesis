@@ -775,8 +775,26 @@ setup:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "setup requires user") {
+	if _, err := loadAgents(agentsDir); err == nil || !strings.Contains(err.Error(), "setup.workspace requires user") {
 		t.Fatalf("setup without user error = %v", err)
+	}
+
+	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(`
+instructions: stay
+cwd: /var/lib/genesis/config
+home: /home/genesis
+setup:
+  groups:
+    - reporter
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents, err = loadAgents(agentsDir)
+	if err != nil {
+		t.Fatalf("groups without user: %v", err)
+	}
+	if got := agents["janitor"].setupContract().Groups; len(got) != 1 || got[0] != "reporter" {
+		t.Fatalf("groups = %#v", got)
 	}
 
 	if err := os.WriteFile(agentsDir+"/janitor.yaml", []byte(`

@@ -1,11 +1,47 @@
+import { applyUsagePush } from "./usageLive";
+
 // One /api/live socket for the whole panel. The wire listens for run-list and
 // state frames. An open session adds a run subscription on that same socket.
+
+export type LivePublication = {
+  seq: number;
+  id: string;
+  time: string;
+  kind: string;
+  headline: string;
+  lede: string;
+  body?: string;
+  from: string;
+  to?: string;
+  run?: string;
+  refs?: string[];
+  supersedes?: string;
+  superseded_by?: string;
+};
+
+export type LivePublicationPage = {
+  publications: LivePublication[];
+  next_before?: number;
+  last_seq: number;
+};
 
 type LiveFrame = {
   op?: string;
   run_id?: string;
   run?: { run_id: string };
   event?: { type?: string; data?: unknown };
+  publications?: LivePublicationPage;
+  usage?: {
+    cache_hit: number;
+    cache_miss: number;
+    output: number;
+    reasoning: number;
+    total: number;
+    snapshot?: boolean;
+    runs?: Record<string, { cache_hit: number; cache_miss: number; output: number; reasoning: number; total: number }>;
+  };
+  snapshot?: boolean;
+  restart?: boolean;
 };
 
 type Listener = (frame: LiveFrame) => void;
@@ -24,6 +60,7 @@ function send(body: object) {
 function subscribeOpen() {
   send({ op: "subscribe", topic: "runs" });
   send({ op: "subscribe", topic: "state" });
+  send({ op: "subscribe", topic: "publications" });
   if (watchedRun) send({ op: "subscribe", topic: "run", run_id: watchedRun, after: "now" });
 }
 
@@ -42,6 +79,7 @@ function connect() {
     } catch {
       return;
     }
+    if (frame.op === "usage" && frame.usage) applyUsagePush(frame.usage);
     listeners.forEach((listener) => listener(frame));
   };
   next.onclose = () => {

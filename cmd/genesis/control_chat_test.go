@@ -174,7 +174,7 @@ func chatRequest(control *controlServer, method, target, contentType, body strin
 }
 
 func TestChatCondensesTheSessionAcrossRuns(t *testing.T) {
-	control, dataDir := chatServer(t, "http://127.0.0.1:1")
+	control, dataDir := chatServer(t, "")
 	chatJournal(t, dataDir, "gen_chat_a", "session-chat", "first ask", true)
 	chatJournal(t, dataDir, "gen_chat_b", "session-chat", "follow up", false)
 	chatJournal(t, dataDir, "gen_other", "session-other", "elsewhere", true)
@@ -244,6 +244,10 @@ func TestContinueSendsAnOperatorEventToTheListener(t *testing.T) {
 	var got map[string]any
 	status := http.StatusAccepted
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/events" {
+			http.NotFound(w, r)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		got = nil
 		_ = json.Unmarshal(body, &got)
@@ -306,5 +310,127 @@ func TestContinueSendsAnOperatorEventToTheListener(t *testing.T) {
 	chatJournal(t, dataDir, "gen_chat_c", "session-chat", "third", false)
 	if code := post("gen_chat_c", "application/json", `{"message":"x"}`).Code; code != http.StatusConflict {
 		t.Fatalf("open run = %d", code)
+	}
+}
+
+func TestChatLoadsFullTranscriptAfterOneLiveEvent(t *testing.T) {
+	runID := "gen_live_hist"
+	summary := runSummary{
+		RunID:      runID,
+		Agent:      "designer",
+		State:      runStateOpen,
+		SessionID:  "sess-live",
+		LastSeq:    "3",
+		Events:     3,
+		AcceptedAt: "2026-10-09T00:00:00Z",
+	}
+	assistantPayload := map[string]any{"phase": "message", "raw": map[string]any{"payload": map[string]any{"event": map[string]any{
+		"data": map[string]any{"message": map[string]any{"role": "assistant", "content": []map[string]any{{
+			"type": "text", "text": "hello from history",
+		}}}},
+	}}}}
+	liveAssistant := map[string]any{"phase": "message", "raw": map[string]any{"payload": map[string]any{"event": map[string]any{
+		"data": map[string]any{"message": map[string]any{"role": "assistant", "content": []map[string]any{{
+			"type": "text", "text": "live tail only",
+		}}}},
+	}}}}
+	transcript := []lifecycleEvent{
+		sampleLifecycle(runID, "1", lifecycleTypeAccepted, map[string]any{
+			"event_id": "evt_1", "event_source": controlSource, "event_type": "dev.genesis.user.message", "message": "first",
+		}),
+		sampleLifecycle(runID, "2", lifecycleTypeSessionCreated, map[string]any{"session_id": summary.SessionID}),
+		sampleLifecycle(runID, "3", "dev.genesis.run.assistant", assistantPayload),
+	}
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/runs":
+			writeJSON(w, http.StatusOK, map[string]any{"runs": []runSummary{summary}})
+		case r.Method == http.MethodGet && r.URL.Path == "/runs/"+runID:
+			writeJSON(w, http.StatusOK, runDetail{runSummary: summary, EventCount: summary.Events})
+		case r.Method == http.MethodGet && r.URL.Path == "/runs/"+runID+"/transcript":
+			writeJSON(w, http.StatusOK, eventsPage{RunID: runID, Events: transcript})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer listener.Close()
+
+	control, _ := chatServer(t, listener.URL)
+	control.deliverListenerEvent(sampleLifecycle(runID, "99", "dev.genesis.run.assistant", liveAssistant))
+
+	chat := chatRequest(control, http.MethodGet, "/api/runs/"+runID+"/chat", "", "")
+	if chat.Code != http.StatusOK {
+		t.Fatalf("chat = %d %s", chat.Code, chat.Body.String())
+	}
+	var session chatSession
+	if err := json.Unmarshal(chat.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Runs) != 1 || session.Runs[0].Trigger.Message != "first" {
+		t.Fatalf("expected full transcript in chat, got %#v", session.Runs)
+	}
+	foundHistory := false
+	for _, item := range session.Runs[0].Items {
+		if item.Kind == chatKindText && strings.Contains(item.Text, "hello from history") {
+			foundHistory = true
+		}
+		if item.Kind == chatKindText && strings.Contains(item.Text, "live tail only") {
+			t.Fatal("chat used live suffix instead of listener transcript")
+		}
+	}
+	if !foundHistory {
+		t.Fatalf("missing history item: %#v", session.Runs[0].Items)
+	}
+}
+
+func TestContinueWithoutJournalUsesListener(t *testing.T) {
+	summary := runSummary{
+		RunID:      "gen_designer",
+		Agent:      "designer",
+		State:      runStateCompleted,
+		SessionID:  "sess-designer",
+		LastSeq:    "4",
+		Events:     4,
+		AcceptedAt: "2026-10-09T00:00:00Z",
+		EndedAt:    "2026-10-09T00:01:00Z",
+	}
+	transcript := []lifecycleEvent{
+		sampleLifecycle(summary.RunID, "1", lifecycleTypeAccepted, map[string]any{
+			"event_id": "evt_1", "event_source": controlSource, "event_type": "dev.genesis.user.message", "message": "design",
+		}),
+		sampleLifecycle(summary.RunID, "2", lifecycleTypeSessionCreated, map[string]any{"session_id": summary.SessionID}),
+		sampleLifecycle(summary.RunID, "3", lifecycleTypeEnd, endPayload(0, endStateCompleted)),
+	}
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/runs":
+			writeJSON(w, http.StatusOK, map[string]any{"runs": []runSummary{summary}})
+		case r.Method == http.MethodGet && r.URL.Path == "/runs/gen_designer":
+			writeJSON(w, http.StatusOK, runDetail{runSummary: summary, EventCount: summary.Events})
+		case r.Method == http.MethodGet && r.URL.Path == "/runs/gen_designer/events":
+			writeJSON(w, http.StatusOK, eventsPage{
+				RunID:  summary.RunID,
+				Events: []lifecycleEvent{{ID: "evt_1", Type: lifecycleTypeEnd, RunID: summary.RunID, Sequence: "4"}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/runs/gen_designer/transcript":
+			writeJSON(w, http.StatusOK, eventsPage{RunID: summary.RunID, Events: transcript})
+		case r.Method == http.MethodPost && r.URL.Path == "/events":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"runs":[{"rule":"session.continue","agent":"designer","run_id":"gen_next"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer listener.Close()
+
+	control, _ := chatServer(t, listener.URL)
+	chat := chatRequest(control, http.MethodGet, "/api/runs/gen_designer/chat", "", "")
+	if chat.Code != http.StatusOK {
+		t.Fatalf("chat = %d %s", chat.Code, chat.Body.String())
+	}
+	response := chatRequest(control, http.MethodPost, "/api/runs/gen_designer/continue", "application/json", `{"message":"go on"}`)
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"run_id":"gen_next"`) {
+		t.Fatalf("continue = %d %s", response.Code, response.Body.String())
 	}
 }

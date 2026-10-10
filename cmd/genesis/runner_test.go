@@ -412,13 +412,14 @@ printf '%s\n' 'this is not json'
 }
 
 func TestMapperAcceptsTrajectoryEvents(t *testing.T) {
-	eventType, origin, data, ok := mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	notice := mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
 		"event":{"type":"assistant/message","seq":9,"data":{"message":{"content":[{"type":"text","text":"hello"}]}}}
 	}`))
-	if !ok || eventType != lifecycleTypeAssistant || origin != originSDKEvent {
-		t.Fatalf("assistant/message mapping = type %q origin %q ok %v", eventType, origin, ok)
+	if !notice.OK || notice.Type != lifecycleTypeAssistant || notice.Origin != originSDKEvent {
+		t.Fatalf("assistant/message mapping = type %q origin %q ok %v", notice.Type, notice.Origin, notice.OK)
 	}
+	data := notice.Data
 	if data["phase"] != "message" {
 		t.Fatalf("assistant payload = %#v", data)
 	}
@@ -433,22 +434,23 @@ func TestMapperAcceptsTrajectoryEvents(t *testing.T) {
 		t.Fatalf("assistant text = %#v", messageData)
 	}
 
-	eventType, origin, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	notice = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
 		"event":{"type":"assistant/attempt","seq":8,"data":{"stream":[]}}
 	}`))
-	if !ok || eventType != lifecycleTypeAssistant || data["phase"] != "attempt" {
-		t.Fatalf("assistant/attempt mapping = type %q phase %v ok %v", eventType, data["phase"], ok)
+	if !notice.OK || notice.Type != lifecycleTypeAssistant || notice.Data["phase"] != "attempt" {
+		t.Fatalf("assistant/attempt mapping = type %q phase %v ok %v", notice.Type, notice.Data["phase"], notice.OK)
 	}
 
-	eventType, origin, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	notice = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
 		"event":{"type":"tool/call","seq":5,"data":{"callId":"c1","name":"bash","arguments":"{\"command\":\"pwd\"}"}}
 	}`))
-	if !ok || eventType != lifecycleTypeTool || origin != originSDKEvent {
-		t.Fatalf("tool/call mapping = type %q origin %q ok %v", eventType, origin, ok)
+	if !notice.OK || notice.Type != lifecycleTypeTool || notice.Origin != originSDKEvent {
+		t.Fatalf("tool/call mapping = type %q origin %q ok %v", notice.Type, notice.Origin, notice.OK)
 	}
-	if data["name"] != "bash" || data["tool_call_id"] != "c1" {
+	data = notice.Data
+	if data["name"] != "bash" || data["tool_call_id"] != "c1" || data["arguments"] != `{"command":"pwd"}` {
 		t.Fatalf("tool payload = %#v", data)
 	}
 	raw, _ = data["raw"].(map[string]any)
@@ -459,36 +461,39 @@ func TestMapperAcceptsTrajectoryEvents(t *testing.T) {
 		t.Fatalf("tool arguments = %#v", toolData)
 	}
 
-	eventType, _, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	notice = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
 		"event":{"type":"turn/end","seq":6,"data":{"reason":{"kind":"error","error":{"message":"bad key","code":"AUTH","status":401}}}}
 	}`))
-	if !ok || eventType != lifecycleTypeTurn || data["reason_kind"] != "error" || data["turn_failure"] != true {
-		t.Fatalf("turn/end mapping = type %q data %#v ok %v", eventType, data, ok)
+	data = notice.Data
+	if !notice.OK || notice.Type != lifecycleTypeTurn || data["reason_kind"] != "error" || data["turn_failure"] != true {
+		t.Fatalf("turn/end mapping = type %q data %#v ok %v", notice.Type, data, notice.OK)
 	}
 	if data["error_message"] != "bad key" || data["error_code"] != "AUTH" || data["error_status"] != 401 {
 		t.Fatalf("turn failure fields = %#v", data)
 	}
 
-	eventType, origin, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	notice = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
 		"event":{"type":"llm/retry","seq":3,"data":{"retry":2,"failure":{"message":"slow down","code":"RATE_LIMIT","status":429}}}
 	}`))
-	if !ok || eventType != lifecycleTypeRetry || origin != originSDKEvent {
-		t.Fatalf("llm/retry mapping = type %q origin %q ok %v", eventType, origin, ok)
+	data = notice.Data
+	if !notice.OK || notice.Type != lifecycleTypeRetry || notice.Origin != originSDKEvent {
+		t.Fatalf("llm/retry mapping = type %q origin %q ok %v", notice.Type, notice.Origin, notice.OK)
 	}
 	if data["retry"] != 2 || data["code"] != "RATE_LIMIT" || data["message"] != "slow down" || data["status"] != 429 {
 		t.Fatalf("retry payload = %#v", data)
 	}
 
-	eventType, origin, data, ok = mapSDKNotification("session-1", "on_chunk", json.RawMessage(`{
+	notice = mapSDKNotification("session-1", "on_chunk", json.RawMessage(`{
 		"type":"chunk",
 		"attemptId":"a1",
 		"sessionId":"session-1",
 		"chunk":{"type":"text-delta","index":0,"text":"hello"}
 	}`))
-	if !ok || eventType != lifecycleTypeChunk || origin != "sdk.session.on_chunk" {
-		t.Fatalf("on_chunk mapping = type %q origin %q ok %v", eventType, origin, ok)
+	data = notice.Data
+	if !notice.OK || notice.Type != lifecycleTypeChunk || notice.Origin != "sdk.session.on_chunk" {
+		t.Fatalf("on_chunk mapping = type %q origin %q ok %v", notice.Type, notice.Origin, notice.OK)
 	}
 	if data["frame"] != "chunk" || data["chunk_type"] != "text-delta" || data["attempt_id"] != "a1" {
 		t.Fatalf("chunk payload = %#v", data)
@@ -500,25 +505,34 @@ func TestMapperAcceptsTrajectoryEvents(t *testing.T) {
 		t.Fatalf("chunk text = %#v", chunkPayload)
 	}
 
-	_, origin, _, ok = mapSDKNotification("session-1", "on_chunk", json.RawMessage(`{"type":"chunk","chunk":{"type":"usage","usage":{}}}`))
-	if ok || origin != originSDKOther {
-		t.Fatalf("chunk without session mapping ok=%v origin=%q", ok, origin)
+	notice = mapSDKNotification("session-1", "on_chunk", json.RawMessage(`{"type":"chunk","chunk":{"type":"usage","usage":{}}}`))
+	data = notice.Data
+	if !notice.OK || notice.Apply || notice.Type != lifecycleTypeChunk || notice.Origin != originSDKChunk {
+		t.Fatalf("usage chunk without session mapping type=%q origin=%q ok=%v apply=%v", notice.Type, notice.Origin, notice.OK, notice.Apply)
+	}
+	if data["chunk_type"] != "usage" {
+		t.Fatalf("usage chunk payload = %#v", data)
 	}
 
-	eventType, origin, _, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	notice = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
-		"event":{"type":"user/message","seq":1,"data":{}}
+		"event":{"type":"user/message","seq":1,"data":{"message":{"role":"user","content":[{"type":"text","text":"hi"}]}}}
 	}`))
-	if ok || eventType != "" || origin != originSDKEvent {
-		t.Fatalf("user/message mapping = type %q origin %q ok %v", eventType, origin, ok)
+	data = notice.Data
+	if !notice.OK || !notice.Apply || notice.Type != lifecycleTypeUser || notice.Origin != originSDKEvent {
+		t.Fatalf("user/message mapping = type %q origin %q ok %v apply %v", notice.Type, notice.Origin, notice.OK, notice.Apply)
+	}
+	if data["phase"] != "message" || data["sdk_type"] != "user/message" || data["sdk_seq"] != int64(1) {
+		t.Fatalf("user payload = %#v", data)
 	}
 
-	eventType, origin, data, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	notice = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"session-1",
 		"event":{"type":"turn/start","seq":1,"data":{}}
 	}`))
-	if !ok || eventType != lifecycleTypeTurn || origin != originSDKEvent {
-		t.Fatalf("turn/start mapping = type %q origin %q ok %v", eventType, origin, ok)
+	data = notice.Data
+	if !notice.OK || notice.Type != lifecycleTypeTurn || notice.Origin != originSDKEvent {
+		t.Fatalf("turn/start mapping = type %q origin %q ok %v", notice.Type, notice.Origin, notice.OK)
 	}
 	if data["phase"] != "start" {
 		t.Fatalf("payload = %#v", data)
@@ -528,20 +542,38 @@ func TestMapperAcceptsTrajectoryEvents(t *testing.T) {
 		t.Fatalf("raw = %#v", raw)
 	}
 
-	_, origin, _, ok = mapSDKNotification("session-1", "session.status", json.RawMessage(`{"sessionId":"session-1","status":"idle"}`))
-	if ok || origin != originSDKStatus {
-		t.Fatalf("session.status mapping ok=%v origin=%q", ok, origin)
+	notice = mapSDKNotification("session-1", "session.status", json.RawMessage(`{"sessionId":"session-1","status":"idle"}`))
+	data = notice.Data
+	if !notice.OK || notice.Apply || notice.Type != lifecycleTypeStatus || notice.Origin != originSDKStatus || data["status"] != "idle" {
+		t.Fatalf("session.status mapping type=%q origin=%q ok=%v apply=%v data=%#v", notice.Type, notice.Origin, notice.OK, notice.Apply, data)
 	}
-	_, origin, _, ok = mapSDKNotification("session-1", "subagent.started", json.RawMessage(`{}`))
-	if ok || origin != originSDKOther {
-		t.Fatalf("subagent mapping ok=%v origin=%q", ok, origin)
+	notice = mapSDKNotification("session-1", "subagent.started", json.RawMessage(`{"sessionId":"child"}`))
+	data = notice.Data
+	if !notice.OK || notice.Apply || notice.Type != lifecycleTypeSDK || notice.Origin != originSDKOther || data["sdk_type"] != "subagent.started" {
+		t.Fatalf("subagent mapping type=%q origin=%q ok=%v apply=%v data=%#v", notice.Type, notice.Origin, notice.OK, notice.Apply, data)
 	}
-	_, origin, _, ok = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+	if data["sdk_session_id"] != "child" {
+		t.Fatalf("subagent session = %#v", data)
+	}
+	notice = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
 		"sessionId":"child",
 		"event":{"type":"turn/start","seq":1,"data":{}}
 	}`))
-	if ok || origin != originSDKOther {
-		t.Fatalf("foreign session mapping ok=%v origin=%q", ok, origin)
+	data = notice.Data
+	if !notice.OK || notice.Apply || notice.Type != lifecycleTypeTurn || notice.Origin != originSDKEvent || data["sdk_session_id"] != "child" {
+		t.Fatalf("foreign session mapping type=%q origin=%q ok=%v apply=%v data=%#v", notice.Type, notice.Origin, notice.OK, notice.Apply, data)
+	}
+	raw, _ = data["raw"].(map[string]any)
+	if raw["sdk_session_id"] != "child" {
+		t.Fatalf("embedded raw lost sdk_session_id = %#v", raw)
+	}
+	notice = mapSDKNotification("session-1", "session.event", json.RawMessage(`{
+		"sessionId":"session-1",
+		"event":{"type":"widget/ping","seq":4,"data":{"n":1}}
+	}`))
+	data = notice.Data
+	if !notice.OK || notice.Type != lifecycleTypeSessionEvent || notice.Origin != originSDKEvent || data["sdk_type"] != "widget/ping" {
+		t.Fatalf("unknown session event type=%q origin=%q ok=%v data=%#v", notice.Type, notice.Origin, notice.OK, data)
 	}
 }
 
