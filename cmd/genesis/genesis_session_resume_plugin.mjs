@@ -18,13 +18,20 @@
  *
  * The Python SDK's session.run() blocks on session/prompt until agent.followup
  * completes the RPC, then waits for session.status idle (see deepseek_harness
- * Session.run). After wakeDriver, the runtime normally issues a second followup
- * when the turn ends; if the persisted log already ends on turn/end (parent run
- * finished the turn before exit), only one followup arrives and session.run
- * hangs unless we ack the prompt immediately. The ack keeps the prompt message
- * id: Session.run waits for agent/inbox/spliced of that id, then status idle.
- * A new id is spliced and the restart waits forever. Mid-turn restarts ack on
- * turn/end append instead, with the same id.
+ * Session.run). finish_reason is the last root turn/end in that interval, and
+ * it is None when the interval goes idle with no turn. An empty ack does that:
+ * the receipt is spliced and no model turn starts.
+ *
+ * After wakeDriver, the runtime normally issues a second followup when the turn
+ * ends. Mid-turn restarts therefore return from the first followup without
+ * completing the RPC, and ack on turn/end append. The ack keeps the prompt
+ * message id: Session.run waits for agent/inbox/spliced of that id. A new id
+ * is spliced and the restart waits forever.
+ *
+ * A log that already ends on turn/end has no in-flight turn to wake. The
+ * restart still has to complete session/prompt with the original message id,
+ * and the content has to be a real user prompt or the resumed session stays
+ * idle. That prompt asks the model to continue the persisted task.
  *
  * A log is session.jsonl or session.vN.jsonl under
  * $DSH_HOME/sessions/<project>/<encoded session id>/. The current pin writes
@@ -40,6 +47,7 @@ export const inject = ['agents']
 const SESSION_LOG_NAME = /^session(?:\.v[1-9][0-9]*)?\.jsonl$/
 const RESTART_MESSAGE_ID = 'genesis-transport-restart'
 const PROMPT_ACK_MESSAGE_ID = 'genesis-transport-prompt-ack'
+const TRANSPORT_CONTINUE_TEXT = 'The previous model request failed because the DeepSeek API transport failed after retries. Continue the same task from the session history. Do not start over.'
 
 export function encodeSegment(raw) {
   if (typeof raw !== 'string' || raw.length === 0) {
@@ -170,6 +178,16 @@ function promptAckMessage(source) {
   }
 }
 
+function transportContinueMessage(source) {
+  const continued = source && typeof source === 'object' ? { ...source } : {}
+  if (typeof continued.id !== 'string' || continued.id.length === 0) {
+    continued.id = PROMPT_ACK_MESSAGE_ID
+  }
+  continued.role = 'user'
+  continued.content = [{ type: 'text', text: TRANSPORT_CONTINUE_TEXT }]
+  return continued
+}
+
 function armTransportRestart(agent, sessionId) {
   if (
     !agent ||
@@ -223,7 +241,7 @@ function armTransportRestart(agent, sessionId) {
       droppedTransportPrompt = true
       promptMessage = message
       if (resumeWithIdleTurn) {
-        return originalFollowup.call(this, promptAckMessage(message))
+        return originalFollowup.call(this, transportContinueMessage(message))
       }
       pendingTurnAck = true
       agent.wakeDriver()

@@ -714,7 +714,7 @@ const agents = {
   async resume() {
     const agent = {
       followup(message) {
-        calls.push(["followup", message && message.id]);
+        calls.push(["followup", message && message.id, message]);
       },
       wakeDriver() {
         calls.push("wake");
@@ -734,10 +734,20 @@ const agents = {
 };
 apply({ agents });
 const handle = await agents.create({ sessionId: process.env.SESSION_ID });
-handle.agent.followup({ id: "user-1", role: "user", content: [{ type: "text", text: " " }] });
+handle.agent.followup({ id: "user-1", role: "user", content: [{ type: "text", text: " " }], source: { kind: "user" } });
 const followups = calls.filter((call) => Array.isArray(call) && call[0] === "followup");
 if (followups.length !== 1 || followups[0][1] !== "user-1") {
   console.error(JSON.stringify({ followups, calls }));
+  process.exit(1);
+}
+const sent = followups[0][2];
+const text = sent && sent.content && sent.content[0] && sent.content[0].text;
+if (!text || !text.includes("transport failed")) {
+  console.error(JSON.stringify(sent));
+  process.exit(1);
+}
+if (!sent.source || sent.source.kind !== "user") {
+  console.error(JSON.stringify(sent));
   process.exit(1);
 }
 if (calls.includes("wake")) {
