@@ -317,12 +317,8 @@ write. Secrets, environments, webhook configuration, deletion, and
 rotation stay unsupported. App delivery ingress is separate from those
 repository webhook writes and does not mint a run token or check out a
 repository. See [webhooks.md](webhooks.md). The contract is
-[repositories.md](repositories.md). CI uses a local fake GitHub API. The
-manual probes in
-[wsl-readonly-observation.md](wsl-readonly-observation.md) and
-[ssh-client-verification.md](ssh-client-verification.md) were written when
-a repos sync only read. A current repos sync writes the adopted shape, so
-do not rerun them expecting GitHub to stay unchanged.
+[repositories.md](repositories.md). CI uses a local fake GitHub API. Where
+a failed observation shows up is in [troubleshooting.md](troubleshooting.md).
 
 ## Per-run installation token and checkout
 

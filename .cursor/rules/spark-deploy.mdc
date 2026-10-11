@@ -1,0 +1,49 @@
+---
+description: Spark compose deploy — restart containers in place; never recreate genesis
+alwaysApply: true
+---
+
+# Spark deploy
+
+Only `docker compose -p spark -f compose.yaml -f /tmp/spark-compose.override.yaml`. Never the default genesis stack or non-spark containers.
+
+`control` has no Dockerfile. It uses image `genesis:v2` and serves UI from `/usr/share/genesis/web` inside that image. The override bind-mounts `bin/genesis-spark` onto `/usr/local/bin/genesis` in both `genesis` and `control`, which hides the image binary.
+
+Do not `docker compose build` service `genesis`. Do not retag or replace the running `genesis:v2` image.
+
+Agent homes restored from `genesis-homes-2026-10-05.tar` live in the writable layer of `spark-genesis-1` at `/home` (~27G). Deleting or recreating that container destroys them. Never `docker rm` it, never `docker compose down`, and never `up --force-recreate` (or any recreate) of `genesis`.
+
+## Frontend
+
+Build the Dockerfile `web` stage only, export `dist`, bind-mount it on `control` in `/tmp/spark-compose.override.yaml` (`source: <dist>`, `target: /usr/share/genesis/web`, `read_only: true`) if that mount is missing, then recreate only `control`. Never recreate `genesis` for a frontend change.
+
+```bash
+docker build -f Dockerfile --target web -t genesis-web:spark .
+cid=$(docker create genesis-web:spark)
+rm -rf web/dist && docker cp "$cid":/src/dist web/dist
+docker rm "$cid"
+docker compose -p spark -f compose.yaml -f /tmp/spark-compose.override.yaml up -d --force-recreate --no-deps control
+```
+
+## Genesis binary
+
+The image is `python:3.12-bookworm`. A host Ubuntu 24.04 binary needs glibc 2.39 and crash-loops. Build with a throwaway Bookworm stage. Do not `docker compose build genesis`.
+
+```bash
+docker build -f Dockerfile --target build -t genesis-build:spark .
+cid=$(docker create genesis-build:spark)
+docker cp "$cid":/out/genesis bin/genesis-spark
+docker rm "$cid"
+chmod 0755 bin/genesis-spark
+```
+
+The override bind-mounts `bin/genesis-spark` onto `/usr/local/bin/genesis`, so copying the new binary onto `bin/genesis-spark` (or `docker cp` onto that path) replaces the binary inside the existing containers. Then restart in place. Do not `docker rm`, `down`, or `--force-recreate`.
+
+`genesis` and `control` share that bind-mounted binary, so a binary change needs both processes restarted. Prefer `docker restart` for both. Do not recreate either container for a binary change. A frontend-only change still recreates only `control` (section above) and leaves `genesis` running.
+
+```bash
+docker restart spark-genesis-1
+docker restart spark-control-1
+```
+
+Replacing `bin/genesis-spark` changes the file Docker Desktop bind-mounts. A restart can fail with `error mounting .../docker-desktop-bind-mounts/... to rootfs at /usr/local/bin/genesis: no such file or directory` while the container record still exists. Wait until that proxy file is back, then `docker start` the same container. Do not recreate it to clear the error.

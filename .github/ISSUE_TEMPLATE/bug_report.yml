@@ -1,0 +1,31 @@
+name: Bug report
+description: A genesis listen, launch, or control failure
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: |
+        Numbered steps: the command and flags, the CloudEvent body if you posted one, and the agent and rule YAML with secrets removed.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: The commit you built.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Listener stdout (JSON slog), and for the run the events.jsonl, stderr.log, result.json, and session.json under the -data directory (default genesis-data; see docs/troubleshooting.md). Compose users can attach docker compose logs for genesis and control. Do not include DEEPSEEK_API_KEY, GENESIS_SYNC_TOKEN, or other secrets.
+    validations:
+      required: true

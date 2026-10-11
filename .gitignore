@@ -1,5 +1,6 @@
 .venv/
 bin/
+tmp/
 __pycache__/
 *.py[cod]
 .env

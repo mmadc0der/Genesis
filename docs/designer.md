@@ -71,43 +71,12 @@ and no bearer. Port `8790` is the control panel, not that path. `source`
 is `urn:genesis:agent:<agent id>`. `202` returns the new run ids. `204`
 means nothing matched. Any other status is a listener failure.
 
-`genesis` is on PATH for every agent, including a dedicated OS user. Agents
-run `genesis job` and `genesis schedule`. They do not invent packages, PEMs,
-or sync tokens, and they do not curl with `GENESIS_SYNC_TOKEN`. Both
-commands post one CloudEvent on the listener accept path and do not send a
-bearer.
-
-Use `genesis job` when work must keep running after the turn.
-`genesis job start --emit '{CloudEvent}' -- <command>` starts that command.
-When the command exits, Genesis posts that CloudEvent so a rule can match
-it and another run can resume. Genesis stamps the event id and source on
-every job and schedule post and rejects type `dev.genesis.agent.finished`,
-type `dev.genesis.session.continue`, and type
-`dev.genesis.publication.submitted`. Neural-net training is the example:
-wake when training ends. `genesis job list`, `genesis job logs <id>`, and
-`genesis job stop <id>` show and stop it.
-
-Use `genesis schedule` when the same event should fire on a duration.
-`genesis schedule --each=15m --emit '{CloudEvent}'` repeats that one event.
-`--each` is a duration of at least 1m and at most 168h. The first fire is
-one interval after the schedule is created. `genesis schedule list` and
-`genesis schedule cancel <id>` manage it. This is not a `rules.d` interval.
-Do not write `interval` or `cron` in rule YAML. The loader rejects those
-fields. A `rules.d` timer, when one exists, is a listener clock on the rule
-file. The CLI is the ticker agents start, and it fires by posting to
-`/events`.
-
-Use `genesis events` to search, grep, tail, and follow events across the loop:
-- `genesis events`: print the 20 most recent events as JSON lines.
-- `genesis events -n <N>` / `--tail <N>`: show the last N events.
-- `genesis events -f` / `--follow`: follow live events as they arrive (`tail -f` semantics).
-- `genesis events "<pattern>"` / `--grep "<pattern>"`: grep events matching regex or text pattern.
-- `genesis events -i` / `--ignore-case`: case-insensitive pattern matching.
-- `genesis events --type <type>`: filter by CloudEvent type (e.g. `dev.genesis.agent.finished`).
-- `genesis events --agent <agent>`: filter by agent id.
-- `genesis events --run <run_id>`: filter by run id.
-- `genesis events --since <duration|timestamp>`: filter events since duration (e.g. `10m`, `1h`, `1d`) or timestamp.
-- `genesis events --format <json|short|pretty>`: choose output format (`json` line-by-line is default for pipes and jq).
+`genesis` is on PATH for every agent, including a dedicated OS user. A
+worker uses `genesis job` and `genesis schedule` for work that outlives the
+turn or repeats on an interval. It does not invent packages, PEMs, or sync
+tokens, and it does not curl with `GENESIS_SYNC_TOKEN`. Those subcommands,
+and `genesis events`, are in [cli.md](cli.md). Do not write `interval` or
+`cron` in rule YAML. The loader rejects those fields.
 
 The finish event and session continuation belong in a reviewer's
 instructions. Other workers do not need them. When a session ends, the
@@ -199,141 +168,29 @@ defaults.
 `GENESIS_SYNC_TOKEN` is not in the designer environment. The control process
 holds the token.
 
-## Named volume upgrades
+## Where to build and start
 
-Compose mounts named volume `genesis-config` at `/var/lib/genesis/config`.
-The image keeps shippable YAML in `/usr/share/genesis/defaults`.
+Bare-metal and Compose builds, including where the minimal and extended
+credential sets go, are in [build.md](build.md). The first listener and
+control start is in [quickstart.md](quickstart.md). Flags are in
+[cli.md](cli.md). The control API is in [control.md](control.md).
 
-On every listener start the entrypoint copies **missing** default YAML files
-into the volume. Existing files are never replaced, including dest entries
-that are dangling or live symlinks. Only regular `*.yaml` / `*.yml` files
-whose stems match agent/rule IDs are copied; source and dest directories
-must not be symlinks. Operator-created files stay. A deleted default
-filename is treated as missing and is copied again. Volume `chown`/`chmod`
-applies only to real files and directories and does not follow symlinks.
+## Named volume
 
-That is how an upgraded image can deliver `designer.yaml` onto a volume that
-already has a janitor and example rule, without silently clobbering desired
-config.
+Compose keeps agents, rules, and repos on the config volume at
+`/var/lib/genesis/config`. On listener start the entrypoint copies
+**missing** default YAML from `/usr/share/genesis/defaults`. Existing files
+are left unchanged, so an upgraded image can add `designer.yaml` without
+replacing a janitor the operator already edited. A deleted default filename
+is copied again. Stopping Compose keeps the volume. Deleting volumes is the
+destructive reset, and the next start reseeds the image defaults. Those
+commands and the volume names are in [build.md](build.md) and
+[run.md](run.md).
 
-`docker compose down` keeps the volume. `docker compose down -v` deletes it.
-The next `up` reseeds every default file into a new volume. That reset is
-destructive.
-
-## Interpreting a shared-UID “success”
-
-This signature is **not** a passing dedicated-user test:
-
-- `getent passwd` inside the listener container lists `genesis` and does not
-  list `workspace-janitor`
-- files the agent wrote are owned by `genesis`
-- the agent has no `user` (shared listener UID)
-- active and draft digests match
-
-It is the expected picture of **persisted pre-upgrade named-volume config**.
-A volume created before dedicated `user:` shipped still holds the old
-shared-UID janitor YAML. The entrypoint leaves that file alone. Launch
-therefore never reconciles `workspace-janitor`. The listener loads those
-files at start, so the cache digest equals the draft digest. Matching
-digests prove disk and memory agree; they do not prove the volume matches
-image defaults.
-
-The designer can still appear on that volume after an upgrade, because it
-was a missing filename. Seeing `designer` with Shared listener UID next to a
-janitor that also lacks `user:` is the upgrade-seed path working as
-designed.
-
-## Non-destructive inspect and update
-
-From a WSL clone of the repo, with Compose already up. This does not delete
-volumes.
-
-```sh
-cd ~/src/genesis
-
-echo '--- volume janitor (desired) ---'
-docker compose exec -u genesis genesis sed -n '1,20p' \
-  /var/lib/genesis/config/agents.d/workspace-janitor.yaml
-
-echo '--- image default janitor ---'
-docker compose exec genesis sed -n '1,20p' \
-  /usr/share/genesis/defaults/agents.d/workspace-janitor.yaml
-
-echo '--- volume vs defaults filenames ---'
-docker compose exec -u genesis genesis ls -l \
-  /var/lib/genesis/config/agents.d /var/lib/genesis/config/rules.d
-docker compose exec genesis ls -l \
-  /usr/share/genesis/defaults/agents.d /usr/share/genesis/defaults/rules.d
-
-echo '--- OS users ---'
-docker compose exec genesis getent passwd genesis workspace-janitor || true
-
-echo '--- panel agents and digests ---'
-curl -s http://127.0.0.1:8790/api/agents
-curl -s http://127.0.0.1:8790/api/state | python3 -c \
-  'import json,sys; s=json.load(sys.stdin); print(s.get("drift"), s.get("active",{}).get("digest"), s.get("desired",{}).get("digest"))'
-```
-
-If the volume janitor has no `user:` line and the image default does, copy
-only that file if you **intend** to take the shipped dedicated-user janitor.
-That overwrites the volume file; it is an operator choice, not the
-entrypoint.
-
-```sh
-docker compose exec -u genesis genesis cp \
-  /usr/share/genesis/defaults/agents.d/workspace-janitor.yaml \
-  /var/lib/genesis/config/agents.d/workspace-janitor.yaml
-curl -i http://127.0.0.1:8790/api/sync \
-  -H 'Content-Type: application/json' \
-  --data '{"scope":["agents","rules"]}'
-docker compose exec genesis getent passwd workspace-janitor
-```
-
-To add only the designer without touching janitor, confirm the files exist
-(the entrypoint should have copied them) and Sync:
-
-```sh
-docker compose exec -u genesis genesis test -f \
-  /var/lib/genesis/config/agents.d/designer.yaml
-docker compose exec -u genesis genesis test -f \
-  /var/lib/genesis/config/rules.d/designer.yaml
-curl -i http://127.0.0.1:8790/api/sync \
-  -H 'Content-Type: application/json' \
-  --data '{"scope":["agents","rules"]}'
-```
-
-Then `POST /api/messages` with `{"rule":"designer.yaml","message":"…"}` and
-wait for the run. Edits remain drafts until Sync.
-
-## Destructive clean-volume smoke
-
-This deletes **both** named volumes, including run journals and any operator
-YAML. Use it only when you want image defaults and empty `genesis-data`.
-
-```sh
-cd ~/src/genesis
-export DEEPSEEK_API_KEY='replace-with-a-real-key'
-export GENESIS_SYNC_TOKEN='compose-sync-token'
-sh scripts/wsl-docker-smoke.sh --reset-volumes
-```
-
-Equivalent Compose steps:
-
-```sh
-docker compose down -v
-docker compose up --build -d
-# wait until http://127.0.0.1:8790/api/health succeeds
-docker compose exec genesis getent passwd workspace-janitor
-docker compose exec genesis getent passwd genesis
-curl -s http://127.0.0.1:8790/api/agents
-```
-
-After a clean volume the janitor YAML includes `user: workspace-janitor`,
-launch creates that OS user, and `/api/agents` reports `user:
-workspace-janitor` for that agent. The designer still omits `user` and still
-runs as the shared listener UID.
-
-`sh scripts/wsl-docker-smoke.sh` without `--reset-volumes` keeps the named
-volumes. If the volume janitor lacks `user:`, that script fails closed and
-prints this persisted-volume diagnosis instead of treating shared-UID output
-as a dedicated-user pass.
+A volume from before dedicated `user:` shipped can still hold a shared-UID
+janitor. The entrypoint will not overwrite it. The designer can appear
+beside that janitor because it was a missing filename. Shared listener UID,
+files owned by `genesis`, and matching active and draft digests mean the
+cache equals the files on the volume. They do not mean the volume matches
+the image defaults, and they are not a dedicated-user pass. How to read
+that state is in [troubleshooting.md](troubleshooting.md).

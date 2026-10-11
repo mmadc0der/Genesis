@@ -1,0 +1,13 @@
+---
+description: Put temporal and scratch files in gitignored tmp/
+alwaysApply: true
+---
+
+# Scratch files
+
+Temporal and scratch files go in `tmp/` at the repo root. That directory is gitignored.
+
+```sh
+mkdir -p tmp
+# tmp/notes.txt, tmp/repro.sh, and similar
+```
